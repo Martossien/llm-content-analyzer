@@ -1,0 +1,61 @@
+# Configuration Brique 2 Content Analyzer V2.3
+project:
+  name: "llm-content-analyzer"
+  version: "2.3.0"
+  stack_philosophy: "minimal_dependencies_maximum_efficiency"
+
+api_config:
+  url: "http://localhost:8080"
+  token: "sk-d88e3244ae2e4b64a5256c6f4946155a"
+  max_tokens: 32000
+  timeout_seconds: 300
+  batch_size: 100
+
+# Configuration tenacity retry
+retry_config:
+  max_attempts: 3
+  wait_strategy: "exponential"
+  wait_min: 4
+  wait_max: 10
+  retry_on: ["requests.RequestException", "requests.Timeout"]
+
+# Configuration circuitbreaker  
+circuit_config:
+  failure_threshold: 5
+  recovery_timeout: 30
+  expected_exception: "requests.RequestException"
+
+modules:
+  csv_parser:
+    library: "pandas"
+    chunk_size: 10000
+    validation_strict: true
+    encoding: "utf-8"
+    
+  cache_manager:
+    backend: "sqlite3_custom"
+    max_memory_mb: 512
+    ttl_hours: 168  # 7 jours
+    compression: false
+    
+  file_filter:
+    backend: "python_native"
+    priority_scoring: true
+    
+  api_client:
+    backend: "requests_tenacity_circuitbreaker"
+    connection_pool: false
+    
+  db_manager:
+    backend: "sqlite3_pure"
+    wal_mode: true
+    pragma_optimizations: true
+    
+  prompt_manager:
+    backend: "jinja2_yaml"
+    template_caching: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/content_analyzer.log"
