@@ -9,7 +9,7 @@ CONFIG = (
     Path(__file__).resolve().parents[2]
     / "content_analyzer"
     / "config"
-    / "prompts_config.yaml"
+    / "analyzer_config.yaml"
 )
 
 

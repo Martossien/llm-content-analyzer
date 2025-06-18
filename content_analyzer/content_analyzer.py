@@ -47,16 +47,13 @@ class ContentAnalyzer:
         with open(self.config_path, "r", encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
-        exclusions = Path(__file__).resolve().parent / "config" / "exclusions_config.yaml"
-        prompts = Path(__file__).resolve().parent / "config" / "prompts_config.yaml"
-
         cache_ttl = self.config.get("modules", {}).get("cache_manager", {}).get("ttl_hours", 168)
         self.cache_manager = CacheManager(Path("cache_prompts.db"), ttl_hours=cache_ttl)
         self.csv_parser = CSVParser(self.config_path)
-        self.file_filter = FileFilter(exclusions)
+        self.file_filter = FileFilter(self.config_path)
         self.api_client = APIClient(self.config)
         self.db_manager = DBManager(Path(":memory:"))
-        self.prompt_manager = PromptManager(prompts)
+        self.prompt_manager = PromptManager(self.config_path)
 
         self.enable_cache = False
         self.max_files = 1000

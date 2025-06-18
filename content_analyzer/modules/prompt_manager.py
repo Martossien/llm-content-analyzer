@@ -9,9 +9,10 @@ import yaml
 class PromptManager:
     """Gestionnaire de templates Jinja2 pour la génération de prompts."""
 
-    def __init__(self, prompts_config_path: Path) -> None:
-        with open(prompts_config_path, "r", encoding="utf-8") as f:
-            self.cfg = yaml.safe_load(f)
+    def __init__(self, config_path: Path) -> None:
+        with open(config_path, "r", encoding="utf-8") as f:
+            full_cfg = yaml.safe_load(f)
+        self.cfg = full_cfg
         self.env = jinja2.Environment(autoescape=False)
 
     def build_analysis_prompt(

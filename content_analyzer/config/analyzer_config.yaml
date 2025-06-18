@@ -55,6 +55,77 @@ modules:
     backend: "jinja2_yaml"
     template_caching: true
 
+# Regles d'exclusion et scoring
+exclusions:
+  extensions:
+    blocked: [".tmp", ".log", ".bak", ".cache"]
+    low_priority: [".txt", ".ini", ".cfg"]
+    high_priority: [".pdf", ".docx", ".doc", ".xlsx"]
+
+  file_size:
+    min_bytes: 100
+    max_bytes: 104857600
+
+  file_attributes:
+    skip_system: true
+    skip_hidden: false
+
+  paths:
+    excluded_patterns:
+      - "*/temp/*"
+      - "*/cache/*"
+      - "*/.git/*"
+    priority_patterns:
+      - "*/documents/*"
+      - "*/contracts/*"
+
+scoring:
+  size_weight: 30
+  type_weight: 40
+  age_weight: 20
+  special_weight: 10
+
+# Templates prompts
+templates:
+  comprehensive:
+    system_prompt: |
+      Tu es un expert en analyse de documents pour entreprise.
+      Analyse ce fichier et retourne UNIQUEMENT un JSON structuré.
+    user_template: |
+      Fichier: {{ file_name }}
+      Taille: {{ file_size_readable }}
+      Propriétaire: {{ owner }}
+      Dernière modification: {{ last_modified }}
+
+      Analyse selon ces domaines:
+      1. Sécurité: Classification C0-C3
+      2. RGPD: Données personnelles détectées
+      3. Finance: Documents financiers
+      4. Légal: Contrats et documents juridiques
+
+      Format de réponse OBLIGATOIRE:
+      {
+        "security": {"classification": "C0|C1|C2|C3", "confidence": 85},
+        "rgpd": {"risk_level": "none|low|medium|high", "data_types": []},
+        "finance": {"document_type": "none|invoice|contract|budget", "amounts": []},
+        "legal": {"contract_type": "none|employment|lease|sale", "parties": []}
+      }
+
+  security_focused:
+    system_prompt: |
+      Tu es un expert cybersécurité. Classifie ce document selon le niveau de confidentialité.
+    user_template: |
+      Document: {{ file_name }}
+      Métadonnées: {{ metadata_summary }}
+
+      Classification requise:
+      - C0 (Public): Information sans restriction
+      - C1 (Interne): Usage interne entreprise
+      - C2 (Confidentiel): Accès restreint autorisé 
+      - C3 (Secret): Accès très restreint
+
+      Réponse JSON: {"classification": "C0|C1|C2|C3", "justification": "..."}
+
 logging:
   level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
