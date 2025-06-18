@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 import tkinter as tk
@@ -18,6 +19,40 @@ from .utils.service_monitor import ServiceMonitor
 from .utils.log_viewer import LogViewer
 
 
+class Tooltip:
+    """Simple tooltip for Tkinter widgets."""
+
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.tipwindow: tk.Toplevel | None = None
+        widget.bind("<Enter>", self.show)
+        widget.bind("<Leave>", self.hide)
+
+    def show(self, _event=None) -> None:
+        if self.tipwindow or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 10
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw,
+            text=self.text,
+            background="#ffffe0",
+            relief="solid",
+            borderwidth=1,
+            font=("Consolas", 9),
+        )
+        label.pack(ipadx=1)
+
+    def hide(self, _event=None) -> None:
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
 class MainWindow:
     """Main GUI window for the Content Analyzer application."""
 
@@ -27,8 +62,19 @@ class MainWindow:
         self.root.minsize(1200, 800)
         self._center_window(1200, 800)
 
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        self.gui_logger = logging.getLogger("gui")
+        self.gui_logger.setLevel(logging.INFO)
+        handler = logging.FileHandler(log_dir / "gui.log")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        self.gui_logger.addHandler(handler)
+
         self.config_path = Path("content_analyzer/config/analyzer_config.yaml")
         self.csv_file_path: str | None = None
+        self.file_tooltip: Tooltip | None = None
 
         self.service_monitor = ServiceMonitor(self.config_path)
         self.log_viewer = LogViewer(Path("logs/content_analyzer.log"))
@@ -324,14 +370,19 @@ class MainWindow:
                         "Invalid CSV Format",
                         "CSV validation failed:\n" + "\n".join(errors),
                     )
+                    self.file_path_label.config(background="red")
+                    self.csv_file_path = None
                     return
                 self.csv_file_path = file_path
                 self.file_path_label.config(text=file_path, background="lightgreen")
                 file_size = Path(file_path).stat().st_size
                 row_count = len(df)
-                self.show_csv_preview(
-                    f"Loaded: {row_count} rows, {file_size/1024:.1f}KB"
-                )
+                info = f"Loaded: {row_count} rows, {file_size/1024:.1f}KB"
+                self.show_csv_preview(info)
+                if self.file_tooltip:
+                    self.file_tooltip.hide()
+                self.file_tooltip = Tooltip(self.file_path_label, info)
+                self.log_action(f"CSV file selected: {file_path}")
             except Exception as e:  # pragma: no cover - I/O errors
                 messagebox.showerror("File Error", f"Cannot read CSV file:\n{str(e)}")
 
@@ -354,6 +405,7 @@ class MainWindow:
             self.max_context_entry.insert(0, str(api_config.get("max_tokens", 100000)))
             self.workers_entry.delete(0, tk.END)
             self.workers_entry.insert(0, str(api_config.get("batch_size", 3)))
+            self.status_config_label.config(foreground="black")
         except Exception as e:  # pragma: no cover - file errors
             messagebox.showerror(
                 "Config Error", f"Cannot load configuration:\n{str(e)}"
@@ -426,8 +478,10 @@ class MainWindow:
                 "Configuration Saved", "API configuration has been saved successfully!"
             )
             self.status_config_label.config(
-                text=f"Config: {self.config_path.name} (saved)"
+                text=f"Config: {self.config_path.name} (saved)",
+                foreground="green"
             )
+            self.log_action("API configuration saved")
         except Exception as e:  # pragma: no cover - file errors
             messagebox.showerror("Save Error", f"Cannot save configuration:\n{str(e)}")
 
@@ -729,6 +783,14 @@ class MainWindow:
         if self.auto_scroll_var.get():
             self.logs_text.see(tk.END)
 
+        level_map = {
+            "INFO": logging.INFO,
+            "WARN": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "DEBUG": logging.DEBUG,
+        }
+        self.gui_logger.log(level_map.get(level, logging.INFO), message)
+
     # ------------------------------------------------------------------
     # SERVICE STATUS AND PROGRESS
     # ------------------------------------------------------------------
@@ -739,12 +801,18 @@ class MainWindow:
             text="● API" if not api_status else "● API Connected",
         )
         cache_stats = self.service_monitor.check_cache_status()
+        cache_hit = cache_stats.get("hit_rate", 0.0)
         self.cache_status_label.config(
-            text=f"● Cache", foreground="green" if cache_stats else "red"
+            text=f"● Cache {cache_hit:.0f}%",
+            foreground="green" if cache_stats else "red",
         )
         db_status = self.service_monitor.check_database_status()
+        if db_status["accessible"]:
+            db_text = f"● DB {db_status['size_mb']:.1f}MB"
+        else:
+            db_text = "● DB"
         self.db_status_label.config(
-            text="● DB" if not db_status["accessible"] else "● DB Connected",
+            text=db_text,
             foreground="green" if db_status["accessible"] else "red",
         )
         self.root.after(5000, self.update_service_status)
@@ -956,15 +1024,18 @@ class MainWindow:
 
     # Placeholder methods for actions not detailed
     def view_results(self) -> None:
+        self.log_action("View results opened", "INFO")
         messagebox.showinfo("Results", "View results not implemented")
 
     def export_results(self) -> None:
+        self.log_action("Export results", "INFO")
         messagebox.showinfo("Export", "Export not implemented")
 
     # ------------------------------------------------------------------
     # MAINTENANCE
     # ------------------------------------------------------------------
     def show_maintenance_dialog(self) -> None:
+        self.log_action("Maintenance dialog opened", "INFO")
         maintenance_window = tk.Toplevel(self.root)
         maintenance_window.title("System Maintenance")
         maintenance_window.geometry("500x400")
