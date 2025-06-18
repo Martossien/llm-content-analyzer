@@ -1,0 +1,28 @@
+exclusions:
+  extensions:
+    blocked: [".tmp", ".log", ".bak", ".cache"]
+    low_priority: [".txt", ".ini", ".cfg"]
+    high_priority: [".pdf", ".docx", ".doc", ".xlsx"]
+
+  file_size:
+    min_bytes: 100
+    max_bytes: 104857600
+
+  file_attributes:
+    skip_system: true
+    skip_hidden: false
+
+  paths:
+    excluded_patterns:
+      - "*/temp/*"
+      - "*/cache/*"
+      - "*/.git/*"
+    priority_patterns:
+      - "*/documents/*"
+      - "*/contracts/*"
+
+scoring:
+  size_weight: 30
+  type_weight: 40
+  age_weight: 20
+  special_weight: 10
