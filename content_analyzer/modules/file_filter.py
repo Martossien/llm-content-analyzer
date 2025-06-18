@@ -5,9 +5,11 @@ from typing import Any, Dict, List, Tuple
 
 
 class FileFilter:
-    def __init__(self, exclusions_config_path: Path) -> None:
-        with open(exclusions_config_path, "r", encoding="utf-8") as f:
-            self.cfg = yaml.safe_load(f)
+    def __init__(self, config_path: Path) -> None:
+        """Charge la configuration unifiée YAML."""
+        with open(config_path, "r", encoding="utf-8") as f:
+            full_cfg = yaml.safe_load(f)
+        self.cfg = full_cfg
 
     def should_process_file(self, file_row: Dict[str, Any]) -> Tuple[bool, str]:
         ext = str(file_row.get("extension", "")).lower()

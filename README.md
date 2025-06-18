@@ -27,9 +27,7 @@ content_analyzer/
 │ ├── db_manager.py # Gestionnaire base SQLite
 │ └── prompt_manager.py # Templates prompts configurables
 ├── config/
-│ ├── analyzer_config.yaml # Configuration principale
-│ ├── exclusions_config.yaml # Règles d'exclusion
-│ └── prompts_config.yaml # Templates prompts
+│ └── analyzer_config.yaml # Configuration centrale (API, modules, exclusions, templates)
 └── tests/ # Tests unitaires par module
 
 ## Installation
