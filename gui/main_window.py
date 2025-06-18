@@ -8,11 +8,15 @@ from tkinter import filedialog, messagebox, ttk
 
 import pandas as pd
 import yaml
+import sqlite3
+import json
+import csv
 
 from content_analyzer.modules.api_client import APIClient
 from content_analyzer.modules.csv_parser import CSVParser
 from content_analyzer.modules.db_manager import DBManager
 from content_analyzer.modules.prompt_manager import PromptManager
+from content_analyzer.modules.cache_manager import CacheManager
 
 from .utils.analysis_thread import AnalysisThread
 from .utils.service_monitor import ServiceMonitor
@@ -1022,14 +1026,747 @@ class MainWindow:
         self.log_action(f"Analysis error: {error}", "ERROR")
         self.status_app_label.config(text="Error")
 
-    # Placeholder methods for actions not detailed
+    # ------------------------------------------------------------------
+    # RESULTS VIEWER AND EXPORTS
+    # ------------------------------------------------------------------
     def view_results(self) -> None:
-        self.log_action("View results opened", "INFO")
-        messagebox.showinfo("Results", "View results not implemented")
+        """Ouvre une fenêtre pour visualiser les résultats d'analyse."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                messagebox.showwarning(
+                    "No Results",
+                    "No analysis results database found.\nPlease run an analysis first.",
+                )
+                self.log_action("Results viewer: no database found", "WARN")
+                return
+
+            results_window = tk.Toplevel(self.root)
+            results_window.title("Analysis Results Viewer")
+            results_window.geometry("1000x700")
+            results_window.transient(self.root)
+
+            controls_frame = ttk.Frame(results_window)
+            controls_frame.pack(fill="x", padx=10, pady=5)
+
+            ttk.Label(controls_frame, text="Filter by Status:").pack(
+                side="left", padx=5
+            )
+            status_filter = ttk.Combobox(
+                controls_frame,
+                values=["All", "completed", "error", "pending"],
+                state="readonly",
+            )
+            status_filter.set("All")
+            status_filter.pack(side="left", padx=5)
+
+            ttk.Label(controls_frame, text="Filter by Classification:").pack(
+                side="left", padx=10
+            )
+            classification_filter = ttk.Combobox(
+                controls_frame,
+                values=["All", "C0", "C1", "C2", "C3"],
+                state="readonly",
+            )
+            classification_filter.set("All")
+            classification_filter.pack(side="left", padx=5)
+
+            refresh_btn = ttk.Button(
+                controls_frame,
+                text="Refresh",
+                command=lambda: self.refresh_results_table(
+                    tree, status_filter.get(), classification_filter.get()
+                ),
+            )
+            refresh_btn.pack(side="right", padx=5)
+
+            export_btn = ttk.Button(
+                controls_frame,
+                text="Export to CSV",
+                command=lambda: self.export_results_to_csv(tree),
+            )
+            export_btn.pack(side="right", padx=5)
+
+            tree_frame = ttk.Frame(results_window)
+            tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+            columns = (
+                "ID",
+                "File Path",
+                "Status",
+                "Security",
+                "RGPD",
+                "Finance",
+                "Legal",
+                "Confidence",
+                "Processing Time",
+            )
+            tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
+
+            tree.heading("ID", text="ID")
+            tree.heading("File Path", text="File Path")
+            tree.heading("Status", text="Status")
+            tree.heading("Security", text="Security")
+            tree.heading("RGPD", text="RGPD")
+            tree.heading("Finance", text="Finance")
+            tree.heading("Legal", text="Legal")
+            tree.heading("Confidence", text="Confidence")
+            tree.heading("Processing Time", text="Proc. Time (ms)")
+
+            tree.column("ID", width=50)
+            tree.column("File Path", width=300)
+            tree.column("Status", width=80)
+            tree.column("Security", width=80)
+            tree.column("RGPD", width=80)
+            tree.column("Finance", width=80)
+            tree.column("Legal", width=80)
+            tree.column("Confidence", width=80)
+            tree.column("Processing Time", width=100)
+
+            v_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            h_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+
+            tree.pack(side="left", fill="both", expand=True)
+            v_scrollbar.pack(side="right", fill="y")
+            h_scrollbar.pack(side="bottom", fill="x")
+
+            self.refresh_results_table(tree, "All", "All")
+
+            status_filter.bind(
+                "<<ComboboxSelected>>",
+                lambda e: self.refresh_results_table(
+                    tree, status_filter.get(), classification_filter.get()
+                ),
+            )
+            classification_filter.bind(
+                "<<ComboboxSelected>>",
+                lambda e: self.refresh_results_table(
+                    tree, status_filter.get(), classification_filter.get()
+                ),
+            )
+
+            tree.bind("<Double-1>", lambda e: self.show_file_details(tree))
+
+            self.log_action("Results viewer opened", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Results Error", f"Failed to open results viewer:\n{str(e)}")
+            self.log_action(f"Results viewer failed: {str(e)}", "ERROR")
+
+    def refresh_results_table(self, tree, status_filter, classification_filter):
+        """Rafraîchit le tableau des résultats avec filtres."""
+        try:
+            for item in tree.get_children():
+                tree.delete(item)
+
+            db_path = Path("analysis_results.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = """
+        SELECT f.id, f.path, f.status,
+               r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
+               r.confidence_global, r.processing_time_ms
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE 1=1
+        """
+            params = []
+
+            if status_filter != "All":
+                query += " AND f.status = ?"
+                params.append(status_filter)
+
+            if classification_filter != "All":
+                query += " AND r.security_analysis LIKE ?"
+                params.append(f'%"classification": "{classification_filter}"%')
+
+            query += " ORDER BY f.id DESC LIMIT 1000"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for row in rows:
+                file_id, file_path, status, security, rgpd, finance, legal, confidence, proc_time = row
+
+                try:
+                    security_data = json.loads(security) if security else {}
+                    security_class = security_data.get("classification", "N/A")
+                except Exception:
+                    security_class = "N/A"
+
+                try:
+                    rgpd_data = json.loads(rgpd) if rgpd else {}
+                    rgpd_risk = rgpd_data.get("risk_level", "N/A")
+                except Exception:
+                    rgpd_risk = "N/A"
+
+                try:
+                    finance_data = json.loads(finance) if finance else {}
+                    finance_type = finance_data.get("document_type", "N/A")
+                except Exception:
+                    finance_type = "N/A"
+
+                try:
+                    legal_data = json.loads(legal) if legal else {}
+                    legal_type = legal_data.get("contract_type", "N/A")
+                except Exception:
+                    legal_type = "N/A"
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        file_id,
+                        file_path[-50:] if len(file_path) > 50 else file_path,
+                        status,
+                        security_class,
+                        rgpd_risk,
+                        finance_type,
+                        legal_type,
+                        confidence or 0,
+                        proc_time or 0,
+                    ),
+                )
+
+            self.log_action(f"Results table refreshed: {len(rows)} entries", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Refresh Error", f"Failed to refresh results:\n{str(e)}")
+            self.log_action(f"Results refresh failed: {str(e)}", "ERROR")
+
+    def show_file_details(self, tree):
+        """Affiche les détails complets d'un fichier sélectionné."""
+        selection = tree.selection()
+        if not selection:
+            return
+
+        item = tree.item(selection[0])
+        file_id = item["values"][0]
+
+        try:
+            db_path = Path("analysis_results.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+        SELECT f.path, f.file_size, f.owner, f.last_modified, f.status,
+               r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
+               r.confidence_global, r.processing_time_ms, r.created_at
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE f.id = ?
+        """,
+                (file_id,),
+            )
+
+            row = cursor.fetchone()
+            conn.close()
+
+            if not row:
+                messagebox.showwarning("No Data", "No details found for this file")
+                return
+
+            details_window = tk.Toplevel(self.root)
+            details_window.title(f"File Details - ID {file_id}")
+            details_window.geometry("800x600")
+            details_window.transient(self.root)
+
+            text_widget = tk.Text(details_window, wrap="word", font=("Consolas", 10))
+            text_widget.pack(fill="both", expand=True, padx=10, pady=10)
+
+            path, size, owner, modified, status, security, rgpd, finance, legal, confidence, proc_time, created = row
+
+            details_content = f"""FILE ANALYSIS DETAILS
+====================
+
+File Information:
+• Path: {path}
+• Size: {size:,} bytes ({size/1024:.1f} KB)
+• Owner: {owner or 'N/A'}
+• Last Modified: {modified or 'N/A'}
+• Analysis Status: {status}
+• Analysis Date: {created or 'N/A'}
+• Processing Time: {proc_time or 0} ms
+• Confidence Score: {confidence or 0}%
+
+SECURITY ANALYSIS:
+{json.dumps(json.loads(security) if security else {}, indent=2)}
+
+RGPD ANALYSIS:
+{json.dumps(json.loads(rgpd) if rgpd else {}, indent=2)}
+
+FINANCE ANALYSIS:
+{json.dumps(json.loads(finance) if finance else {}, indent=2)}
+
+LEGAL ANALYSIS:
+{json.dumps(json.loads(legal) if legal else {}, indent=2)}
+"""
+
+            text_widget.insert(1.0, details_content)
+            text_widget.config(state="disabled")
+
+            ttk.Button(details_window, text="Close", command=details_window.destroy).pack(
+                pady=5
+            )
+
+            self.log_action(f"File details viewed: ID {file_id}", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Details Error", f"Failed to show file details:\n{str(e)}")
+            self.log_action(f"File details failed: {str(e)}", "ERROR")
 
     def export_results(self) -> None:
-        self.log_action("Export results", "INFO")
-        messagebox.showinfo("Export", "Export not implemented")
+        """Lance la fenêtre d'export des résultats en différents formats."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                messagebox.showwarning("No Results", "No analysis results found to export")
+                return
+
+            export_window = tk.Toplevel(self.root)
+            export_window.title("Export Analysis Results")
+            export_window.geometry("500x400")
+            export_window.transient(self.root)
+            export_window.grab_set()
+
+            format_frame = ttk.LabelFrame(export_window, text="Export Format")
+            format_frame.pack(fill="x", padx=10, pady=10)
+
+            self.export_format = tk.StringVar(value="csv")
+            ttk.Radiobutton(
+                format_frame,
+                text="CSV (Excel compatible)",
+                variable=self.export_format,
+                value="csv",
+            ).pack(anchor="w", padx=5, pady=2)
+            ttk.Radiobutton(
+                format_frame,
+                text="JSON (structured data)",
+                variable=self.export_format,
+                value="json",
+            ).pack(anchor="w", padx=5, pady=2)
+            ttk.Radiobutton(
+                format_frame,
+                text="Excel (.xlsx)",
+                variable=self.export_format,
+                value="excel",
+            ).pack(anchor="w", padx=5, pady=2)
+
+            filter_frame = ttk.LabelFrame(export_window, text="Filters")
+            filter_frame.pack(fill="x", padx=10, pady=10)
+
+            self.export_status_filter = tk.StringVar(value="All")
+            ttk.Label(filter_frame, text="Status:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+            status_combo = ttk.Combobox(
+                filter_frame,
+                textvariable=self.export_status_filter,
+                values=["All", "completed", "error", "pending"],
+                state="readonly",
+            )
+            status_combo.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+
+            self.export_classification_filter = tk.StringVar(value="All")
+            ttk.Label(filter_frame, text="Security Classification:").grid(
+                row=1, column=0, sticky="w", padx=5, pady=2
+            )
+            classif_combo = ttk.Combobox(
+                filter_frame,
+                textvariable=self.export_classification_filter,
+                values=["All", "C0", "C1", "C2", "C3"],
+                state="readonly",
+            )
+            classif_combo.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+
+            filter_frame.columnconfigure(1, weight=1)
+
+            options_frame = ttk.LabelFrame(export_window, text="Options")
+            options_frame.pack(fill="x", padx=10, pady=10)
+
+            self.include_raw_json = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                options_frame,
+                text="Include raw JSON analyses",
+                variable=self.include_raw_json,
+            ).pack(anchor="w", padx=5, pady=2)
+
+            self.include_statistics = tk.BooleanVar(value=True)
+            ttk.Checkbutton(
+                options_frame,
+                text="Include summary statistics",
+                variable=self.include_statistics,
+            ).pack(anchor="w", padx=5, pady=2)
+
+            buttons_frame = ttk.Frame(export_window)
+            buttons_frame.pack(fill="x", padx=10, pady=10)
+
+            ttk.Button(
+                buttons_frame,
+                text="Export",
+                command=lambda: self.perform_export(export_window),
+            ).pack(side="right", padx=5)
+            ttk.Button(buttons_frame, text="Cancel", command=export_window.destroy).pack(
+                side="right", padx=5
+            )
+
+            self.log_action("Export dialog opened", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to open export dialog:\n{str(e)}")
+            self.log_action(f"Export dialog failed: {str(e)}", "ERROR")
+
+    def perform_export(self, export_window):
+        """Exécute l'export selon les paramètres sélectionnés."""
+        try:
+            format_ext = {"csv": ".csv", "json": ".json", "excel": ".xlsx"}
+            file_ext = format_ext[self.export_format.get()]
+
+            export_path = filedialog.asksaveasfilename(
+                title="Export Results",
+                defaultextension=file_ext,
+                filetypes=[
+                    (f"{self.export_format.get().upper()} files", f"*{file_ext}"),
+                    ("All files", "*.*"),
+                ],
+                parent=export_window,
+            )
+
+            if not export_path:
+                return
+
+            db_path = Path("analysis_results.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = """
+        SELECT f.id, f.path, f.file_size, f.owner, f.last_modified, f.status,
+               r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
+               r.confidence_global, r.processing_time_ms, r.created_at
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE 1=1
+        """
+            params = []
+
+            if self.export_status_filter.get() != "All":
+                query += " AND f.status = ?"
+                params.append(self.export_status_filter.get())
+
+            if self.export_classification_filter.get() != "All":
+                query += " AND r.security_analysis LIKE ?"
+                params.append(
+                    f'%"classification": "{self.export_classification_filter.get()}"%'
+                )
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            conn.close()
+
+            if self.export_format.get() == "csv":
+                self.export_to_csv(rows, export_path)
+            elif self.export_format.get() == "json":
+                self.export_to_json(rows, export_path)
+            elif self.export_format.get() == "excel":
+                self.export_to_excel(rows, export_path)
+
+            export_window.destroy()
+            messagebox.showinfo(
+                "Export Complete",
+                f"Results exported successfully to:\n{Path(export_path).name}",
+            )
+            self.log_action(
+                f"Results exported to {self.export_format.get().upper()}: {Path(export_path).name} ({len(rows)} records)",
+                "INFO",
+            )
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export results:\n{str(e)}")
+            self.log_action(f"Export failed: {str(e)}", "ERROR")
+
+    def export_to_csv(self, rows, export_path):
+        """Exporte les résultats au format CSV."""
+        with open(export_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            headers = [
+                "ID",
+                "File Path",
+                "File Size",
+                "Owner",
+                "Last Modified",
+                "Status",
+                "Security Classification",
+                "RGPD Risk",
+                "Finance Type",
+                "Legal Type",
+                "Confidence",
+                "Processing Time (ms)",
+                "Analysis Date",
+            ]
+
+            if self.include_raw_json.get():
+                headers.extend([
+                    "Security JSON",
+                    "RGPD JSON",
+                    "Finance JSON",
+                    "Legal JSON",
+                ])
+
+            writer.writerow(headers)
+
+            for row in rows:
+                (
+                    file_id,
+                    path,
+                    size,
+                    owner,
+                    modified,
+                    status,
+                    security,
+                    rgpd,
+                    finance,
+                    legal,
+                    confidence,
+                    proc_time,
+                    created,
+                ) = row
+
+                try:
+                    security_data = json.loads(security) if security else {}
+                    security_class = security_data.get("classification", "N/A")
+                except Exception:
+                    security_class = "N/A"
+
+                try:
+                    rgpd_data = json.loads(rgpd) if rgpd else {}
+                    rgpd_risk = rgpd_data.get("risk_level", "N/A")
+                except Exception:
+                    rgpd_risk = "N/A"
+
+                try:
+                    finance_data = json.loads(finance) if finance else {}
+                    finance_type = finance_data.get("document_type", "N/A")
+                except Exception:
+                    finance_type = "N/A"
+
+                try:
+                    legal_data = json.loads(legal) if legal else {}
+                    legal_type = legal_data.get("contract_type", "N/A")
+                except Exception:
+                    legal_type = "N/A"
+
+                data_row = [
+                    file_id,
+                    path,
+                    size,
+                    owner,
+                    modified,
+                    status,
+                    security_class,
+                    rgpd_risk,
+                    finance_type,
+                    legal_type,
+                    confidence,
+                    proc_time,
+                    created,
+                ]
+
+                if self.include_raw_json.get():
+                    data_row.extend([security, rgpd, finance, legal])
+
+                writer.writerow(data_row)
+
+    def export_to_json(self, rows, export_path):
+        """Exporte les résultats au format JSON."""
+        export_data = {
+            "export_info": {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_records": len(rows),
+                "filters_applied": {
+                    "status": self.export_status_filter.get(),
+                    "classification": self.export_classification_filter.get(),
+                },
+            },
+            "results": [],
+        }
+
+        for row in rows:
+            (
+                file_id,
+                path,
+                size,
+                owner,
+                modified,
+                status,
+                security,
+                rgpd,
+                finance,
+                legal,
+                confidence,
+                proc_time,
+                created,
+            ) = row
+
+            file_data = {
+                "id": file_id,
+                "file_info": {
+                    "path": path,
+                    "size_bytes": size,
+                    "owner": owner,
+                    "last_modified": modified,
+                },
+                "analysis": {
+                    "status": status,
+                    "confidence": confidence,
+                    "processing_time_ms": proc_time,
+                    "created_at": created,
+                    "security": json.loads(security) if security else None,
+                    "rgpd": json.loads(rgpd) if rgpd else None,
+                    "finance": json.loads(finance) if finance else None,
+                    "legal": json.loads(legal) if legal else None,
+                },
+            }
+
+            export_data["results"].append(file_data)
+
+        with open(export_path, "w", encoding="utf-8") as jsonfile:
+            json.dump(export_data, jsonfile, indent=2, ensure_ascii=False)
+
+    def export_to_excel(self, rows, export_path):
+        """Exporte les résultats au format Excel avec plusieurs feuilles."""
+        try:
+            import pandas as pd
+
+            main_data = []
+            for row in rows:
+                (
+                    file_id,
+                    path,
+                    size,
+                    owner,
+                    modified,
+                    status,
+                    security,
+                    rgpd,
+                    finance,
+                    legal,
+                    confidence,
+                    proc_time,
+                    created,
+                ) = row
+
+                try:
+                    security_data = json.loads(security) if security else {}
+                    rgpd_data = json.loads(rgpd) if rgpd else {}
+                    finance_data = json.loads(finance) if finance else {}
+                    legal_data = json.loads(legal) if legal else {}
+                except Exception:
+                    security_data = rgpd_data = finance_data = legal_data = {}
+
+                main_data.append(
+                    {
+                        "ID": file_id,
+                        "File Path": path,
+                        "File Size": size,
+                        "Owner": owner,
+                        "Last Modified": modified,
+                        "Status": status,
+                        "Security Classification": security_data.get("classification", "N/A"),
+                        "RGPD Risk": rgpd_data.get("risk_level", "N/A"),
+                        "Finance Type": finance_data.get("document_type", "N/A"),
+                        "Legal Type": legal_data.get("contract_type", "N/A"),
+                        "Confidence": confidence,
+                        "Processing Time (ms)": proc_time,
+                        "Analysis Date": created,
+                    }
+                )
+
+            with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+                df_main = pd.DataFrame(main_data)
+                df_main.to_excel(writer, sheet_name="Analysis Results", index=False)
+
+                if self.include_statistics.get():
+                    stats_data = {
+                        "Metric": [
+                            "Total Files",
+                            "Completed Analyses",
+                            "Failed Analyses",
+                            "Average Confidence",
+                            "C0 Classifications",
+                            "C1 Classifications",
+                            "C2 Classifications",
+                            "C3 Classifications",
+                        ],
+                        "Value": [
+                            len(rows),
+                            sum(1 for r in rows if r[5] == "completed"),
+                            sum(1 for r in rows if r[5] == "error"),
+                            sum(r[10] for r in rows if r[10])
+                            / len([r for r in rows if r[10]])
+                            if any(r[10] for r in rows)
+                            else 0,
+                            sum(1 for r in rows if r[6] and "C0" in str(r[6])),
+                            sum(1 for r in rows if r[6] and "C1" in str(r[6])),
+                            sum(1 for r in rows if r[6] and "C2" in str(r[6])),
+                            sum(1 for r in rows if r[6] and "C3" in str(r[6])),
+                        ],
+                    }
+                    df_stats = pd.DataFrame(stats_data)
+                    df_stats.to_excel(writer, sheet_name="Statistics", index=False)
+
+        except ImportError:
+            messagebox.showerror(
+                "Excel Export Error",
+                "Excel export requires pandas library.\nPlease use CSV format instead.",
+            )
+            return
+
+    def export_results_to_csv(self, tree) -> None:
+        """Export the currently displayed results table to a CSV file."""
+        try:
+            export_path = filedialog.asksaveasfilename(
+                title="Export Table to CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                parent=self.root,
+            )
+            if not export_path:
+                return
+
+            with open(export_path, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(
+                    [
+                        "ID",
+                        "File Path",
+                        "Status",
+                        "Security",
+                        "RGPD",
+                        "Finance",
+                        "Legal",
+                        "Confidence",
+                        "Processing Time",
+                    ]
+                )
+
+                for item in tree.get_children():
+                    writer.writerow(tree.item(item)["values"])
+
+            messagebox.showinfo(
+                "Export Complete",
+                f"Table exported successfully to: {Path(export_path).name}",
+            )
+            self.log_action(
+                f"Table exported to CSV: {Path(export_path).name}",
+                "INFO",
+            )
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export table:\n{str(e)}")
+            self.log_action(f"Table export failed: {str(e)}", "ERROR")
 
     # ------------------------------------------------------------------
     # MAINTENANCE
@@ -1120,36 +1857,302 @@ class MainWindow:
             )
             self.log_action(f"Database reset failed: {str(e)}", "ERROR")
 
-    # The following maintenance helper methods are placeholders for completeness
     def compact_database(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo(
-            "Compact DB", "Compaction not implemented", parent=parent_window
-        )
+        """Compacte la base SQLite avec VACUUM pour optimiser l'espace."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                messagebox.showwarning(
+                    "No Database", "No database file found to compact", parent=parent_window
+                )
+                return
+
+            size_before = db_path.stat().st_size / (1024 * 1024)
+            conn = sqlite3.connect(db_path)
+            conn.execute("VACUUM")
+            conn.close()
+            size_after = db_path.stat().st_size / (1024 * 1024)
+            saved_mb = size_before - size_after
+
+            messagebox.showinfo(
+                "Database Compacted",
+                f"Database compacted successfully!\n"
+                f"Size before: {size_before:.2f}MB\n"
+                f"Size after: {size_after:.2f}MB\n"
+                f"Space saved: {saved_mb:.2f}MB",
+                parent=parent_window,
+            )
+            self.log_action(f"Database compacted: saved {saved_mb:.2f}MB", "INFO")
+
+        except Exception as e:
+            messagebox.showerror(
+                "Compaction Error", f"Failed to compact database:\n{str(e)}", parent=parent_window
+            )
+            self.log_action(f"Database compaction failed: {str(e)}", "ERROR")
 
     def backup_database(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo("Backup DB", "Backup not implemented", parent=parent_window)
+        """Crée une sauvegarde timestampée de la base de données."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                messagebox.showwarning(
+                    "No Database", "No database file found to backup", parent=parent_window
+                )
+                return
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            backup_path = db_path.with_name(f"analysis_results_backup_{timestamp}.db")
+
+            import shutil
+
+            shutil.copy2(db_path, backup_path)
+            size_mb = backup_path.stat().st_size / (1024 * 1024)
+            messagebox.showinfo(
+                "Backup Created",
+                f"Database backed up successfully!\n"
+                f"Backup file: {backup_path.name}\n"
+                f"Size: {size_mb:.2f}MB",
+                parent=parent_window,
+            )
+            self.log_action(
+                f"Database backup created: {backup_path.name} ({size_mb:.2f}MB)",
+                "INFO",
+            )
+
+        except Exception as e:
+            messagebox.showerror(
+                "Backup Error", f"Failed to backup database:\n{str(e)}", parent=parent_window
+            )
+            self.log_action(f"Database backup failed: {str(e)}", "ERROR")
 
     def clear_cache(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo(
-            "Cache", "Clear cache not implemented", parent=parent_window
-        )
+        """Vide complètement le cache SQLite."""
+        try:
+            cache_db = Path("analysis_results_cache.db")
+            if not cache_db.exists():
+                messagebox.showinfo("No Cache", "No cache database found", parent=parent_window)
+                return
+
+            cache_manager = CacheManager(cache_db)
+            stats_before = cache_manager.get_stats()
+            entries_before = stats_before.get("total_entries", 0)
+            size_before = stats_before.get("cache_size_mb", 0)
+
+            cache_manager.cleanup_expired()
+            cache_db.unlink()
+
+            messagebox.showinfo(
+                "Cache Cleared",
+                f"Cache cleared successfully!\n"
+                f"Entries removed: {entries_before}\n"
+                f"Space freed: {size_before:.2f}MB",
+                parent=parent_window,
+            )
+            self.log_action(
+                f"Cache cleared: {entries_before} entries, {size_before:.2f}MB freed",
+                "INFO",
+            )
+
+        except Exception as e:
+            messagebox.showerror("Clear Error", f"Failed to clear cache:\n{str(e)}", parent=parent_window)
+            self.log_action(f"Cache clear failed: {str(e)}", "ERROR")
 
     def show_cache_stats(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo(
-            "Cache Stats", "Cache stats not implemented", parent=parent_window
-        )
+        """Affiche les statistiques détaillées du cache."""
+        try:
+            cache_db = Path("analysis_results_cache.db")
+            if not cache_db.exists():
+                messagebox.showinfo("No Cache", "No cache database found", parent=parent_window)
+                return
+
+            cache_manager = CacheManager(cache_db)
+            stats = cache_manager.get_stats()
+
+            stats_window = tk.Toplevel(parent_window)
+            stats_window.title("Cache Statistics")
+            stats_window.geometry("400x300")
+            stats_window.transient(parent_window)
+            stats_window.grab_set()
+
+            stats_text = tk.Text(stats_window, wrap="word", state="normal")
+            stats_text.pack(fill="both", expand=True, padx=10, pady=10)
+
+            stats_content = f"""Cache Statistics Report
+========================
+
+Total Entries: {stats.get('total_entries', 0):,}
+Hit Rate: {stats.get('hit_rate', 0):.2f}%
+Cache Size: {stats.get('cache_size_mb', 0):.2f} MB
+Oldest Entry: {stats.get('oldest_entry', 'N/A')}
+Cleanup Needed: {'Yes' if stats.get('cleanup_needed', False) else 'No'}
+
+Database Path: {cache_db}
+Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+            stats_text.insert(1.0, stats_content)
+            stats_text.config(state="disabled")
+
+            ttk.Button(stats_window, text="Close", command=stats_window.destroy).pack(pady=5)
+
+            self.log_action("Cache statistics viewed", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Stats Error", f"Failed to get cache stats:\n{str(e)}", parent=parent_window)
+            self.log_action(f"Cache stats failed: {str(e)}", "ERROR")
 
     def export_configuration(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo(
-            "Export Config", "Export config not implemented", parent=parent_window
-        )
+        """Exporte la configuration actuelle vers un fichier."""
+        try:
+            export_path = filedialog.asksaveasfilename(
+                title="Export Configuration",
+                defaultextension=".yaml",
+                filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")],
+                parent=parent_window,
+            )
+
+            if not export_path:
+                return
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            export_path = Path(export_path)
+            if not export_path.stem.endswith(timestamp):
+                export_path = export_path.with_name(f"{export_path.stem}_{timestamp}{export_path.suffix}")
+
+            import shutil
+
+            shutil.copy2(self.config_path, export_path)
+
+            messagebox.showinfo(
+                "Configuration Exported",
+                f"Configuration exported successfully!\nFile: {export_path.name}",
+                parent=parent_window,
+            )
+            self.log_action(f"Configuration exported to: {export_path.name}", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export configuration:\n{str(e)}", parent=parent_window)
+            self.log_action(f"Configuration export failed: {str(e)}", "ERROR")
 
     def import_configuration(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo(
-            "Import Config", "Import config not implemented", parent=parent_window
-        )
+        """Importe une configuration depuis un fichier."""
+        try:
+            import_path = filedialog.askopenfilename(
+                title="Import Configuration",
+                filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")],
+                parent=parent_window,
+            )
+
+            if not import_path:
+                return
+
+            with open(import_path, "r", encoding="utf-8") as f:
+                imported_config = yaml.safe_load(f)
+
+            required_sections = ["api_config", "exclusions", "templates"]
+            missing_sections = [sec for sec in required_sections if sec not in imported_config]
+
+            if missing_sections:
+                messagebox.showerror(
+                    "Invalid Configuration",
+                    f"Configuration file is missing required sections:\n{', '.join(missing_sections)}",
+                    parent=parent_window,
+                )
+                return
+
+            response = messagebox.askyesno(
+                "Confirm Import",
+                "This will replace your current configuration.\nAre you sure?",
+                parent=parent_window,
+            )
+            if not response:
+                return
+
+            backup_path = self.config_path.with_name(
+                f"analyzer_config_backup_{time.strftime('%Y%m%d_%H%M%S')}.yaml"
+            )
+            import shutil
+
+            shutil.copy2(self.config_path, backup_path)
+            shutil.copy2(import_path, self.config_path)
+
+            self.load_api_configuration()
+            self.load_exclusions()
+            self.load_templates()
+
+            messagebox.showinfo(
+                "Configuration Imported",
+                f"Configuration imported successfully!\nPrevious config backed up as: {backup_path.name}",
+                parent=parent_window,
+            )
+            self.log_action(f"Configuration imported from: {Path(import_path).name}", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import configuration:\n{str(e)}", parent=parent_window)
+            self.log_action(f"Configuration import failed: {str(e)}", "ERROR")
 
     def reset_configuration(self, parent_window: tk.Toplevel) -> None:
-        messagebox.showinfo(
-            "Reset Config", "Reset to defaults not implemented", parent=parent_window
-        )
+        """Remet la configuration aux valeurs par défaut."""
+        try:
+            response = messagebox.askyesno(
+                "Confirm Reset",
+                "This will reset ALL settings to default values!\nAre you sure?",
+                parent=parent_window,
+            )
+            if not response:
+                return
+
+            backup_path = self.config_path.with_name(
+                f"analyzer_config_backup_{time.strftime('%Y%m%d_%H%M%S')}.yaml"
+            )
+            import shutil
+
+            shutil.copy2(self.config_path, backup_path)
+
+            default_config = {
+                "project": {
+                    "name": "llm-content-analyzer",
+                    "version": "2.3.0",
+                    "stack_philosophy": "minimal_dependencies_maximum_efficiency",
+                },
+                "api_config": {
+                    "url": "http://localhost:8080",
+                    "token": "sk-default-token",
+                    "max_tokens": 32000,
+                    "timeout_seconds": 300,
+                    "batch_size": 100,
+                },
+                "exclusions": {
+                    "extensions": {
+                        "blocked": [".tmp", ".log", ".bak", ".cache"],
+                        "low_priority": [".txt", ".ini", ".cfg"],
+                        "high_priority": [".pdf", ".docx", ".doc", ".xlsx"],
+                    },
+                    "file_size": {"min_bytes": 100, "max_bytes": 104857600},
+                    "file_attributes": {"skip_system": True, "skip_hidden": False},
+                },
+                "templates": {
+                    "comprehensive": {
+                        "system_prompt": "Tu es un expert en analyse de documents pour entreprise.",
+                        "user_template": "Fichier: {{ file_name }}\nAnalyse ce document.",
+                    }
+                },
+            }
+
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(default_config, f, default_flow_style=False, indent=2)
+
+            self.load_api_configuration()
+            self.load_exclusions()
+            self.load_templates()
+
+            messagebox.showinfo(
+                "Configuration Reset",
+                f"Configuration reset to defaults!\nPrevious config backed up as: {backup_path.name}",
+                parent=parent_window,
+            )
+            self.log_action("Configuration reset to defaults", "INFO")
+
+        except Exception as e:
+            messagebox.showerror("Reset Error", f"Failed to reset configuration:\n{str(e)}", parent=parent_window)
+            self.log_action(f"Configuration reset failed: {str(e)}", "ERROR")
