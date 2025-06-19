@@ -86,36 +86,19 @@ class CSVParser:
                 errors.append(f"Missing column: {col}")
         return errors
 
-    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Nettoie le DataFrame issu du CSV."""
-
-        df = df.copy()
-        if "UNCDirectory" in df.columns:
-            df["UNCDirectory"] = df["UNCDirectory"].astype(str).str.replace(
-                r"\\{2,}", r"\\",
-                regex=True,
-            )
-        for col in ["Readable", "Writeable", "Deletable"]:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.lower().map({"true": True, "false": False})
-        for col in ["CreationTime", "LastWriteTime", "AccessTime"]:
-            if col in df.columns:
-                df[col] = (
-                    pd.to_datetime(df[col], errors="coerce", dayfirst=True)
-                    .dt.strftime("%Y-%m-%d %H:%M:%S")
-                )
-        if "Extension" in df.columns:
-            df["Extension"] = df["Extension"].fillna("unknown")
-        if "Owner" in df.columns:
-            df["Owner"] = df["Owner"].replace("<ERROR_5>", None)
-        return df
 
     def transform_metadata(self, row: pd.Series) -> Dict[str, Any]:
-        """Transforme une ligne du CSV en dict compatible SQLite."""
+        """Transforme une ligne du CSV en dict compatible SQLite sans modifier le chemin."""
 
-        path = f"{row.get('UNCDirectory', '')}/{row.get('Name', '')}"
+        unc_dir = str(row.get("UNCDirectory", ""))
+        name = str(row.get("Name", ""))
+        if unc_dir.endswith("\\") or unc_dir.endswith("/"):
+            path = f"{unc_dir}{name}"
+        else:
+            sep = "\\" if "\\" in unc_dir else "/"
+            path = f"{unc_dir}{sep}{name}"
         return {
-            "path": path.replace("\\", "/"),
+            "path": path,
             "file_size": int(row.get("FileSize", 0)),
             "owner": row.get("Owner"),
             "fast_hash": row.get("FastHash"),
@@ -131,7 +114,7 @@ class CSVParser:
         db_file: Path,
         chunk_size: int = 10000,
     ) -> Dict[str, Any]:
-        """Parse le CSV et importe dans SQLite."""
+        """Parse le CSV et importe dans SQLite sans altérer les chemins."""
 
         chunk = chunk_size or self.chunk_size
         start = time.perf_counter()
@@ -145,7 +128,6 @@ class CSVParser:
 
         try:
             for df in pd.read_csv(csv_file, chunksize=chunk, encoding=self.encoding):
-                df = self._clean_dataframe(df)
                 total_files += len(df)
                 validation_errors = self.validate_csv_format(df)
                 if validation_errors:
