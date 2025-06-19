@@ -3,6 +3,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List
+import re
 
 import pandas as pd
 import yaml
@@ -85,6 +86,30 @@ class CSVParser:
                 errors.append(f"Missing column: {col}")
         return errors
 
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Nettoie le DataFrame issu du CSV."""
+
+        df = df.copy()
+        if "UNCDirectory" in df.columns:
+            df["UNCDirectory"] = df["UNCDirectory"].astype(str).str.replace(
+                r"\\{2,}", r"\\",
+                regex=True,
+            )
+        for col in ["Readable", "Writeable", "Deletable"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.lower().map({"true": True, "false": False})
+        for col in ["CreationTime", "LastWriteTime", "AccessTime"]:
+            if col in df.columns:
+                df[col] = (
+                    pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+                    .dt.strftime("%Y-%m-%d %H:%M:%S")
+                )
+        if "Extension" in df.columns:
+            df["Extension"] = df["Extension"].fillna("unknown")
+        if "Owner" in df.columns:
+            df["Owner"] = df["Owner"].replace("<ERROR_5>", None)
+        return df
+
     def transform_metadata(self, row: pd.Series) -> Dict[str, Any]:
         """Transforme une ligne du CSV en dict compatible SQLite."""
 
@@ -120,6 +145,7 @@ class CSVParser:
 
         try:
             for df in pd.read_csv(csv_file, chunksize=chunk, encoding=self.encoding):
+                df = self._clean_dataframe(df)
                 total_files += len(df)
                 validation_errors = self.validate_csv_format(df)
                 if validation_errors:
