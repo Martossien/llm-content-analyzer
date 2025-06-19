@@ -12,6 +12,7 @@ import sqlite3
 import json
 import csv
 
+from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
 from content_analyzer.modules.csv_parser import CSVParser
 from content_analyzer.modules.db_manager import DBManager
@@ -327,6 +328,13 @@ class MainWindow:
             command=self.stop_analysis,
         )
         self.stop_button.pack(side="left", padx=5, pady=5)
+        self.single_button = ttk.Button(
+            action_frame,
+            text="ANALYZE SELECTED FILE",
+            width=20,
+            command=self.analyze_selected_file,
+        )
+        self.single_button.pack(side="left", padx=5, pady=5)
         ttk.Button(
             action_frame, text="VIEW RESULTS", width=15, command=self.view_results
         ).pack(side="left", padx=5, pady=5)
@@ -339,6 +347,18 @@ class MainWindow:
         ttk.Button(
             action_frame, text="EXPORT", width=15, command=self.export_results
         ).pack(side="left", padx=5, pady=5)
+
+        # SECTION 5B ----------------------------------------------------
+        batch_frame = ttk.LabelFrame(self.root, text="Batch Operations")
+        batch_frame.pack(fill="x", padx=5, pady=5)
+
+        self.max_files_var = tk.StringVar(value="0")
+        ttk.Button(batch_frame, text="START BATCH ANALYSIS", command=self.start_analysis).pack(side="left", padx=5)
+        ttk.Button(batch_frame, text="ANALYZE FILTERED FILES", command=self.analyze_filtered_files).pack(side="left", padx=5)
+        ttk.Button(batch_frame, text="REPROCESS ERRORS", command=self.reprocess_errors).pack(side="left", padx=5)
+        ttk.Label(batch_frame, text="Max Files:").pack(side="left", padx=5)
+        ttk.Entry(batch_frame, textvariable=self.max_files_var, width=6).pack(side="left")
+        ttk.Button(batch_frame, text="ALL FILES", command=lambda: self.max_files_var.set("0")).pack(side="left", padx=5)
 
         # SECTION 6 ------------------------------------------------------
         status_bar = ttk.Frame(self.root)
@@ -983,6 +1003,67 @@ class MainWindow:
         self.log_action("Analysis stopped by user", "WARN")
         self.status_app_label.config(text="Stopped")
 
+    def analyze_selected_file(self) -> None:
+        """Allow user to analyze a single file using the configured pipeline."""
+        file_path = filedialog.askopenfilename(title="Select File to Analyze")
+        if not file_path:
+            return
+        try:
+            analyzer = ContentAnalyzer(self.config_path)
+            meta = {
+                "path": file_path,
+                "extension": Path(file_path).suffix,
+                "file_size": Path(file_path).stat().st_size,
+                "file_attributes": "",
+                "last_modified": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(Path(file_path).stat().st_mtime)
+                ),
+            }
+            res = analyzer.analyze_single_file(meta)
+            messagebox.showinfo(
+                "Single File Analysis", json.dumps(res, indent=2)
+            )
+        except Exception as exc:  # pragma: no cover - I/O errors
+            messagebox.showerror("Error", str(exc))
+
+    def analyze_filtered_files(self) -> None:
+        """Reanalyse les fichiers filtrés/pendants en base."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                return
+            analyzer = ContentAnalyzer(self.config_path)
+            db_mgr = DBManager(db_path)
+            files = db_mgr.get_pending_files(limit=int(self.max_files_var.get() or 0))
+            for row in files:
+                res = analyzer.analyze_single_file(row)
+                if res.get("status") in {"completed", "cached"}:
+                    db_mgr.store_analysis_result(row["id"], res.get("task_id", ""), res.get("result", {}))
+                    db_mgr.update_file_status(row["id"], "completed")
+        except Exception as exc:
+            messagebox.showerror("Batch Error", str(exc))
+
+    def reprocess_errors(self) -> None:
+        """Relance l'analyse des fichiers en erreur."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                return
+            analyzer = ContentAnalyzer(self.config_path)
+            db_mgr = DBManager(db_path)
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute("SELECT * FROM fichiers WHERE status='error'").fetchall()
+            conn.close()
+            columns = ["id", "path", "file_size", "owner", "fast_hash", "access_time", "file_attributes", "file_signature", "last_modified", "status", "exclusion_reason", "priority_score", "special_flags", "processed_at"]
+            for r in rows[: int(self.max_files_var.get() or len(rows))]:
+                row = dict(zip(columns, r))
+                res = analyzer.analyze_single_file(row)
+                if res.get("status") in {"completed", "cached"}:
+                    db_mgr.store_analysis_result(row["id"], res.get("task_id", ""), res.get("result", {}))
+                    db_mgr.update_file_status(row["id"], "completed")
+        except Exception as exc:
+            messagebox.showerror("Reprocess Error", str(exc))
+
     def on_analysis_progress(self, info: dict) -> None:
         self.current_file_path = info.get("current_file")
 
@@ -1147,6 +1228,62 @@ class MainWindow:
             )
 
             tree.bind("<Double-1>", lambda e: self.show_file_details(tree))
+
+            # Navigation controls
+            nav_frame = ttk.Frame(results_window)
+            nav_frame.pack(fill="x", padx=10, pady=5)
+
+            def goto_first():
+                items = tree.get_children()
+                if items:
+                    tree.selection_set(items[0])
+                    tree.see(items[0])
+
+            def goto_prev():
+                sel = tree.selection()
+                items = tree.get_children()
+                if sel:
+                    idx = items.index(sel[0])
+                    if idx > 0:
+                        tree.selection_set(items[idx - 1])
+                        tree.see(items[idx - 1])
+
+            def goto_next():
+                sel = tree.selection()
+                items = tree.get_children()
+                if sel:
+                    idx = items.index(sel[0])
+                    if idx < len(items) - 1:
+                        tree.selection_set(items[idx + 1])
+                        tree.see(items[idx + 1])
+
+            def goto_last():
+                items = tree.get_children()
+                if items:
+                    tree.selection_set(items[-1])
+                    tree.see(items[-1])
+
+            ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(side="left", padx=2)
+            ttk.Button(nav_frame, text="◀ PREV FILE", command=goto_prev).pack(side="left", padx=2)
+            ttk.Button(nav_frame, text="NEXT FILE ▶", command=goto_next).pack(side="left", padx=2)
+            ttk.Button(nav_frame, text="LAST FILE", command=goto_last).pack(side="left", padx=2)
+
+            ttk.Label(nav_frame, text="GO TO FILE:").pack(side="left", padx=5)
+            goto_var = tk.StringVar()
+            ttk.Entry(nav_frame, textvariable=goto_var, width=6).pack(side="left")
+
+            def jump():
+                val = goto_var.get().strip()
+                if not val.isdigit():
+                    return
+                items = tree.get_children()
+                for itm in items:
+                    if tree.item(itm)["values"][0] == int(val):
+                        tree.selection_set(itm)
+                        tree.see(itm)
+                        break
+
+            ttk.Button(nav_frame, text="JUMP", command=jump).pack(side="left", padx=2)
 
             self.log_action("Results viewer opened", "INFO")
 
