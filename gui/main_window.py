@@ -11,6 +11,7 @@ import yaml
 import sqlite3
 import json
 import csv
+from typing import Any, Dict
 
 from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
@@ -153,26 +154,32 @@ class MainWindow:
         self.api_url_entry = ttk.Entry(api_frame, width=30)
         self.api_url_entry.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
 
-        ttk.Label(api_frame, text="Max Context:").grid(
+        ttk.Label(api_frame, text="API Token:").grid(
             row=1, column=0, sticky="w", padx=2, pady=2
         )
-        self.max_context_entry = ttk.Entry(api_frame, width=10)
-        self.max_context_entry.grid(row=1, column=1, sticky="ew", padx=2, pady=2)
+        self.api_token_entry = ttk.Entry(api_frame, width=30, show="*")
+        self.api_token_entry.grid(row=1, column=1, sticky="ew", padx=2, pady=2)
 
-        ttk.Label(api_frame, text="Workers:").grid(
+        ttk.Label(api_frame, text="Max Context:").grid(
             row=2, column=0, sticky="w", padx=2, pady=2
         )
+        self.max_context_entry = ttk.Entry(api_frame, width=10)
+        self.max_context_entry.grid(row=2, column=1, sticky="ew", padx=2, pady=2)
+
+        ttk.Label(api_frame, text="Workers:").grid(
+            row=3, column=0, sticky="w", padx=2, pady=2
+        )
         self.workers_entry = ttk.Entry(api_frame, width=5)
-        self.workers_entry.grid(row=2, column=1, sticky="w", padx=2, pady=2)
+        self.workers_entry.grid(row=3, column=1, sticky="w", padx=2, pady=2)
 
         self.test_api_button = ttk.Button(
             api_frame, text="Test Connection", command=self.test_api_connection
         )
-        self.test_api_button.grid(row=3, column=0, sticky="ew", padx=2, pady=5)
+        self.test_api_button.grid(row=4, column=0, sticky="ew", padx=2, pady=5)
 
         ttk.Button(
             api_frame, text="Save Configuration", command=self.save_api_configuration
-        ).grid(row=3, column=1, sticky="ew", padx=2, pady=5)
+        ).grid(row=4, column=1, sticky="ew", padx=2, pady=5)
 
         # Panel 2B: Exclusions
         excl_frame = ttk.LabelFrame(config_frame, text="File Exclusions")
@@ -414,9 +421,7 @@ class MainWindow:
     # API CONFIGURATION
     # ------------------------------------------------------------------
     def get_api_token(self) -> str:
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get("api_config", {}).get("token", "")
+        return self.api_token_entry.get().strip()
 
     def load_api_configuration(self) -> None:
         try:
@@ -425,6 +430,8 @@ class MainWindow:
             api_config = config.get("api_config", {})
             self.api_url_entry.delete(0, tk.END)
             self.api_url_entry.insert(0, api_config.get("url", "http://localhost:8080"))
+            self.api_token_entry.delete(0, tk.END)
+            self.api_token_entry.insert(0, api_config.get("token", ""))
             self.max_context_entry.delete(0, tk.END)
             self.max_context_entry.insert(0, str(api_config.get("max_tokens", 100000)))
             self.workers_entry.delete(0, tk.END)
@@ -494,6 +501,7 @@ class MainWindow:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             config["api_config"]["url"] = url
+            config["api_config"]["token"] = self.api_token_entry.get().strip()
             config["api_config"]["max_tokens"] = max_context
             config["api_config"]["batch_size"] = workers
             with open(self.config_path, "w", encoding="utf-8") as f:
@@ -1020,11 +1028,75 @@ class MainWindow:
                 ),
             }
             res = analyzer.analyze_single_file(meta)
-            messagebox.showinfo(
-                "Single File Analysis", json.dumps(res, indent=2)
-            )
+            self.display_analysis_result(res)
         except Exception as exc:  # pragma: no cover - I/O errors
             messagebox.showerror("Error", str(exc))
+
+    def display_analysis_result(self, result_data: Dict[str, Any]):
+        """Display formatted analysis result instead of raw JSON."""
+        window = tk.Toplevel(self.root)
+        window.title("Analysis Result")
+        window.geometry("600x500")
+        text = tk.Text(window, wrap="word", font=("Consolas", 10))
+        text.pack(fill="both", expand=True, padx=10, pady=10)
+
+        if result_data.get("status") == "completed":
+            llm_response = result_data.get("result", {})
+            formatted_text = self._format_analysis_display(llm_response)
+            text.insert("1.0", formatted_text)
+        else:
+            error_msg = result_data.get("error", "Erreur inconnue")
+            text.insert("1.0", f"❌ ERREUR : {error_msg}")
+
+        text.config(state="disabled")
+        ttk.Button(window, text="Close", command=window.destroy).pack(pady=5)
+
+    def _format_analysis_display(self, llm_response: Dict[str, Any]) -> str:
+        """Format LLM response for user display."""
+
+        formatted = "🔍 RÉSULTATS D'ANALYSE\n" + "=" * 50 + "\n\n"
+
+        security = llm_response.get("security", {})
+        if security:
+            classification = security.get("classification", "Non classifié")
+            confidence = security.get("confidence", 0)
+            justification = security.get("justification", "Aucune justification")
+            formatted += (
+                f"🛡️ SÉCURITÉ\n   Classification: {classification}\n   Confiance: {confidence}%\n"
+                f"   Justification: {justification}\n\n"
+            )
+
+        rgpd = llm_response.get("rgpd", {})
+        if rgpd:
+            risk_level = rgpd.get("risk_level", "unknown")
+            data_types = rgpd.get("data_types", [])
+            formatted += (
+                f"🔒 RGPD\n   Niveau de risque: {risk_level.upper()}\n   Types de données: "
+                f"{', '.join(data_types) if data_types else 'Aucune'}\n\n"
+            )
+
+        finance = llm_response.get("finance", {})
+        if finance:
+            doc_type = finance.get("document_type", "none")
+            amounts = finance.get("amounts", [])
+            formatted += f"💰 FINANCE\n   Type de document: {doc_type}\n"
+            if amounts:
+                formatted += "   Montants détectés:\n"
+                for amount in amounts:
+                    value = amount.get("value", "")
+                    context = amount.get("context", "")
+                    formatted += f"     • {value} ({context})\n"
+            formatted += "\n"
+
+        legal = llm_response.get("legal", {})
+        if legal:
+            contract_type = legal.get("contract_type", "none")
+            parties = legal.get("parties", [])
+            formatted += (
+                f"⚖️ LÉGAL\n   Type de contrat: {contract_type}\n   Parties: {', '.join(parties) if parties else 'Aucune'}"
+            )
+
+        return formatted
 
     def analyze_filtered_files(self) -> None:
         """Reanalyse les fichiers filtrés/pendants en base."""
@@ -1301,6 +1373,17 @@ class MainWindow:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='fichiers'"
+            )
+            if not cursor.fetchone():
+                conn.close()
+                messagebox.showinfo(
+                    "No Data",
+                    "Aucun CSV chargé - Sélectionnez un fichier CSV",
+                )
+                return
+
             query = """
         SELECT f.id, f.path, f.status,
                r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
@@ -1417,33 +1500,28 @@ class MainWindow:
 
             path, size, owner, modified, status, security, rgpd, finance, legal, confidence, proc_time, created = row
 
-            details_content = f"""FILE ANALYSIS DETAILS
-====================
+            details_header = (
+                "FILE ANALYSIS DETAILS\n" "====================\n\n" "File Information:\n"
+                f"• Path: {path}\n"
+                f"• Size: {size:,} bytes ({size/1024:.1f} KB)\n"
+                f"• Owner: {owner or 'N/A'}\n"
+                f"• Last Modified: {modified or 'N/A'}\n"
+                f"• Analysis Status: {status}\n"
+                f"• Analysis Date: {created or 'N/A'}\n"
+                f"• Processing Time: {proc_time or 0} ms\n"
+                f"• Confidence Score: {confidence or 0}%\n\n"
+            )
 
-File Information:
-• Path: {path}
-• Size: {size:,} bytes ({size/1024:.1f} KB)
-• Owner: {owner or 'N/A'}
-• Last Modified: {modified or 'N/A'}
-• Analysis Status: {status}
-• Analysis Date: {created or 'N/A'}
-• Processing Time: {proc_time or 0} ms
-• Confidence Score: {confidence or 0}%
+            formatted = self._format_analysis_display(
+                {
+                    "security": json.loads(security) if security else {},
+                    "rgpd": json.loads(rgpd) if rgpd else {},
+                    "finance": json.loads(finance) if finance else {},
+                    "legal": json.loads(legal) if legal else {},
+                }
+            )
 
-SECURITY ANALYSIS:
-{json.dumps(json.loads(security) if security else {}, indent=2)}
-
-RGPD ANALYSIS:
-{json.dumps(json.loads(rgpd) if rgpd else {}, indent=2)}
-
-FINANCE ANALYSIS:
-{json.dumps(json.loads(finance) if finance else {}, indent=2)}
-
-LEGAL ANALYSIS:
-{json.dumps(json.loads(legal) if legal else {}, indent=2)}
-"""
-
-            text_widget.insert(1.0, details_content)
+            text_widget.insert(1.0, details_header + formatted)
             text_widget.config(state="disabled")
 
             ttk.Button(details_window, text="Close", command=details_window.destroy).pack(

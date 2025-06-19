@@ -11,6 +11,13 @@ api_config:
   timeout_seconds: 300
   batch_size: 100
 
+brique2_analyzer:
+  api_url: "http://localhost:8080"
+  api_token: "sk-d88e3244ae2e4b64a5256c6f4946155a"
+  max_tokens: 32000
+  timeout_seconds: 300
+  batch_size: 100
+
 # Configuration tenacity retry
 retry_config:
   max_attempts: 3
@@ -82,8 +89,23 @@ scoring:
 
 templates:
   comprehensive:
-    system_prompt: "Tu es un expert en analyse de documents pour entreprise."
-    user_template: "Fichier: {{ file_name }}\nAnalyse ce document."
+    system_prompt: |
+      Tu es un expert en analyse de documents pour entreprise.
+      Analyse ce fichier et retourne UNIQUEMENT un JSON structuré.
+
+    user_template: |
+      Fichier: {{ file_name }}
+      Taille: {{ file_size_readable }}
+      Propriétaire: {{ owner }}
+      Dernière modification: {{ last_modified }}
+
+      Analyse selon ces domaines et retourne UNIQUEMENT ce JSON :
+      {
+        "security": {"classification": "C0|C1|C2|C3", "confidence": 85, "justification": "Raison du classement"},
+        "rgpd": {"risk_level": "none|low|medium|high", "data_types": ["email", "phone"], "confidence": 90},
+        "finance": {"document_type": "none|invoice|contract|budget", "amounts": [{"value": "1500€", "context": "facture"}], "confidence": 75},
+        "legal": {"contract_type": "none|employment|lease|sale", "parties": ["entreprise", "client"], "confidence": 80}
+      }
   security_focused:
     system_prompt: "Expert sécurité"
     user_template: "Analyse de sécurité pour {{ file_name }}\nClassification :"
