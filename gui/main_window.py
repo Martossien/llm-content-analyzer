@@ -153,26 +153,32 @@ class MainWindow:
         self.api_url_entry = ttk.Entry(api_frame, width=30)
         self.api_url_entry.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
 
-        ttk.Label(api_frame, text="Max Context:").grid(
+        ttk.Label(api_frame, text="API Token:").grid(
             row=1, column=0, sticky="w", padx=2, pady=2
         )
-        self.max_context_entry = ttk.Entry(api_frame, width=10)
-        self.max_context_entry.grid(row=1, column=1, sticky="ew", padx=2, pady=2)
+        self.api_token_entry = ttk.Entry(api_frame, width=30, show="*")
+        self.api_token_entry.grid(row=1, column=1, sticky="ew", padx=2, pady=2)
 
-        ttk.Label(api_frame, text="Workers:").grid(
+        ttk.Label(api_frame, text="Max Context:").grid(
             row=2, column=0, sticky="w", padx=2, pady=2
         )
+        self.max_context_entry = ttk.Entry(api_frame, width=10)
+        self.max_context_entry.grid(row=2, column=1, sticky="ew", padx=2, pady=2)
+
+        ttk.Label(api_frame, text="Workers:").grid(
+            row=3, column=0, sticky="w", padx=2, pady=2
+        )
         self.workers_entry = ttk.Entry(api_frame, width=5)
-        self.workers_entry.grid(row=2, column=1, sticky="w", padx=2, pady=2)
+        self.workers_entry.grid(row=3, column=1, sticky="w", padx=2, pady=2)
 
         self.test_api_button = ttk.Button(
             api_frame, text="Test Connection", command=self.test_api_connection
         )
-        self.test_api_button.grid(row=3, column=0, sticky="ew", padx=2, pady=5)
+        self.test_api_button.grid(row=4, column=0, sticky="ew", padx=2, pady=5)
 
         ttk.Button(
             api_frame, text="Save Configuration", command=self.save_api_configuration
-        ).grid(row=3, column=1, sticky="ew", padx=2, pady=5)
+        ).grid(row=4, column=1, sticky="ew", padx=2, pady=5)
 
         # Panel 2B: Exclusions
         excl_frame = ttk.LabelFrame(config_frame, text="File Exclusions")
@@ -414,9 +420,7 @@ class MainWindow:
     # API CONFIGURATION
     # ------------------------------------------------------------------
     def get_api_token(self) -> str:
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get("api_config", {}).get("token", "")
+        return self.api_token_entry.get().strip()
 
     def load_api_configuration(self) -> None:
         try:
@@ -425,6 +429,8 @@ class MainWindow:
             api_config = config.get("api_config", {})
             self.api_url_entry.delete(0, tk.END)
             self.api_url_entry.insert(0, api_config.get("url", "http://localhost:8080"))
+            self.api_token_entry.delete(0, tk.END)
+            self.api_token_entry.insert(0, api_config.get("token", ""))
             self.max_context_entry.delete(0, tk.END)
             self.max_context_entry.insert(0, str(api_config.get("max_tokens", 100000)))
             self.workers_entry.delete(0, tk.END)
@@ -494,6 +500,7 @@ class MainWindow:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             config["api_config"]["url"] = url
+            config["api_config"]["token"] = self.api_token_entry.get().strip()
             config["api_config"]["max_tokens"] = max_context
             config["api_config"]["batch_size"] = workers
             with open(self.config_path, "w", encoding="utf-8") as f:
@@ -1020,9 +1027,7 @@ class MainWindow:
                 ),
             }
             res = analyzer.analyze_single_file(meta)
-            messagebox.showinfo(
-                "Single File Analysis", json.dumps(res, indent=2)
-            )
+            self.display_analysis_result(res)
         except Exception as exc:  # pragma: no cover - I/O errors
             messagebox.showerror("Error", str(exc))
 
@@ -1300,6 +1305,17 @@ class MainWindow:
             db_path = Path("analysis_results.db")
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='fichiers'"
+            )
+            if not cursor.fetchone():
+                conn.close()
+                messagebox.showinfo(
+                    "No Data",
+                    "Aucun CSV chargé - Sélectionnez un fichier CSV",
+                )
+                self.log_action("Results refresh: table 'fichiers' missing", "WARN")
+                return
 
             query = """
         SELECT f.id, f.path, f.status,
@@ -1417,6 +1433,15 @@ class MainWindow:
 
             path, size, owner, modified, status, security, rgpd, finance, legal, confidence, proc_time, created = row
 
+            llm_json = {
+                "security": json.loads(security) if security else {},
+                "rgpd": json.loads(rgpd) if rgpd else {},
+                "finance": json.loads(finance) if finance else {},
+                "legal": json.loads(legal) if legal else {},
+            }
+
+            analysis_text = self._format_analysis_display(llm_json)
+
             details_content = f"""FILE ANALYSIS DETAILS
 ====================
 
@@ -1430,17 +1455,7 @@ File Information:
 • Processing Time: {proc_time or 0} ms
 • Confidence Score: {confidence or 0}%
 
-SECURITY ANALYSIS:
-{json.dumps(json.loads(security) if security else {}, indent=2)}
-
-RGPD ANALYSIS:
-{json.dumps(json.loads(rgpd) if rgpd else {}, indent=2)}
-
-FINANCE ANALYSIS:
-{json.dumps(json.loads(finance) if finance else {}, indent=2)}
-
-LEGAL ANALYSIS:
-{json.dumps(json.loads(legal) if legal else {}, indent=2)}
+{analysis_text}
 """
 
             text_widget.insert(1.0, details_content)
@@ -1455,6 +1470,74 @@ LEGAL ANALYSIS:
         except Exception as e:
             messagebox.showerror("Details Error", f"Failed to show file details:\n{str(e)}")
             self.log_action(f"File details failed: {str(e)}", "ERROR")
+
+    def display_analysis_result(self, result_data: dict) -> None:
+        """Affiche un résultat d'analyse formaté dans une fenêtre."""
+        try:
+            if result_data.get("status") == "completed":
+                llm_response = result_data.get("result", {})
+                formatted_text = self._format_analysis_display(llm_response)
+            else:
+                error_msg = result_data.get("error", "Erreur inconnue")
+                formatted_text = f"❌ ERREUR : {error_msg}"
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid JSON response: {e}")
+            formatted_text = "❌ Réponse invalide de l'API"
+
+        window = tk.Toplevel(self.root)
+        window.title("Analysis Result")
+        window.geometry("600x500")
+        window.transient(self.root)
+
+        text_widget = tk.Text(window, wrap="word", font=("Consolas", 10))
+        text_widget.pack(fill="both", expand=True, padx=10, pady=10)
+        text_widget.insert(1.0, formatted_text)
+        text_widget.config(state="disabled")
+
+        ttk.Button(window, text="Close", command=window.destroy).pack(pady=5)
+
+    def _format_analysis_display(self, llm_response: dict) -> str:
+        formatted = "🔍 RÉSULTATS D'ANALYSE\n" + "=" * 50 + "\n\n"
+
+        security = llm_response.get("security", {})
+        if security:
+            classification = security.get("classification", "Non classifié")
+            confidence = security.get("confidence", 0)
+            justification = security.get("justification", "Aucune justification")
+            formatted += (
+                f"🛡️ SÉCURITÉ\n   Classification: {classification}\n   Confiance: {confidence}%\n   Justification: {justification}\n\n"
+            )
+
+        rgpd = llm_response.get("rgpd", {})
+        if rgpd:
+            risk_level = rgpd.get("risk_level", "unknown")
+            data_types = rgpd.get("data_types", [])
+            formatted += (
+                f"🔒 RGPD\n   Niveau de risque: {risk_level.upper()}\n   Types de données: {', '.join(data_types) if data_types else 'Aucune'}\n\n"
+            )
+
+        finance = llm_response.get("finance", {})
+        if finance:
+            doc_type = finance.get("document_type", "none")
+            amounts = finance.get("amounts", [])
+            formatted += f"💰 FINANCE\n   Type de document: {doc_type}\n"
+            if amounts:
+                formatted += "   Montants détectés:\n"
+                for amt in amounts:
+                    value = amt.get("value", "")
+                    context = amt.get("context", "")
+                    formatted += f"     • {value} ({context})\n"
+            formatted += "\n"
+
+        legal = llm_response.get("legal", {})
+        if legal:
+            contract_type = legal.get("contract_type", "none")
+            parties = legal.get("parties", [])
+            formatted += (
+                f"⚖️ LÉGAL\n   Type de contrat: {contract_type}\n   Parties: {', '.join(parties) if parties else 'Aucune'}\n"
+            )
+
+        return formatted
 
     def export_results(self) -> None:
         """Lance la fenêtre d'export des résultats en différents formats."""

@@ -56,6 +56,15 @@ class ContentAnalyzer:
         self.db_manager = DBManager(Path("analysis_results.db"))
         self.prompt_manager = PromptManager(self.config_path)
 
+    def _format_file_size(self, size: int) -> str:
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(size)
+        for unit in units:
+            if value < 1024:
+                return f"{value:.1f}{unit}"
+            value /= 1024
+        return f"{value:.1f}PB"
+
     # ------------------------------------------------------------------
     # Single file analysis
     # ------------------------------------------------------------------
@@ -85,8 +94,18 @@ class ContentAnalyzer:
                     "cache_used": True,
                 }
 
+            file_metadata = {
+                "file_name": Path(file_row["path"]).name,
+                "file_size_readable": self._format_file_size(file_row.get("file_size", 0)),
+                "owner": file_row.get("owner", "Unknown"),
+                "last_modified": file_row.get("last_modified", ""),
+                "file_extension": Path(file_row["path"]).suffix,
+                "metadata_summary": f"Fichier {Path(file_row['path']).suffix}, {file_row.get('file_size', 0)} bytes",
+            }
+
             prompt = self.prompt_manager.build_analysis_prompt(
-                file_row, analysis_type="comprehensive"
+                file_metadata,
+                analysis_type="comprehensive",
             )
             api_result = self.api_client.analyze_file(file_row["path"], prompt)
 
