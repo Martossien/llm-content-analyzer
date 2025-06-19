@@ -94,3 +94,13 @@ def test_metadata_transformation():
     assert meta["path"] == "/share/file0.txt"
     assert meta["file_size"] == 100
     assert meta["fast_hash"] == "abc"
+
+
+def test_parse_scan_local_mini(tmp_path):
+    csv_file = ROOT_DIR / "content_analyzer" / "scan_local_mini.csv"
+    db_file = tmp_path / "out.db"
+    parser = CSVParser(CONFIG_PATH)
+    result = parser.parse_csv(csv_file, db_file, chunk_size=20)
+    assert result["total_files"] == 63
+    assert result["imported_files"] == 63
+    assert result["errors"] == []
