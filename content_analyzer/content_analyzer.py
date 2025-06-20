@@ -65,6 +65,126 @@ class ContentAnalyzer:
             value /= 1024
         return f"{value:.1f}PB"
 
+    def _parse_api_response(self, api_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse la réponse API et extrait le JSON structuré de manière robuste."""
+        import json
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        if api_result.get("status") != "completed":
+            return api_result
+
+        content = api_result.get("result", {}).get("content", "")
+        task_id = api_result.get("task_id", "")
+
+        if not content:
+            logger.warning("API response content is empty")
+            return {
+                "status": "error",
+                "result": {},
+                "task_id": task_id,
+                "error": "Empty content from API",
+            }
+
+        extracted_json = self._extract_json_from_content(content)
+
+        if extracted_json is None:
+            logger.error("Failed to extract JSON from content: %s", content[:200])
+            return {
+                "status": "error",
+                "result": {},
+                "task_id": task_id,
+                "error": "Could not parse JSON from API response",
+            }
+
+        return {
+            "status": "completed",
+            "result": extracted_json,
+            "task_id": task_id,
+        }
+
+    def _extract_json_from_content(self, content: str) -> Optional[Dict[str, Any]]:
+        import json
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            return json.loads(content.strip())
+        except json.JSONDecodeError:
+            logger.debug("Direct JSON parsing failed, trying regex extraction")
+
+        json_pattern = r'\{(?:[^{}]|{[^{}]*})*\}'
+        matches = re.findall(json_pattern, content, re.DOTALL)
+        for match in matches:
+            try:
+                parsed = json.loads(match)
+                if self._is_valid_analysis_json(parsed):
+                    logger.info("Successfully extracted JSON using regex")
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+        json_candidate = self._extract_balanced_json(content)
+        if json_candidate:
+            try:
+                parsed = json.loads(json_candidate)
+                if self._is_valid_analysis_json(parsed):
+                    logger.info("Successfully extracted JSON using balanced extraction")
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("All JSON extraction strategies failed")
+        return self._create_fallback_json(content)
+
+    def _extract_balanced_json(self, content: str) -> Optional[str]:
+        start_pos = content.find('{')
+        if start_pos == -1:
+            return None
+
+        brace_count = 0
+        in_string = False
+        escape_next = False
+
+        for i, char in enumerate(content[start_pos:], start_pos):
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == '\\':
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if not in_string:
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return content[start_pos:i+1]
+
+        return None
+
+    def _is_valid_analysis_json(self, parsed: Dict[str, Any]) -> bool:
+        expected_keys = {"security", "rgpd", "finance", "legal"}
+        return isinstance(parsed, dict) and any(key in parsed for key in expected_keys)
+
+    def _create_fallback_json(self, content: str) -> Dict[str, Any]:
+        return {
+            "security": {"classification": "C0", "confidence": 0, "justification": "Parsing failed"},
+            "rgpd": {"risk_level": "none", "data_types": [], "confidence": 0},
+            "finance": {"document_type": "none", "amounts": [], "confidence": 0},
+            "legal": {"contract_type": "none", "parties": [], "confidence": 0},
+            "parsing_error": True,
+            "original_content": content[:500] + ("..." if len(content) > 500 else ""),
+        }
+
     # ------------------------------------------------------------------
     # Single file analysis
     # ------------------------------------------------------------------
@@ -109,17 +229,19 @@ class ContentAnalyzer:
             )
             api_result = self.api_client.analyze_file(file_row["path"], prompt)
 
-            if self.enable_cache and api_result.get("status") == "completed":
+            parsed_result = self._parse_api_response(api_result)
+
+            if self.enable_cache and parsed_result.get("status") == "completed":
                 self.cache_manager.store_result(
                     file_row.get("fast_hash", ""),
                     "default_prompt_hash",
-                    api_result.get("result", {}),
+                    parsed_result.get("result", {}),
                 )
 
             return {
-                "status": api_result.get("status", "error"),
-                "result": api_result.get("result", {}),
-                "task_id": api_result.get("task_id", ""),
+                "status": parsed_result.get("status", "error"),
+                "result": parsed_result.get("result", {}),
+                "task_id": parsed_result.get("task_id", ""),
                 "processing_time_ms": int((time.perf_counter() - start) * 1000),
                 "cache_used": False,
             }
