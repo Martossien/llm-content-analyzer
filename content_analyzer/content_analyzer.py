@@ -4,6 +4,7 @@ Content Analyzer - Orchestrateur principal Brique 2
 Architecture modulaire avec stack minimal validé
 """
 
+import re
 import sys
 import logging
 import time
