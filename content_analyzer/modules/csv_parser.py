@@ -4,12 +4,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Iterator
 import re
-
 import yaml
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-
 
 class SMBeagleCSVParser:
     """Parser spécialisé pour les CSV SMBeagle avec guillemets sélectifs."""
@@ -27,31 +25,104 @@ class SMBeagleCSVParser:
         current = ""
         in_quotes = False
         i = 0
+
         while i < len(line):
             char = line[i]
+            
             if char == '"':
                 if in_quotes:
+                    # Vérifier si c'est un guillemet échappé ""
                     if i + 1 < len(line) and line[i + 1] == '"':
                         current += '"'
-                        i += 1
+                        i += 1  # Skip le prochain guillemet
                     else:
+                        # Fin des guillemets
                         in_quotes = False
                 else:
+                    # Début des guillemets
                     in_quotes = True
             elif char == "," and not in_quotes:
+                # Séparateur trouvé en dehors des guillemets
                 fields.append(current)
                 current = ""
             else:
                 current += char
+            
             i += 1
+
+        # Ajouter le dernier champ
         fields.append(current)
         return fields
+
+    @staticmethod
+    def validate_csv_line_format(line: str, line_number: int) -> List[str]:
+        """Valide le format d'une ligne CSV en vérifiant les guillemets sur la ligne brute."""
+        errors: List[str] = []
+        
+        # Parse la ligne pour obtenir les champs
+        fields = SMBeagleCSVParser.parse_csv_line(line)
+        
+        if len(fields) != 19:
+            errors.append(f"Line {line_number}: {len(fields)} fields instead of 19")
+            return errors
+        
+        # Maintenant, re-parse manuellement pour vérifier les guillemets sur la ligne originale
+        current_pos = 0
+        field_index = 0
+        
+        for field in fields:
+            # Trouver le début du champ dans la ligne originale
+            while current_pos < len(line) and line[current_pos] == ' ':
+                current_pos += 1
+                
+            if current_pos >= len(line):
+                break
+                
+            # Vérifier si le champ commence par des guillemets
+            starts_with_quote = line[current_pos] == '"'
+            
+            # Vérifier selon les règles
+            if field_index in SMBeagleCSVParser.QUOTED_COLUMNS:
+                if not starts_with_quote:
+                    errors.append(f"Line {line_number}, column {field_index}: should have quotes")
+            else:
+                if starts_with_quote:
+                    errors.append(f"Line {line_number}, column {field_index}: should not have quotes")
+            
+            # Avancer la position après ce champ
+            if starts_with_quote:
+                # Sauter jusqu'au guillemet fermant
+                current_pos += 1  # Sauter le guillemet ouvrant
+                while current_pos < len(line):
+                    if line[current_pos] == '"':
+                        # Vérifier si c'est un guillemet échappé
+                        if current_pos + 1 < len(line) and line[current_pos + 1] == '"':
+                            current_pos += 2  # Sauter les guillemets échappés
+                        else:
+                            current_pos += 1  # Sauter le guillemet fermant
+                            break
+                    else:
+                        current_pos += 1
+            else:
+                # Sauter jusqu'à la virgule suivante
+                while current_pos < len(line) and line[current_pos] != ',':
+                    current_pos += 1
+            
+            # Sauter la virgule
+            if current_pos < len(line) and line[current_pos] == ',':
+                current_pos += 1
+                
+            field_index += 1
+            
+        return errors
 
     @classmethod
     def clean_field_value(cls, field_value: str, field_index: int) -> str:
         """Nettoie une valeur de champ selon les règles SMBeagle."""
         value = field_value
+
         if field_index in cls.QUOTED_COLUMNS:
+            # Enlever les guillemets si présents
             if value.startswith('"') and value.endswith('"'):
                 value = value[1:-1].replace('""', '"')
             else:
@@ -61,6 +132,7 @@ class SMBeagleCSVParser:
                     value,
                 )
         else:
+            # Vérifier qu'il n'y a pas de guillemets
             if value.startswith('"') and value.endswith('"'):
                 logger.warning(
                     "Colonne %s ne devrait pas avoir de guillemets: %s",
@@ -68,6 +140,7 @@ class SMBeagleCSVParser:
                     value,
                 )
                 value = value[1:-1]
+
         return value.strip()
 
 
@@ -77,7 +150,7 @@ def parse_csv_with_smbeagle_format(
     """Parse un CSV SMBeagle en respectant les guillemets sélectifs."""
     headers = [
         "Name",
-        "Host",
+        "Host", 
         "Extension",
         "Username",
         "Hostname",
@@ -98,25 +171,38 @@ def parse_csv_with_smbeagle_format(
     ]
 
     parser = SMBeagleCSVParser()
+    
     with open(csv_file, "r", encoding="utf-8", errors="replace") as f:
+        # Sauter l'en-tête
         header_line = f.readline()
+        
         batch: List[Dict[str, Any]] = []
+        
         for line_num, line in enumerate(f, start=2):
-            fields = parser.parse_csv_line(line.strip())
+            line = line.strip()
+            if not line:  # Ignorer les lignes vides
+                continue
+                
+            fields = parser.parse_csv_line(line)
+            
             if len(fields) != 19:
                 logger.warning(
                     "Ligne %s: %s colonnes au lieu de 19", line_num, len(fields)
                 )
                 continue
 
+            # Nettoyer les champs selon les règles
             cleaned = [
                 parser.clean_field_value(field, idx) for idx, field in enumerate(fields)
             ]
+
             row_dict = dict(zip(headers, cleaned))
             batch.append(row_dict)
+
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
+
         if batch:
             yield batch
 
@@ -127,14 +213,16 @@ class CSVParser:
     def __init__(self, config_path: Path) -> None:
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
+        
         module_cfg = cfg.get("modules", {}).get("csv_parser", {})
         self.chunk_size = module_cfg.get("chunk_size", 10000)
         self.validation_strict = module_cfg.get("validation_strict", True)
         self.encoding = module_cfg.get("encoding", "utf-8")
+        
         self.required_columns = [
             "Name",
             "Host",
-            "Extension",
+            "Extension", 
             "Username",
             "Hostname",
             "UNCDirectory",
@@ -153,10 +241,8 @@ class CSVParser:
             "FileSignature",
         ]
 
-    # Schema creation
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         """Create or migrate the fichiers table to store all SMBeagle columns."""
-
         expected_columns = {
             "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
             "name": "TEXT NOT NULL",
@@ -219,12 +305,13 @@ class CSVParser:
                 special_flags TEXT,
                 processed_at TIMESTAMP
             )
-        """
+            """
         )
 
         # Migration for existing databases: add missing columns
         cursor.execute("PRAGMA table_info(fichiers)")
         existing_cols = {row[1] for row in cursor.fetchall()}
+        
         for col, col_type in expected_columns.items():
             if col not in existing_cols:
                 cursor.execute(f"ALTER TABLE fichiers ADD COLUMN {col} {col_type}")
@@ -246,16 +333,19 @@ class CSVParser:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_unc_directory ON fichiers(unc_directory)"
         )
+
         conn.commit()
 
     def validate_csv_format(self, csv_file: Path) -> List[str]:
         """Valide le format CSV SMBeagle en vérifiant l'en-tête et quelques lignes."""
-
         errors: List[str] = []
+        
         try:
             with open(csv_file, "r", encoding="utf-8") as f:
+                # Vérifier l'en-tête
                 header_line = f.readline().strip()
                 actual_headers = [c.strip().strip('"') for c in header_line.split(",")]
+
                 if len(actual_headers) != 19:
                     errors.append(f"Expected 19 columns, found {len(actual_headers)}")
 
@@ -263,79 +353,30 @@ class CSVParser:
                 if missing:
                     errors.append(f"Missing columns: {missing}")
 
-                parser = SMBeagleCSVParser()
+                # Vérifier les premières lignes de données
                 for i, line in enumerate(f):
-                    if i >= 5:
+                    if i >= 5:  # Limiter à 5 lignes pour la validation
                         break
-                    fields = parser.parse_csv_line(line.strip())
-                    if len(fields) != 19:
-                        errors.append(
-                            f"Line {i + 2}: {len(fields)} fields instead of 19"
-                        )
-                    for idx, field in enumerate(fields):
-                        if idx in parser.QUOTED_COLUMNS:
-                            if not (field.startswith('"') and field.endswith('"')):
-                                errors.append(
-                                    f"Line {i + 2}, column {idx}: should have quotes"
-                                )
-                        else:
-                            if field.startswith('"') and field.endswith('"'):
-                                errors.append(
-                                    f"Line {i + 2}, column {idx}: should not have quotes"
-                                )
+                        
+                    line = line.strip()
+                    if not line:  # Ignorer les lignes vides
+                        continue
+                        
+                    # Valider le format de cette ligne
+                    line_errors = SMBeagleCSVParser.validate_csv_line_format(line, i + 2)
+                    errors.extend(line_errors)
+
         except Exception as exc:
             errors.append(f"File reading error: {exc}")
 
         return errors
 
-    def transform_metadata(self, row: pd.Series) -> Dict[str, Any]:
-        """Transforme une ligne CSV en dict complet pour SQLite."""
-
-        unc_dir = str(row.get("UNCDirectory", "")).strip()
-        name = str(row.get("Name", "")).strip()
-
-        if unc_dir.endswith("\\") or unc_dir.endswith("/"):
-            path = f"{unc_dir}{name}"
-        else:
-            sep = "\\" if "\\" in unc_dir else "/"
-            path = f"{unc_dir}{sep}{name}"
-
-        if len(path) > 32767:
-            logger.warning("Path très long tronqué: %s caractères", len(path))
-            path = path[:32767]
-
-        return {
-            "name": name[:255],
-            "host": str(row.get("Host", "")).strip(),
-            "extension": str(row.get("Extension", "")).strip().lower(),
-            "username": str(row.get("Username", "")).strip(),
-            "hostname": str(row.get("Hostname", "")).strip(),
-            "unc_directory": unc_dir,
-            "creation_time": str(row.get("CreationTime", "")).strip(),
-            "last_write_time": str(row.get("LastWriteTime", "")).strip(),
-            "readable": bool(row.get("Readable", False)),
-            "writeable": bool(row.get("Writeable", False)),
-            "deletable": bool(row.get("Deletable", False)),
-            "directory_type": str(row.get("DirectoryType", "")).strip(),
-            "base": str(row.get("Base", "")).strip(),
-            "path": path,
-            "file_size": int(row.get("FileSize", 0)),
-            "owner": str(row.get("Owner", "") or "").strip(),
-            "fast_hash": str(row.get("FastHash", "") or "").strip(),
-            "access_time": str(row.get("AccessTime", "") or "").strip(),
-            "file_attributes": str(row.get("FileAttributes", "") or "").strip(),
-            "file_signature": str(row.get("FileSignature", "") or "").strip(),
-            "last_modified": str(
-                row.get("LastWriteTime", "") or row.get("CreationTime", "") or ""
-            ).strip(),
-        }
-
     def transform_metadata_from_dict(self, row_dict: Dict[str, str]) -> Dict[str, Any]:
         """Transforme un dict issu du parser SMBeagle en données prêtes pour SQLite."""
-
         unc_dir = row_dict.get("UNCDirectory", "").strip()
         name = row_dict.get("Name", "").strip()
 
+        # Construire le path
         if unc_dir.endswith("\\") or unc_dir.endswith("/"):
             path = f"{unc_dir}{name}"
         else:
@@ -387,7 +428,6 @@ class CSVParser:
         chunk_size: int = 10000,
     ) -> Dict[str, Any]:
         """Parse le CSV et importe dans SQLite sans altérer les chemins."""
-
         chunk = chunk_size or self.chunk_size
         start = time.perf_counter()
         total_files = 0
@@ -399,6 +439,7 @@ class CSVParser:
         self._ensure_schema(conn)
 
         try:
+            # Validation du format si requise
             validation_errors = self.validate_csv_format(csv_file)
             if validation_errors and self.validation_strict:
                 conn.close()
@@ -410,11 +451,14 @@ class CSVParser:
                     "validation_stats": validation_stats,
                 }
 
+            # Import des données
             for batch in parse_csv_with_smbeagle_format(csv_file, chunk):
                 total_files += len(batch)
+                
                 for row_dict in batch:
                     try:
                         data = self.transform_metadata_from_dict(row_dict)
+                        
                         conn.execute(
                             """
                             INSERT OR IGNORE INTO fichiers (
@@ -451,15 +495,19 @@ class CSVParser:
                             ),
                         )
                         imported_files += 1
-                    except Exception as exc:  # pragma: no cover - unexpected
+                        
+                    except Exception as exc:
                         logger.warning("Erreur lors de l'insertion: %s", exc)
                         validation_stats["invalid_rows"] += 1
                         errors.append(str(exc))
+
                 conn.commit()
+
         finally:
             conn.close()
 
         processing_time = time.perf_counter() - start
+
         return {
             "total_files": total_files,
             "imported_files": imported_files,
@@ -467,3 +515,4 @@ class CSVParser:
             "processing_time": processing_time,
             "validation_stats": validation_stats,
         }
+

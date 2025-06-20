@@ -427,7 +427,8 @@ No need to run analysis to see your files.
 
                 # Validation de format sur un échantillon
                 df = pd.read_csv(file_path, nrows=10)
-                errors = parser.validate_csv_format(df)
+                #errors = parser.validate_csv_format(df)
+                errors = parser.validate_csv_format(Path(file_path))
                 if errors:
                     messagebox.showerror(
                         "Invalid CSV Format",
@@ -1555,7 +1556,7 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        path[-50:] if len(path) > 50 else path,
+                        path[-50:] + "..." if len(path) > 50 else path,
                         size,
                         owner,
                         creation_time,
