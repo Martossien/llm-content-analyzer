@@ -84,7 +84,9 @@ templates:
   comprehensive:
     system_prompt: |
       Tu es un expert en analyse de documents pour entreprise.
-      Analyse ce fichier et retourne UNIQUEMENT un JSON structuré.
+      IMPORTANT: Tu dois retourner UNIQUEMENT un objet JSON valide, sans texte avant ni après.
+      Ne commence pas par "Voici l'analyse" ou "En conclusion".
+      Réponds SEULEMENT avec le JSON structuré demandé.
 
     user_template: |
       Fichier: {{ file_name }}
@@ -92,7 +94,7 @@ templates:
       Propriétaire: {{ owner }}
       Dernière modification: {{ last_modified }}
 
-      Analyse selon ces domaines et retourne UNIQUEMENT ce JSON :
+      Analyse ce fichier et retourne UNIQUEMENT ce JSON (rien d'autre) :
       {
         "security": {"classification": "C0|C1|C2|C3", "confidence": 85, "justification": "Raison du classement"},
         "rgpd": {"risk_level": "none|low|medium|high", "data_types": ["email", "phone"], "confidence": 90},
