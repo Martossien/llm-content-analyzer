@@ -377,12 +377,24 @@ No need to run analysis to see your files.
         batch_frame.pack(fill="x", padx=5, pady=5)
 
         self.max_files_var = tk.StringVar(value="0")
-        ttk.Button(batch_frame, text="START BATCH ANALYSIS", command=self.start_analysis).pack(side="left", padx=5)
-        ttk.Button(batch_frame, text="ANALYZE FILTERED FILES", command=self.analyze_filtered_files).pack(side="left", padx=5)
-        ttk.Button(batch_frame, text="REPROCESS ERRORS", command=self.reprocess_errors).pack(side="left", padx=5)
+        ttk.Button(
+            batch_frame, text="START BATCH ANALYSIS", command=self.start_analysis
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            batch_frame,
+            text="ANALYZE FILTERED FILES",
+            command=self.analyze_filtered_files,
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            batch_frame, text="REPROCESS ERRORS", command=self.reprocess_errors
+        ).pack(side="left", padx=5)
         ttk.Label(batch_frame, text="Max Files:").pack(side="left", padx=5)
-        ttk.Entry(batch_frame, textvariable=self.max_files_var, width=6).pack(side="left")
-        ttk.Button(batch_frame, text="ALL FILES", command=lambda: self.max_files_var.set("0")).pack(side="left", padx=5)
+        ttk.Entry(batch_frame, textvariable=self.max_files_var, width=6).pack(
+            side="left"
+        )
+        ttk.Button(
+            batch_frame, text="ALL FILES", command=lambda: self.max_files_var.set("0")
+        ).pack(side="left", padx=5)
 
         # SECTION 6 ------------------------------------------------------
         status_bar = ttk.Frame(self.root)
@@ -421,12 +433,16 @@ No need to run analysis to see your files.
                         "Invalid CSV Format",
                         "CSV validation failed:\n" + "\n".join(errors),
                     )
-                    self.file_path_label.config(text="Invalid CSV format", background="red")
+                    self.file_path_label.config(
+                        text="Invalid CSV format", background="red"
+                    )
                     self.csv_file_path = None
                     return
 
                 # Feedback visuel pendant l'import
-                self.file_path_label.config(text="Importing CSV...", background="orange")
+                self.file_path_label.config(
+                    text="Importing CSV...", background="orange"
+                )
                 self.root.update()
 
                 output_db = Path("analysis_results.db")
@@ -437,7 +453,9 @@ No need to run analysis to see your files.
                 )
 
                 if import_result["errors"]:
-                    error_msg = "Import failed:\n" + "\n".join(import_result["errors"][:3])
+                    error_msg = "Import failed:\n" + "\n".join(
+                        import_result["errors"][:3]
+                    )
                     messagebox.showerror("Import Error", error_msg)
                     self.file_path_label.config(text="Import failed", background="red")
                     self.csv_file_path = None
@@ -446,7 +464,9 @@ No need to run analysis to see your files.
                 self.db_manager = DBManager(output_db)
 
                 db_size_kb = output_db.stat().st_size / 1024
-                self.status_db_label.config(text=f"DB: {output_db.name} ({db_size_kb:.1f}KB)")
+                self.status_db_label.config(
+                    text=f"DB: {output_db.name} ({db_size_kb:.1f}KB)"
+                )
 
                 self.csv_file_path = file_path
                 self.file_path_label.config(text=file_path, background="lightgreen")
@@ -572,8 +592,7 @@ No need to run analysis to see your files.
                 "Configuration Saved", "API configuration has been saved successfully!"
             )
             self.status_config_label.config(
-                text=f"Config: {self.config_path.name} (saved)",
-                foreground="green"
+                text=f"Config: {self.config_path.name} (saved)", foreground="green"
             )
             self.log_action("API configuration saved")
         except Exception as e:  # pragma: no cover - file errors
@@ -1106,7 +1125,9 @@ No need to run analysis to see your files.
             for row in files:
                 res = analyzer.analyze_single_file(row)
                 if res.get("status") in {"completed", "cached"}:
-                    db_mgr.store_analysis_result(row["id"], res.get("task_id", ""), res.get("result", {}))
+                    db_mgr.store_analysis_result(
+                        row["id"], res.get("task_id", ""), res.get("result", {})
+                    )
                     db_mgr.update_file_status(row["id"], "completed")
         except Exception as exc:
             messagebox.showerror("Batch Error", str(exc))
@@ -1120,14 +1141,33 @@ No need to run analysis to see your files.
             analyzer = ContentAnalyzer(self.config_path)
             db_mgr = DBManager(db_path)
             conn = sqlite3.connect(db_path)
-            rows = conn.execute("SELECT * FROM fichiers WHERE status='error'").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM fichiers WHERE status='error'"
+            ).fetchall()
             conn.close()
-            columns = ["id", "path", "file_size", "owner", "fast_hash", "access_time", "file_attributes", "file_signature", "last_modified", "status", "exclusion_reason", "priority_score", "special_flags", "processed_at"]
+            columns = [
+                "id",
+                "path",
+                "file_size",
+                "owner",
+                "fast_hash",
+                "access_time",
+                "file_attributes",
+                "file_signature",
+                "last_modified",
+                "status",
+                "exclusion_reason",
+                "priority_score",
+                "special_flags",
+                "processed_at",
+            ]
             for r in rows[: int(self.max_files_var.get() or len(rows))]:
                 row = dict(zip(columns, r))
                 res = analyzer.analyze_single_file(row)
                 if res.get("status") in {"completed", "cached"}:
-                    db_mgr.store_analysis_result(row["id"], res.get("task_id", ""), res.get("result", {}))
+                    db_mgr.store_analysis_result(
+                        row["id"], res.get("task_id", ""), res.get("result", {})
+                    )
                     db_mgr.update_file_status(row["id"], "completed")
         except Exception as exc:
             messagebox.showerror("Reprocess Error", str(exc))
@@ -1192,7 +1232,7 @@ No need to run analysis to see your files.
 
             results_window = tk.Toplevel(self.root)
             results_window.title("Analysis Results Viewer")
-            results_window.geometry("1000x700")
+            results_window.geometry("1400x700")
             results_window.transient(self.root)
 
             controls_frame = ttk.Frame(results_window)
@@ -1241,7 +1281,15 @@ No need to run analysis to see your files.
 
             columns = (
                 "ID",
-                "File Path",
+                "Name",
+                "Host",
+                "Extension",
+                "Username",
+                "Path",
+                "Size",
+                "Owner",
+                "Creation Time",
+                "Last Modified",
                 "Status",
                 "Security",
                 "RGPD",
@@ -1253,7 +1301,15 @@ No need to run analysis to see your files.
             tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
 
             tree.heading("ID", text="ID")
-            tree.heading("File Path", text="File Path")
+            tree.heading("Name", text="Name")
+            tree.heading("Host", text="Host")
+            tree.heading("Extension", text="Extension")
+            tree.heading("Username", text="Username")
+            tree.heading("Path", text="Path")
+            tree.heading("Size", text="Size (bytes)")
+            tree.heading("Owner", text="Owner")
+            tree.heading("Creation Time", text="Created")
+            tree.heading("Last Modified", text="Last Modified")
             tree.heading("Status", text="Status")
             tree.heading("Security", text="Security")
             tree.heading("RGPD", text="RGPD")
@@ -1263,7 +1319,15 @@ No need to run analysis to see your files.
             tree.heading("Processing Time", text="Proc. Time (ms)")
 
             tree.column("ID", width=50)
-            tree.column("File Path", width=300)
+            tree.column("Name", width=200)
+            tree.column("Host", width=120)
+            tree.column("Extension", width=80)
+            tree.column("Username", width=150)
+            tree.column("Path", width=400)
+            tree.column("Size", width=100)
+            tree.column("Owner", width=200)
+            tree.column("Creation Time", width=120)
+            tree.column("Last Modified", width=120)
             tree.column("Status", width=80)
             tree.column("Security", width=80)
             tree.column("RGPD", width=80)
@@ -1272,9 +1336,15 @@ No need to run analysis to see your files.
             tree.column("Confidence", width=80)
             tree.column("Processing Time", width=100)
 
-            v_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-            h_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
-            tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+            v_scrollbar = ttk.Scrollbar(
+                tree_frame, orient="vertical", command=tree.yview
+            )
+            h_scrollbar = ttk.Scrollbar(
+                tree_frame, orient="horizontal", command=tree.xview
+            )
+            tree.configure(
+                yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set
+            )
 
             tree.pack(side="left", fill="both", expand=True)
             v_scrollbar.pack(side="right", fill="y")
@@ -1331,10 +1401,18 @@ No need to run analysis to see your files.
                     tree.selection_set(items[-1])
                     tree.see(items[-1])
 
-            ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(side="left", padx=2)
-            ttk.Button(nav_frame, text="◀ PREV FILE", command=goto_prev).pack(side="left", padx=2)
-            ttk.Button(nav_frame, text="NEXT FILE ▶", command=goto_next).pack(side="left", padx=2)
-            ttk.Button(nav_frame, text="LAST FILE", command=goto_last).pack(side="left", padx=2)
+            ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(
+                side="left", padx=2
+            )
+            ttk.Button(nav_frame, text="◀ PREV FILE", command=goto_prev).pack(
+                side="left", padx=2
+            )
+            ttk.Button(nav_frame, text="NEXT FILE ▶", command=goto_next).pack(
+                side="left", padx=2
+            )
+            ttk.Button(nav_frame, text="LAST FILE", command=goto_last).pack(
+                side="left", padx=2
+            )
 
             ttk.Label(nav_frame, text="GO TO FILE:").pack(side="left", padx=5)
             goto_var = tk.StringVar()
@@ -1356,7 +1434,9 @@ No need to run analysis to see your files.
             self.log_action("Results viewer opened", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Results Error", f"Failed to open results viewer:\n{str(e)}")
+            messagebox.showerror(
+                "Results Error", f"Failed to open results viewer:\n{str(e)}"
+            )
             self.log_action(f"Results viewer failed: {str(e)}", "ERROR")
 
     def refresh_results_table(self, tree, status_filter, classification_filter):
@@ -1397,7 +1477,8 @@ No need to run analysis to see your files.
                 return
 
             query = """
-        SELECT f.id, f.path, f.status,
+        SELECT f.id, f.name, f.host, f.extension, f.username, f.path, f.file_size,
+               f.owner, f.creation_time, f.last_modified, f.status,
                r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
                r.confidence_global, r.processing_time_ms
         FROM fichiers f
@@ -1421,7 +1502,25 @@ No need to run analysis to see your files.
             conn.close()
 
             for row in rows:
-                file_id, file_path, status, security, rgpd, finance, legal, confidence, proc_time = row
+                (
+                    file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    path,
+                    size,
+                    owner,
+                    creation_time,
+                    last_modified,
+                    status,
+                    security,
+                    rgpd,
+                    finance,
+                    legal,
+                    confidence,
+                    proc_time,
+                ) = row
 
                 try:
                     security_data = json.loads(security) if security else {}
@@ -1452,7 +1551,15 @@ No need to run analysis to see your files.
                     "end",
                     values=(
                         file_id,
-                        file_path[-50:] if len(file_path) > 50 else file_path,
+                        name,
+                        host,
+                        extension,
+                        username,
+                        path[-50:] if len(path) > 50 else path,
+                        size,
+                        owner,
+                        creation_time,
+                        last_modified,
                         status,
                         security_class,
                         rgpd_risk,
@@ -1466,7 +1573,9 @@ No need to run analysis to see your files.
             self.log_action(f"Results table refreshed: {len(rows)} entries", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Refresh Error", f"Failed to refresh results:\n{str(e)}")
+            messagebox.showerror(
+                "Refresh Error", f"Failed to refresh results:\n{str(e)}"
+            )
             self.log_action(f"Results refresh failed: {str(e)}", "ERROR")
 
     def show_file_details(self, tree):
@@ -1510,7 +1619,20 @@ No need to run analysis to see your files.
             text_widget = tk.Text(details_window, wrap="word", font=("Consolas", 10))
             text_widget.pack(fill="both", expand=True, padx=10, pady=10)
 
-            path, size, owner, modified, status, security, rgpd, finance, legal, confidence, proc_time, created = row
+            (
+                path,
+                size,
+                owner,
+                modified,
+                status,
+                security,
+                rgpd,
+                finance,
+                legal,
+                confidence,
+                proc_time,
+                created,
+            ) = row
 
             llm_json = {
                 "security": json.loads(security) if security else {},
@@ -1540,14 +1662,16 @@ File Information:
             text_widget.insert(1.0, details_content)
             text_widget.config(state="disabled")
 
-            ttk.Button(details_window, text="Close", command=details_window.destroy).pack(
-                pady=5
-            )
+            ttk.Button(
+                details_window, text="Close", command=details_window.destroy
+            ).pack(pady=5)
 
             self.log_action(f"File details viewed: ID {file_id}", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Details Error", f"Failed to show file details:\n{str(e)}")
+            messagebox.showerror(
+                "Details Error", f"Failed to show file details:\n{str(e)}"
+            )
             self.log_action(f"File details failed: {str(e)}", "ERROR")
 
     def display_analysis_result(self, result_data: dict) -> None:
@@ -1583,17 +1707,13 @@ File Information:
             classification = security.get("classification", "Non classifié")
             confidence = security.get("confidence", 0)
             justification = security.get("justification", "Aucune justification")
-            formatted += (
-                f"🛡️ SÉCURITÉ\n   Classification: {classification}\n   Confiance: {confidence}%\n   Justification: {justification}\n\n"
-            )
+            formatted += f"🛡️ SÉCURITÉ\n   Classification: {classification}\n   Confiance: {confidence}%\n   Justification: {justification}\n\n"
 
         rgpd = llm_response.get("rgpd", {})
         if rgpd:
             risk_level = rgpd.get("risk_level", "unknown")
             data_types = rgpd.get("data_types", [])
-            formatted += (
-                f"🔒 RGPD\n   Niveau de risque: {risk_level.upper()}\n   Types de données: {', '.join(data_types) if data_types else 'Aucune'}\n\n"
-            )
+            formatted += f"🔒 RGPD\n   Niveau de risque: {risk_level.upper()}\n   Types de données: {', '.join(data_types) if data_types else 'Aucune'}\n\n"
 
         finance = llm_response.get("finance", {})
         if finance:
@@ -1612,9 +1732,7 @@ File Information:
         if legal:
             contract_type = legal.get("contract_type", "none")
             parties = legal.get("parties", [])
-            formatted += (
-                f"⚖️ LÉGAL\n   Type de contrat: {contract_type}\n   Parties: {', '.join(parties) if parties else 'Aucune'}\n"
-            )
+            formatted += f"⚖️ LÉGAL\n   Type de contrat: {contract_type}\n   Parties: {', '.join(parties) if parties else 'Aucune'}\n"
 
         return formatted
 
@@ -1623,7 +1741,9 @@ File Information:
         try:
             db_path = Path("analysis_results.db")
             if not db_path.exists():
-                messagebox.showwarning("No Results", "No analysis results found to export")
+                messagebox.showwarning(
+                    "No Results", "No analysis results found to export"
+                )
                 return
 
             export_window = tk.Toplevel(self.root)
@@ -1659,7 +1779,9 @@ File Information:
             filter_frame.pack(fill="x", padx=10, pady=10)
 
             self.export_status_filter = tk.StringVar(value="All")
-            ttk.Label(filter_frame, text="Status:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+            ttk.Label(filter_frame, text="Status:").grid(
+                row=0, column=0, sticky="w", padx=5, pady=2
+            )
             status_combo = ttk.Combobox(
                 filter_frame,
                 textvariable=self.export_status_filter,
@@ -1707,14 +1829,16 @@ File Information:
                 text="Export",
                 command=lambda: self.perform_export(export_window),
             ).pack(side="right", padx=5)
-            ttk.Button(buttons_frame, text="Cancel", command=export_window.destroy).pack(
-                side="right", padx=5
-            )
+            ttk.Button(
+                buttons_frame, text="Cancel", command=export_window.destroy
+            ).pack(side="right", padx=5)
 
             self.log_action("Export dialog opened", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to open export dialog:\n{str(e)}")
+            messagebox.showerror(
+                "Export Error", f"Failed to open export dialog:\n{str(e)}"
+            )
             self.log_action(f"Export dialog failed: {str(e)}", "ERROR")
 
     def perform_export(self, export_window):
@@ -1741,7 +1865,11 @@ File Information:
             cursor = conn.cursor()
 
             query = """
-        SELECT f.id, f.path, f.file_size, f.owner, f.last_modified, f.status,
+        SELECT f.id, f.name, f.host, f.extension, f.username, f.hostname,
+               f.unc_directory, f.creation_time, f.last_write_time, f.readable,
+               f.writeable, f.deletable, f.directory_type, f.base, f.path,
+               f.file_size, f.owner, f.fast_hash, f.access_time,
+               f.file_attributes, f.file_signature, f.last_modified, f.status,
                r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
                r.confidence_global, r.processing_time_ms, r.created_at
         FROM fichiers f
@@ -1792,10 +1920,27 @@ File Information:
 
             headers = [
                 "ID",
-                "File Path",
-                "File Size",
+                "Name",
+                "Host",
+                "Extension",
+                "Username",
+                "Hostname",
+                "UNCDirectory",
+                "CreationTime",
+                "LastWriteTime",
+                "Readable",
+                "Writeable",
+                "Deletable",
+                "DirectoryType",
+                "Base",
+                "Path",
+                "FileSize",
                 "Owner",
-                "Last Modified",
+                "FastHash",
+                "AccessTime",
+                "FileAttributes",
+                "FileSignature",
+                "LastModified",
                 "Status",
                 "Security Classification",
                 "RGPD Risk",
@@ -1807,22 +1952,41 @@ File Information:
             ]
 
             if self.include_raw_json.get():
-                headers.extend([
-                    "Security JSON",
-                    "RGPD JSON",
-                    "Finance JSON",
-                    "Legal JSON",
-                ])
+                headers.extend(
+                    [
+                        "Security JSON",
+                        "RGPD JSON",
+                        "Finance JSON",
+                        "Legal JSON",
+                    ]
+                )
 
             writer.writerow(headers)
 
             for row in rows:
                 (
                     file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    hostname,
+                    unc_dir,
+                    creation_time,
+                    last_write_time,
+                    readable,
+                    writeable,
+                    deletable,
+                    directory_type,
+                    base,
                     path,
                     size,
                     owner,
-                    modified,
+                    fast_hash,
+                    access_time,
+                    file_attributes,
+                    file_signature,
+                    last_modified,
                     status,
                     security,
                     rgpd,
@@ -1859,10 +2023,27 @@ File Information:
 
                 data_row = [
                     file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    hostname,
+                    unc_dir,
+                    creation_time,
+                    last_write_time,
+                    readable,
+                    writeable,
+                    deletable,
+                    directory_type,
+                    base,
                     path,
                     size,
                     owner,
-                    modified,
+                    fast_hash,
+                    access_time,
+                    file_attributes,
+                    file_signature,
+                    last_modified,
                     status,
                     security_class,
                     rgpd_risk,
@@ -1895,10 +2076,27 @@ File Information:
         for row in rows:
             (
                 file_id,
+                name,
+                host,
+                extension,
+                username,
+                hostname,
+                unc_dir,
+                creation_time,
+                last_write_time,
+                readable,
+                writeable,
+                deletable,
+                directory_type,
+                base,
                 path,
                 size,
                 owner,
-                modified,
+                fast_hash,
+                access_time,
+                file_attributes,
+                file_signature,
+                last_modified,
                 status,
                 security,
                 rgpd,
@@ -1912,10 +2110,27 @@ File Information:
             file_data = {
                 "id": file_id,
                 "file_info": {
+                    "name": name,
+                    "host": host,
+                    "extension": extension,
+                    "username": username,
+                    "hostname": hostname,
+                    "unc_directory": unc_dir,
+                    "creation_time": creation_time,
+                    "last_write_time": last_write_time,
+                    "readable": readable,
+                    "writeable": writeable,
+                    "deletable": deletable,
+                    "directory_type": directory_type,
+                    "base": base,
                     "path": path,
                     "size_bytes": size,
                     "owner": owner,
-                    "last_modified": modified,
+                    "fast_hash": fast_hash,
+                    "access_time": access_time,
+                    "file_attributes": file_attributes,
+                    "file_signature": file_signature,
+                    "last_modified": last_modified,
                 },
                 "analysis": {
                     "status": status,
@@ -1943,10 +2158,27 @@ File Information:
             for row in rows:
                 (
                     file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    hostname,
+                    unc_dir,
+                    creation_time,
+                    last_write_time,
+                    readable,
+                    writeable,
+                    deletable,
+                    directory_type,
+                    base,
                     path,
                     size,
                     owner,
-                    modified,
+                    fast_hash,
+                    access_time,
+                    file_attributes,
+                    file_signature,
+                    last_modified,
                     status,
                     security,
                     rgpd,
@@ -1968,12 +2200,31 @@ File Information:
                 main_data.append(
                     {
                         "ID": file_id,
-                        "File Path": path,
-                        "File Size": size,
+                        "Name": name,
+                        "Host": host,
+                        "Extension": extension,
+                        "Username": username,
+                        "Hostname": hostname,
+                        "UNCDirectory": unc_dir,
+                        "CreationTime": creation_time,
+                        "LastWriteTime": last_write_time,
+                        "Readable": readable,
+                        "Writeable": writeable,
+                        "Deletable": deletable,
+                        "DirectoryType": directory_type,
+                        "Base": base,
+                        "Path": path,
+                        "FileSize": size,
                         "Owner": owner,
-                        "Last Modified": modified,
+                        "FastHash": fast_hash,
+                        "AccessTime": access_time,
+                        "FileAttributes": file_attributes,
+                        "FileSignature": file_signature,
+                        "LastModified": last_modified,
                         "Status": status,
-                        "Security Classification": security_data.get("classification", "N/A"),
+                        "Security Classification": security_data.get(
+                            "classification", "N/A"
+                        ),
                         "RGPD Risk": rgpd_data.get("risk_level", "N/A"),
                         "Finance Type": finance_data.get("document_type", "N/A"),
                         "Legal Type": legal_data.get("contract_type", "N/A"),
@@ -2001,16 +2252,18 @@ File Information:
                         ],
                         "Value": [
                             len(rows),
-                            sum(1 for r in rows if r[5] == "completed"),
-                            sum(1 for r in rows if r[5] == "error"),
-                            sum(r[10] for r in rows if r[10])
-                            / len([r for r in rows if r[10]])
-                            if any(r[10] for r in rows)
-                            else 0,
-                            sum(1 for r in rows if r[6] and "C0" in str(r[6])),
-                            sum(1 for r in rows if r[6] and "C1" in str(r[6])),
-                            sum(1 for r in rows if r[6] and "C2" in str(r[6])),
-                            sum(1 for r in rows if r[6] and "C3" in str(r[6])),
+                            sum(1 for r in rows if r[22] == "completed"),
+                            sum(1 for r in rows if r[22] == "error"),
+                            (
+                                sum(r[27] for r in rows if r[27])
+                                / len([r for r in rows if r[27]])
+                                if any(r[27] for r in rows)
+                                else 0
+                            ),
+                            sum(1 for r in rows if r[23] and "C0" in str(r[23])),
+                            sum(1 for r in rows if r[23] and "C1" in str(r[23])),
+                            sum(1 for r in rows if r[23] and "C2" in str(r[23])),
+                            sum(1 for r in rows if r[23] and "C3" in str(r[23])),
                         ],
                     }
                     df_stats = pd.DataFrame(stats_data)
@@ -2162,7 +2415,9 @@ File Information:
             db_path = Path("analysis_results.db")
             if not db_path.exists():
                 messagebox.showwarning(
-                    "No Database", "No database file found to compact", parent=parent_window
+                    "No Database",
+                    "No database file found to compact",
+                    parent=parent_window,
                 )
                 return
 
@@ -2185,7 +2440,9 @@ File Information:
 
         except Exception as e:
             messagebox.showerror(
-                "Compaction Error", f"Failed to compact database:\n{str(e)}", parent=parent_window
+                "Compaction Error",
+                f"Failed to compact database:\n{str(e)}",
+                parent=parent_window,
             )
             self.log_action(f"Database compaction failed: {str(e)}", "ERROR")
 
@@ -2195,7 +2452,9 @@ File Information:
             db_path = Path("analysis_results.db")
             if not db_path.exists():
                 messagebox.showwarning(
-                    "No Database", "No database file found to backup", parent=parent_window
+                    "No Database",
+                    "No database file found to backup",
+                    parent=parent_window,
                 )
                 return
 
@@ -2220,7 +2479,9 @@ File Information:
 
         except Exception as e:
             messagebox.showerror(
-                "Backup Error", f"Failed to backup database:\n{str(e)}", parent=parent_window
+                "Backup Error",
+                f"Failed to backup database:\n{str(e)}",
+                parent=parent_window,
             )
             self.log_action(f"Database backup failed: {str(e)}", "ERROR")
 
@@ -2229,7 +2490,9 @@ File Information:
         try:
             cache_db = Path("analysis_results_cache.db")
             if not cache_db.exists():
-                messagebox.showinfo("No Cache", "No cache database found", parent=parent_window)
+                messagebox.showinfo(
+                    "No Cache", "No cache database found", parent=parent_window
+                )
                 return
 
             cache_manager = CacheManager(cache_db)
@@ -2253,7 +2516,9 @@ File Information:
             )
 
         except Exception as e:
-            messagebox.showerror("Clear Error", f"Failed to clear cache:\n{str(e)}", parent=parent_window)
+            messagebox.showerror(
+                "Clear Error", f"Failed to clear cache:\n{str(e)}", parent=parent_window
+            )
             self.log_action(f"Cache clear failed: {str(e)}", "ERROR")
 
     def show_cache_stats(self, parent_window: tk.Toplevel) -> None:
@@ -2261,7 +2526,9 @@ File Information:
         try:
             cache_db = Path("analysis_results_cache.db")
             if not cache_db.exists():
-                messagebox.showinfo("No Cache", "No cache database found", parent=parent_window)
+                messagebox.showinfo(
+                    "No Cache", "No cache database found", parent=parent_window
+                )
                 return
 
             cache_manager = CacheManager(cache_db)
@@ -2292,12 +2559,18 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             stats_text.insert(1.0, stats_content)
             stats_text.config(state="disabled")
 
-            ttk.Button(stats_window, text="Close", command=stats_window.destroy).pack(pady=5)
+            ttk.Button(stats_window, text="Close", command=stats_window.destroy).pack(
+                pady=5
+            )
 
             self.log_action("Cache statistics viewed", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Stats Error", f"Failed to get cache stats:\n{str(e)}", parent=parent_window)
+            messagebox.showerror(
+                "Stats Error",
+                f"Failed to get cache stats:\n{str(e)}",
+                parent=parent_window,
+            )
             self.log_action(f"Cache stats failed: {str(e)}", "ERROR")
 
     def export_configuration(self, parent_window: tk.Toplevel) -> None:
@@ -2316,7 +2589,9 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             export_path = Path(export_path)
             if not export_path.stem.endswith(timestamp):
-                export_path = export_path.with_name(f"{export_path.stem}_{timestamp}{export_path.suffix}")
+                export_path = export_path.with_name(
+                    f"{export_path.stem}_{timestamp}{export_path.suffix}"
+                )
 
             import shutil
 
@@ -2330,7 +2605,11 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             self.log_action(f"Configuration exported to: {export_path.name}", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export configuration:\n{str(e)}", parent=parent_window)
+            messagebox.showerror(
+                "Export Error",
+                f"Failed to export configuration:\n{str(e)}",
+                parent=parent_window,
+            )
             self.log_action(f"Configuration export failed: {str(e)}", "ERROR")
 
     def import_configuration(self, parent_window: tk.Toplevel) -> None:
@@ -2349,7 +2628,9 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
                 imported_config = yaml.safe_load(f)
 
             required_sections = ["api_config", "exclusions", "templates"]
-            missing_sections = [sec for sec in required_sections if sec not in imported_config]
+            missing_sections = [
+                sec for sec in required_sections if sec not in imported_config
+            ]
 
             if missing_sections:
                 messagebox.showerror(
@@ -2384,10 +2665,16 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
                 f"Configuration imported successfully!\nPrevious config backed up as: {backup_path.name}",
                 parent=parent_window,
             )
-            self.log_action(f"Configuration imported from: {Path(import_path).name}", "INFO")
+            self.log_action(
+                f"Configuration imported from: {Path(import_path).name}", "INFO"
+            )
 
         except Exception as e:
-            messagebox.showerror("Import Error", f"Failed to import configuration:\n{str(e)}", parent=parent_window)
+            messagebox.showerror(
+                "Import Error",
+                f"Failed to import configuration:\n{str(e)}",
+                parent=parent_window,
+            )
             self.log_action(f"Configuration import failed: {str(e)}", "ERROR")
 
     def reset_configuration(self, parent_window: tk.Toplevel) -> None:
@@ -2453,5 +2740,9 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             self.log_action("Configuration reset to defaults", "INFO")
 
         except Exception as e:
-            messagebox.showerror("Reset Error", f"Failed to reset configuration:\n{str(e)}", parent=parent_window)
+            messagebox.showerror(
+                "Reset Error",
+                f"Failed to reset configuration:\n{str(e)}",
+                parent=parent_window,
+            )
             self.log_action(f"Configuration reset failed: {str(e)}", "ERROR")
