@@ -97,6 +97,24 @@ class MainWindow:
         self.update_service_status()
         self.update_logs_display()
 
+        welcome_text = f"""
+BIENVENUE DANS CONTENT ANALYZER GUI V1.0
+{'='*60}
+
+WORKFLOW SIMPLIFIÉ:
+1. 📁 Click 'Browse CSV...' → Automatic import after validation
+2. 🔍 Click 'View Results' → See imported files immediately
+3. ▶️ Click 'START ANALYSIS' → AI analysis on imported files
+4. 📊 Click 'View Results' → See analysis results
+
+NEW: CSV import is now automatic!
+No need to run analysis to see your files.
+
+{'='*60}
+"""
+        # messagebox.showinfo("Welcome", welcome_text)
+        self.log_action("Application started - CSV auto-import enabled", "INFO")
+
     # ------------------------------------------------------------------
     # UI BUILDING
     # ------------------------------------------------------------------
@@ -386,6 +404,7 @@ class MainWindow:
         messagebox.showinfo("CSV Preview", info)
 
     def browse_csv_file(self) -> None:
+        """Sélectionne, valide et importe automatiquement un fichier CSV."""
         file_path = filedialog.askopenfilename(
             title="Select SMBeagle CSV File",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
@@ -393,6 +412,8 @@ class MainWindow:
         if file_path:
             try:
                 parser = CSVParser(self.config_path)
+
+                # Validation de format sur un échantillon
                 df = pd.read_csv(file_path, nrows=10)
                 errors = parser.validate_csv_format(df)
                 if errors:
@@ -400,21 +421,63 @@ class MainWindow:
                         "Invalid CSV Format",
                         "CSV validation failed:\n" + "\n".join(errors),
                     )
-                    self.file_path_label.config(background="red")
+                    self.file_path_label.config(text="Invalid CSV format", background="red")
                     self.csv_file_path = None
                     return
+
+                # Feedback visuel pendant l'import
+                self.file_path_label.config(text="Importing CSV...", background="orange")
+                self.root.update()
+
+                output_db = Path("analysis_results.db")
+                import_result = parser.parse_csv(
+                    csv_file=Path(file_path),
+                    db_file=output_db,
+                    chunk_size=10000,
+                )
+
+                if import_result["errors"]:
+                    error_msg = "Import failed:\n" + "\n".join(import_result["errors"][:3])
+                    messagebox.showerror("Import Error", error_msg)
+                    self.file_path_label.config(text="Import failed", background="red")
+                    self.csv_file_path = None
+                    return
+
+                self.db_manager = DBManager(output_db)
+
+                db_size_kb = output_db.stat().st_size / 1024
+                self.status_db_label.config(text=f"DB: {output_db.name} ({db_size_kb:.1f}KB)")
+
                 self.csv_file_path = file_path
                 self.file_path_label.config(text=file_path, background="lightgreen")
-                file_size = Path(file_path).stat().st_size
-                row_count = len(df)
-                info = f"Loaded: {row_count} rows, {file_size/1024:.1f}KB"
-                self.show_csv_preview(info)
+
+                success_msg = (
+                    f"✅ CSV imported successfully!\n\n"
+                    f"📁 File: {Path(file_path).name}\n"
+                    f"📊 Files imported: {import_result['imported_files']:,}\n"
+                    f"⏱️ Processing time: {import_result['processing_time']:.1f}s\n"
+                    f"💾 Database: {output_db.name} ({db_size_kb:.1f}KB)"
+                )
+                messagebox.showinfo("Import Complete", success_msg)
+
+                self.log_action(
+                    f"CSV imported: {import_result['imported_files']:,} files from {Path(file_path).name}",
+                    "INFO",
+                )
+
                 if self.file_tooltip:
                     self.file_tooltip.hide()
-                self.file_tooltip = Tooltip(self.file_path_label, info)
-                self.log_action(f"CSV file selected: {file_path}")
+                tooltip_text = (
+                    f"Imported: {import_result['imported_files']:,} files\n"
+                    f"Database: {output_db.name} ({db_size_kb:.1f}KB)"
+                )
+                self.file_tooltip = Tooltip(self.file_path_label, tooltip_text)
+
             except Exception as e:  # pragma: no cover - I/O errors
-                messagebox.showerror("File Error", f"Cannot read CSV file:\n{str(e)}")
+                messagebox.showerror("Import Error", f"Failed to import CSV:\n{str(e)}")
+                self.file_path_label.config(text="Import failed", background="red")
+                self.csv_file_path = None
+                self.log_action(f"CSV import failed: {str(e)}", "ERROR")
 
     # ------------------------------------------------------------------
     # API CONFIGURATION
@@ -1303,6 +1366,19 @@ class MainWindow:
                 tree.delete(item)
 
             db_path = Path("analysis_results.db")
+
+            # Nouveau : vérifier la présence de la base de données
+            if not db_path.exists():
+                messagebox.showinfo(
+                    "No Database",
+                    "No analysis database found.\n\n"
+                    "Please:\n"
+                    "1. Click 'Browse CSV...' to select and import a CSV file\n"
+                    "2. The import will happen automatically after validation",
+                )
+                self.log_action("Results refresh: no database file", "WARN")
+                return
+
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute(
@@ -1312,7 +1388,10 @@ class MainWindow:
                 conn.close()
                 messagebox.showinfo(
                     "No Data",
-                    "Aucun CSV chargé - Sélectionnez un fichier CSV",
+                    "Database exists but contains no imported files.\n\n"
+                    "Please:\n"
+                    "1. Click 'Browse CSV...' to select a CSV file\n"
+                    "2. The import will happen automatically",
                 )
                 self.log_action("Results refresh: table 'fichiers' missing", "WARN")
                 return
