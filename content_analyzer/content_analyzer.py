@@ -28,18 +28,20 @@ from content_analyzer.modules.prompt_manager import PromptManager
 
 # Configuration logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+
 class ContentAnalyzer:
     """Orchestrateur principal pour l'analyse de contenu LLM"""
-    
+
     def __init__(self, config_path: Optional[Path] = None) -> None:
         """Initialise l'analyseur de contenu et charge la configuration."""
 
-        self.config_path = config_path or Path("content_analyzer/config/analyzer_config.yaml")
+        self.config_path = config_path or Path(
+            "content_analyzer/config/analyzer_config.yaml"
+        )
         with open(self.config_path, "r", encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
@@ -99,10 +101,18 @@ class ContentAnalyzer:
                 "error": "Could not parse JSON from API response",
             }
 
+        resume = extracted_json.get("resume", "")
+        if isinstance(resume, str):
+            words = resume.split()
+            if len(words) > 50:
+                resume = " ".join(words[:50])
+
         return {
             "status": "completed",
             "result": extracted_json,
             "task_id": task_id,
+            "resume": resume,
+            "raw_response": json.dumps(extracted_json, ensure_ascii=False),
         }
 
     def _extract_json_from_content(self, content: str) -> Optional[Dict[str, Any]]:
@@ -116,7 +126,7 @@ class ContentAnalyzer:
         except json.JSONDecodeError:
             logger.debug("Direct JSON parsing failed, trying regex extraction")
 
-        json_pattern = r'\{(?:[^{}]|{[^{}]*})*\}'
+        json_pattern = r"\{(?:[^{}]|{[^{}]*})*\}"
         matches = re.findall(json_pattern, content, re.DOTALL)
         for match in matches:
             try:
@@ -141,7 +151,7 @@ class ContentAnalyzer:
         return self._create_fallback_json(content)
 
     def _extract_balanced_json(self, content: str) -> Optional[str]:
-        start_pos = content.find('{')
+        start_pos = content.find("{")
         if start_pos == -1:
             return None
 
@@ -154,7 +164,7 @@ class ContentAnalyzer:
                 escape_next = False
                 continue
 
-            if char == '\\':
+            if char == "\\":
                 escape_next = True
                 continue
 
@@ -163,12 +173,12 @@ class ContentAnalyzer:
                 continue
 
             if not in_string:
-                if char == '{':
+                if char == "{":
                     brace_count += 1
-                elif char == '}':
+                elif char == "}":
                     brace_count -= 1
                     if brace_count == 0:
-                        return content[start_pos:i+1]
+                        return content[start_pos : i + 1]
 
         return None
 
@@ -178,7 +188,11 @@ class ContentAnalyzer:
 
     def _create_fallback_json(self, content: str) -> Dict[str, Any]:
         return {
-            "security": {"classification": "C0", "confidence": 0, "justification": "Parsing failed"},
+            "security": {
+                "classification": "C0",
+                "confidence": 0,
+                "justification": "Parsing failed",
+            },
             "rgpd": {"risk_level": "none", "data_types": [], "confidence": 0},
             "finance": {"document_type": "none", "amounts": [], "confidence": 0},
             "legal": {"contract_type": "none", "parties": [], "confidence": 0},
@@ -197,7 +211,9 @@ class ContentAnalyzer:
             if not should_process:
                 return {"status": "filtered", "reason": reason}
 
-            file_row["priority_score"] = self.file_filter.calculate_priority_score(file_row)
+            file_row["priority_score"] = self.file_filter.calculate_priority_score(
+                file_row
+            )
 
             cache_used = False
             cached = None
@@ -217,7 +233,9 @@ class ContentAnalyzer:
 
             file_metadata = {
                 "file_name": Path(file_row["path"]).name,
-                "file_size_readable": self._format_file_size(file_row.get("file_size", 0)),
+                "file_size_readable": self._format_file_size(
+                    file_row.get("file_size", 0)
+                ),
                 "owner": file_row.get("owner", "Unknown"),
                 "last_modified": file_row.get("last_modified", ""),
                 "file_extension": Path(file_row["path"]).suffix,
@@ -245,6 +263,8 @@ class ContentAnalyzer:
                 "task_id": parsed_result.get("task_id", ""),
                 "processing_time_ms": int((time.perf_counter() - start) * 1000),
                 "cache_used": False,
+                "resume": parsed_result.get("resume", ""),
+                "raw_response": parsed_result.get("raw_response", ""),
             }
         except Exception as exc:  # pragma: no cover - runtime errors
             return {"status": "error", "error": str(exc)}
@@ -264,13 +284,15 @@ class ContentAnalyzer:
             res = self.analyze_single_file(row)
             if res.get("status") in {"completed", "cached"}:
                 self.db_manager.store_analysis_result(
-                    row["id"], res.get("task_id", ""), res.get("result", {})
+                    row["id"],
+                    res.get("task_id", ""),
+                    res.get("result", {}),
+                    res.get("resume", ""),
+                    res.get("raw_response", ""),
                 )
                 self.db_manager.update_file_status(row["id"], "completed")
             else:
-                self.db_manager.update_file_status(
-                    row["id"], "error", res.get("error")
-                )
+                self.db_manager.update_file_status(row["id"], "error", res.get("error"))
             processed += 1
 
         return {
@@ -280,29 +302,30 @@ class ContentAnalyzer:
             "processing_time": round(time.perf_counter() - start_time, 2),
             "errors": parse_res.get("errors", []),
         }
-        
+
     def analyze(self, input_file: Path, output_file: Path) -> bool:
         """
         Lance l'analyse complète d'un fichier CSV SMBeagle
-        
+
         Args:
             input_file: Fichier CSV SMBeagle enrichi
             output_file: Base SQLite de sortie
-            
+
         Returns:
             True si succès, False sinon
         """
         logger.info(f"Analyse: {input_file} -> {output_file}")
-        
+
         # TODO: Implémenter orchestration modulaire
         # 1. csv_parser.py - Parsing CSV -> SQLite
-        # 2. file_filter.py - Filtrage + scoring priorité  
+        # 2. file_filter.py - Filtrage + scoring priorité
         # 3. cache_manager.py - Cache SQLite intelligent
         # 4. api_client.py - Client HTTP avec protections
         # 5. prompt_manager.py - Templates prompts
         # 6. db_manager.py - Gestion base SQLite
-        
+
         return True
+
 
 def main(argv: Optional[list[str]] = None) -> None:
     """Point d'entrée principal"""
@@ -320,6 +343,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     else:
         analyzer = ContentAnalyzer()
         logger.info("Content Analyzer initialisé - Prêt pour développement Codex")
+
 
 if __name__ == "__main__":
     main()

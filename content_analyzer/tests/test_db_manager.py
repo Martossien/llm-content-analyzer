@@ -27,7 +27,11 @@ def test_store_analysis_result(tmp_path):
     conn.commit()
     conn.close()
     db.store_analysis_result(
-        1, "t1", {"security": {}, "rgpd": {}, "finance": {}, "legal": {}}
+        1,
+        "t1",
+        {"security": {}, "rgpd": {}, "finance": {}, "legal": {}},
+        "",
+        "{}",
     )
     conn = sqlite3.connect(db_file)
     count = conn.execute("SELECT COUNT(*) FROM reponses_llm").fetchone()[0]

@@ -427,7 +427,7 @@ No need to run analysis to see your files.
 
                 # Validation de format sur un échantillon
                 df = pd.read_csv(file_path, nrows=10)
-                #errors = parser.validate_csv_format(df)
+                # errors = parser.validate_csv_format(df)
                 errors = parser.validate_csv_format(Path(file_path))
                 if errors:
                     messagebox.showerror(
@@ -1127,7 +1127,11 @@ No need to run analysis to see your files.
                 res = analyzer.analyze_single_file(row)
                 if res.get("status") in {"completed", "cached"}:
                     db_mgr.store_analysis_result(
-                        row["id"], res.get("task_id", ""), res.get("result", {})
+                        row["id"],
+                        res.get("task_id", ""),
+                        res.get("result", {}),
+                        res.get("resume", ""),
+                        res.get("raw_response", ""),
                     )
                     db_mgr.update_file_status(row["id"], "completed")
         except Exception as exc:
@@ -1167,7 +1171,11 @@ No need to run analysis to see your files.
                 res = analyzer.analyze_single_file(row)
                 if res.get("status") in {"completed", "cached"}:
                     db_mgr.store_analysis_result(
-                        row["id"], res.get("task_id", ""), res.get("result", {})
+                        row["id"],
+                        res.get("task_id", ""),
+                        res.get("result", {}),
+                        res.get("resume", ""),
+                        res.get("raw_response", ""),
                     )
                     db_mgr.update_file_status(row["id"], "completed")
         except Exception as exc:
@@ -1296,6 +1304,7 @@ No need to run analysis to see your files.
                 "RGPD",
                 "Finance",
                 "Legal",
+                "Résumé",
                 "Confidence",
                 "Processing Time",
             )
@@ -1316,6 +1325,7 @@ No need to run analysis to see your files.
             tree.heading("RGPD", text="RGPD")
             tree.heading("Finance", text="Finance")
             tree.heading("Legal", text="Legal")
+            tree.heading("Résumé", text="Résumé")
             tree.heading("Confidence", text="Confidence")
             tree.heading("Processing Time", text="Proc. Time (ms)")
 
@@ -1334,6 +1344,7 @@ No need to run analysis to see your files.
             tree.column("RGPD", width=80)
             tree.column("Finance", width=80)
             tree.column("Legal", width=80)
+            tree.column("Résumé", width=200)
             tree.column("Confidence", width=80)
             tree.column("Processing Time", width=100)
 
@@ -1481,7 +1492,7 @@ No need to run analysis to see your files.
         SELECT f.id, f.name, f.host, f.extension, f.username, f.path, f.file_size,
                f.owner, f.creation_time, f.last_modified, f.status,
                r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
-               r.confidence_global, r.processing_time_ms
+               r.document_resume, r.confidence_global, r.processing_time_ms
         FROM fichiers f
         LEFT JOIN reponses_llm r ON f.id = r.fichier_id
         WHERE 1=1
@@ -1519,6 +1530,7 @@ No need to run analysis to see your files.
                     rgpd,
                     finance,
                     legal,
+                    resume,
                     confidence,
                     proc_time,
                 ) = row
@@ -1566,6 +1578,7 @@ No need to run analysis to see your files.
                         rgpd_risk,
                         finance_type,
                         legal_type,
+                        resume or "",
                         confidence or 0,
                         proc_time or 0,
                     ),
@@ -1597,6 +1610,7 @@ No need to run analysis to see your files.
                 """
         SELECT f.path, f.file_size, f.owner, f.last_modified, f.status,
                r.security_analysis, r.rgpd_analysis, r.finance_analysis, r.legal_analysis,
+               r.document_resume, r.llm_response_complete,
                r.confidence_global, r.processing_time_ms, r.created_at
         FROM fichiers f
         LEFT JOIN reponses_llm r ON f.id = r.fichier_id
@@ -1630,6 +1644,8 @@ No need to run analysis to see your files.
                 rgpd,
                 finance,
                 legal,
+                resume,
+                raw_response,
                 confidence,
                 proc_time,
                 created,
@@ -1657,7 +1673,13 @@ File Information:
 • Processing Time: {proc_time or 0} ms
 • Confidence Score: {confidence or 0}%
 
+Résumé:
+{resume or 'N/A'}
+
 {analysis_text}
+
+RAW RESPONSE:
+{raw_response or ''}
 """
 
             text_widget.insert(1.0, details_content)
@@ -1702,6 +1724,10 @@ File Information:
 
     def _format_analysis_display(self, llm_response: dict) -> str:
         formatted = "🔍 RÉSULTATS D'ANALYSE\n" + "=" * 50 + "\n\n"
+
+        resume = llm_response.get("resume")
+        if resume:
+            formatted += f"📄 RÉSUMÉ\n   {resume}\n\n"
 
         security = llm_response.get("security", {})
         if security:
