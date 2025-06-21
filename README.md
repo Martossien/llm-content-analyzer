@@ -1,127 +1,186 @@
-# llm-content-analyzer
+llm-content-analyzer
 
-Module d'analyse de contenu de fichiers par LLM avec classification multi-domaines et cache intelligent.
+Module d'analyse de contenu de fichiers par intelligence artificielle pour la classification multi-domaines et l'audit de conformité. Cette brique traite les données générées par SMBeagle enrichi pour analyser le contenu des fichiers via LLM et les classifier selon des critères de sécurité, conformité RGPD, finance et aspects légaux.
+Architecture du Pipeline
+llm-content-analyzer constitue la deuxième brique d'un pipeline d'analyse en trois étapes :
 
-## Description
 
-llm-content-analyzer traite les fichiers détectés par SMBeagle pour les analyser via API LLM et les classifier selon des critères de sécurité (C0-C3), conformité RGPD, finance et aspects légaux. Le module utilise un cache SQLite basé sur FastHash pour optimiser les performances et une architecture modulaire avec configuration YAML centralisée.
+smbeagle_enriched → llm-content-analyzer → reports-generator
+    (Brique 1)          (Brique 2)         (Brique 3)
+Scan + métadonnées   Analyse contenu IA   Rapports Excel/PDF
 
-## Fonctionnalités
+Fonctionnalités
+Classification Multi-Domaines
 
-- **Analyse multi-domaines** : Classification sécurité C0-C3, RGPD, finance, legal, forensique
-- **Cache intelligent** : SQLite custom basé sur FastHash avec stratégies d'éviction
-- **Filtrage avancé** : Exclusions configurables par environnement et scoring de priorité
-- **API robuste** : Client HTTP avec retry automatique (tenacity) et protection surcharge (circuitbreaker)
-- **Configuration centralisée** : YAML pour tous les paramètres et templates de prompts
-- **Monitoring intégré** : Métriques de performance et logs détaillés
+Sécurité : Classification C0 (Public), C1 (Interne), C2 (Confidentiel), C3 (Secret)
+RGPD : Détection de données personnelles et évaluation des risques
+Finance : Identification de documents financiers (factures, contrats, budgets)
+Legal : Analyse de contrats et documents juridiques
 
-## Architecture
+Architecture Modulaire
+
+Cache intelligent : SQLite basé sur FastHash pour éviter les analyses redondantes
+Filtrage avancé : Exclusions configurables et scoring de priorité
+Templates de prompts : Configuration flexible via Jinja2 et YAML
+Interface graphique : GUI complète pour la gestion et le monitoring
+
+Robustesse Production
+
+Retry automatique : Gestion des erreurs réseau avec tenacity
+Protection surcharge : Circuit breaker pour l'API LLM
+Monitoring : Métriques de performance et logs détaillés
+Configuration centralisée : YAML pour tous les paramètres
+
+Installation
+Prérequis
+
+Python 3.9+
+API-DOC-IA accessible (généralement localhost:8080)
+Fichiers CSV générés par SMBeagle enrichi
+
+Installation des dépendances
+pip install -r requirements.txt
+
+Configuration
+Copier et adapter le fichier de configuration :
+cp content_analyzer/config/analyzer_config.yaml.example content_analyzer/config/analyzer_config.yaml
+
+Configurer l'URL et le token de l'API-DOC-IA dans le fichier YAML.
+Utilisation
+Interface en ligne de commande
+
+# Analyse basique
+python content_analyzer/content_analyzer.py scan_smbeagle.csv analysis_results.db
+
+# Analyse avec cache activé
+python content_analyzer/content_analyzer.py --input scan.csv --output results.db --enable-cache
+
+Interface graphique
+python gui/main.py
+
+L'interface GUI permet :
+
+Import automatique de fichiers CSV SMBeagle
+Configuration de l'API et des exclusions
+Lancement d'analyses par lot ou fichier unique
+Visualisation des résultats avec filtres
+Export en CSV, JSON, Excel
+
+Workflow typique
+
+Import CSV : Sélectionner un fichier CSV SMBeagle enrichi
+Configuration : Ajuster les paramètres API et exclusions
+Analyse : Lancer l'analyse automatique ou manuelle
+Résultats : Consulter les classifications dans l'interface
+Export : Exporter les données pour génération de rapports
+
+Architecture Technique
+Modules principaux
 
 content_analyzer/
-├── content_analyzer.py # Orchestrateur principal
+├── content_analyzer.py      # Orchestrateur principal
 ├── modules/
-│ ├── csv_parser.py # Parser SMBeagle CSV → SQLite
-│ ├── cache_manager.py # Cache SQLite intelligent
-│ ├── file_filter.py # Filtrage et scoring priorité
-│ ├── api_client.py # Client HTTP avec protections
-│ ├── db_manager.py # Gestionnaire base SQLite
-│ └── prompt_manager.py # Templates prompts configurables
+│   ├── csv_parser.py        # Parse CSV SMBeagle → SQLite
+│   ├── api_client.py        # Client HTTP + retry/circuit breaker
+│   ├── cache_manager.py     # Cache SQLite intelligent
+│   ├── file_filter.py       # Filtrage + scoring priorité
+│   ├── db_manager.py        # Gestionnaire base SQLite
+│   └── prompt_manager.py    # Templates prompts configurables
 ├── config/
-│ └── analyzer_config.yaml # Configuration centrale (API, modules, exclusions, templates)
-└── tests/ # Tests unitaires par module
+│   └── analyzer_config.yaml # Configuration centralisée
+└── gui/                     # Interface graphique
 
-## Installation
+Base de données SQLite
+Le module génère une base SQLite avec :
 
-### Prérequis
+Table fichiers : Métadonnées SMBeagle + état traitement
+Table reponses_llm : Analyses structurées par domaine
+Table cache_prompts : Cache basé sur FastHash
+Table metriques : Monitoring performance
 
-- Python 3.9+
-- Windows (environnement cible)
-- API-DOC-IA accessible sur localhost:8080
+Stack technique
+Dépendances externes (2 uniquement) :
 
-### Dépendances
+tenacity : Retry logic robuste pour appels API
+circuitbreaker : Protection surcharge API
 
-Les bibliothèques standard Python sont utilisées : `sqlite3`, `requests`, `pandas`, `yaml`, `pathlib`, `logging`, `json`, `jinja2`.
+Bibliothèques standard :
 
-### Configuration
+sqlite3, requests, pandas, yaml, jinja2
 
-1. Copier `config/analyzer_config.yaml.example` vers `config/analyzer_config.yaml`
-2. Configurer l'URL et token API-DOC-IA
-3. Ajuster les paramètres selon l'environnement
+Format d'entrée
+Le module traite les fichiers CSV générés par SMBeagle enrichi avec les colonnes :
 
-## Utilisation
+Name,Host,Extension,Username,Hostname,UNCDirectory,CreationTime,LastWriteTime,
+Readable,Writeable,Deletable,DirectoryType,Base,FileSize,Owner,FastHash,
+AccessTime,FileAttributes,FileSignature
 
-### Analyse basique
-
-python content_analyzer/content_analyzer.py
---input data/raw_scan_20250618.csv
---config config/analyzer_config.yaml
---output data/analysis_results.db
-
-python content_analyzer/content_analyzer.py
---input data/raw_scan_20250618.csv
---config config/analyzer_config.yaml
---output data/analysis_results.db
---enable-cache
---enable-monitoring
---workers 3
-
-config/analyzer_config.yaml
-
-brique2_analyzer:
-api_url: "http://localhost:8080"
-api_token: "sk-XXXXXXXXXXXXXXXXXXXXXXXXX"
-max_tokens: 32000
-timeout_seconds: 300
-batch_size: 100
-
-retry_config:
-max_attempts: 3
-wait_strategy: "exponential"
-wait_min: 4
-wait_max: 10
-
-
-## Base de données
-
-Le module utilise SQLite avec schema optimisé :
-
-- **Table fichiers** : Métadonnées SMBeagle + état traitement + flags
-- **Table reponses_llm** : Réponses structurées par domaine d'analyse
-- **Table cache_prompts** : Cache intelligent basé sur FastHash composite
-- **Table metriques** : Monitoring performance et qualité
-
-## Monitoring
-
-Les métriques sont collectées en temps réel :
-
-- Performance API (temps réponse, taux succès)
-- Efficacité cache (hit rate, économies)
-- Qualité analyse (confiance, cohérence)
-- Utilisation ressources (mémoire, stockage)
-
-## Structure de sortie
-
-Le module génère une base SQLite avec analyses structurées JSON pour chaque domaine ( suivant le prompt ):
-
+Format de sortie
+Les analyses LLM sont stockées en JSON structuré :
 {
-"security": {"classification": "C2", "confidence": 85},
-"rgpd": {"risk_level": "medium", "data_types": ["email", "phone"]},
-"finance": {"document_type": "invoice", "amounts": [{"value": "1500€"}]},
-"legal": {"contract_type": "service_agreement", "parties": [...]}
+  "security": {"classification": "C2", "confidence": 85},
+  "rgpd": {"risk_level": "medium", "data_types": ["email", "phone"]},
+  "finance": {"document_type": "invoice", "amounts": [{"value": "1500€"}]},
+  "legal": {"contract_type": "service_agreement", "parties": [...]}
 }
+Configuration
+API-DOC-IA
+api_config:
+  url: "http://localhost:8080"
+  token: "sk-XXXXXXXXX"
+  max_tokens: 32000
+  timeout_seconds: 300
 
-## Intégration
+Exclusions
+exclusions:
+  extensions:
+    blocked: [".tmp", ".log", ".bak"]
+  file_size:
+    min_bytes: 100
+    max_bytes: 104857600
+  file_attributes:
+    skip_system: true
+    skip_hidden: false
 
-Ce module s'intègre dans un pipeline à 3 briques :
+templates:
+  comprehensive:
+    system_prompt: "Tu es un expert en analyse de documents..."
+    user_template: "Fichier: {{ file_name }}..."
 
-1. **SMBeagle enrichi** (scan fichiers + métadonnées) → 
-2. **llm-content-analyzer** (analyse contenu) → 
-3. **reports-generator** (rapports Excel/PDF)
+Monitoring
+Métriques collectées
 
-## Licence
+Performance API (temps réponse, taux succès)
+Efficacité cache (hit rate, économies)
+Qualité analyse (confiance, cohérence)
+Utilisation ressources (mémoire, stockage)
 
-Open source - 
+Logs
+Logs détaillés dans logs/content_analyzer.log avec niveaux INFO, WARN, ERROR.
+Tests
+# Tests unitaires
+python -m pytest content_analyzer/tests/ -v
 
-## Support
+Intégration Pipeline
+Avec SMBeagle enrichi (Brique 1)
+# 1. Scan avec SMBeagle enrichi
+SMBeagle.exe -c scan_results.csv --sizefile --ownerfile --fasthash
+
+# 2. Analyse avec llm-content-analyzer
+python content_analyzer/content_analyzer.py scan_results.csv analysis.db
+
+Vers reports-generator (Brique 3)
+La base SQLite générée (analysis_results.db) contient les données structurées pour la génération de rapports Excel/PDF par la brique 3.
+Limitations
+
+Dépend de la disponibilité de l'API-DOC-IA
+Qualité d'analyse liée à la qualité des prompts et du modèle LLM
+Formats de fichiers limités à ceux supportés par l'API
+Cache basé sur FastHash : modifications mineures non détectées
+
+Support
+Les logs détaillés facilitent le diagnostic des problèmes. Les erreurs courantes sont documentées dans la configuration et l'interface GUI fournit des messages d'erreur explicites.
+Licence
+Apache License 2.0. Voir LICENSE pour les détails.
 
 
