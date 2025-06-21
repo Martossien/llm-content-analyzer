@@ -47,7 +47,15 @@ def test_database_migration(tmp_path):
     db = DBManager(db_file)
     conn = sqlite3.connect(db_file)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(reponses_llm)").fetchall()]
-    assert "document_resume" in cols and "llm_response_complete" in cols
+    for col in [
+        "document_resume",
+        "llm_response_complete",
+        "security_confidence",
+        "rgpd_confidence",
+        "finance_confidence",
+        "legal_confidence",
+    ]:
+        assert col in cols
     db.store_analysis_result(1, "t1", {"security": {}}, "resume", "{}")
     row = conn.execute(
         "SELECT document_resume, llm_response_complete FROM reponses_llm WHERE id=1"
@@ -66,3 +74,16 @@ def test_gui_display(monkeypatch):
     text = mw._format_analysis_display({"resume": "short"})
     root.destroy()
     assert "short" in text
+
+
+def test_corrupted_state_recovery():
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except tk.TclError:
+        pytest.skip("no display")
+    mw = MainWindow(root)
+    assert "ERREUR" in mw._format_analysis_display(123.4)
+    text = mw._format_analysis_display({"security": {"classification": "C0", "confidence": 0}})
+    root.destroy()
+    assert "SÉCURITÉ" in text

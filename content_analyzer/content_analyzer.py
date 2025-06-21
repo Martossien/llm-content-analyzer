@@ -68,6 +68,18 @@ class ContentAnalyzer:
             value /= 1024
         return f"{value:.1f}PB"
 
+    def _extract_domain_confidences(self, llm_response: Dict[str, Any]) -> Dict[str, int]:
+        """Return confidence per domain from LLM response."""
+        confidences: Dict[str, int] = {}
+        for domain in ["security", "rgpd", "finance", "legal"]:
+            domain_data = llm_response.get(domain, {})
+            if isinstance(domain_data, dict):
+                conf = int(domain_data.get("confidence", 0) or 0)
+            else:
+                conf = 0
+            confidences[f"{domain}_confidence"] = conf
+        return confidences
+
     def _parse_api_response(self, api_result: Dict[str, Any]) -> Dict[str, Any]:
         """Parse la réponse API et extrait le JSON structuré de manière robuste."""
         import json
@@ -106,6 +118,12 @@ class ContentAnalyzer:
             words = resume.split()
             if len(words) > 50:
                 resume = " ".join(words[:50])
+
+        confidences = self._extract_domain_confidences(extracted_json)
+        total = sum(v for v in confidences.values() if isinstance(v, int) and v > 0)
+        count = sum(1 for v in confidences.values() if isinstance(v, int) and v > 0)
+        extracted_json.update(confidences)
+        extracted_json["confidence_global"] = int(total / count) if count else 0
 
         return {
             "status": "completed",
