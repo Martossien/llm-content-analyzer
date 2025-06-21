@@ -48,6 +48,10 @@ class DBManager:
             "finance_analysis": "TEXT",
             "legal_analysis": "TEXT",
             "confidence_global": "INTEGER",
+            "security_confidence": "INTEGER DEFAULT 0",
+            "rgpd_confidence": "INTEGER DEFAULT 0",
+            "finance_confidence": "INTEGER DEFAULT 0",
+            "legal_confidence": "INTEGER DEFAULT 0",
             "processing_time_ms": "INTEGER",
             "api_tokens_used": "INTEGER",
             "created_at": "TIMESTAMP",
@@ -86,14 +90,27 @@ class DBManager:
         llm_response_complete: str,
     ) -> None:
         conn = self._connect()
+
+        if "confidence_global" not in llm_response:
+            confs = [
+                llm_response.get("security_confidence", 0),
+                llm_response.get("rgpd_confidence", 0),
+                llm_response.get("finance_confidence", 0),
+                llm_response.get("legal_confidence", 0),
+            ]
+            valid = [c for c in confs if c]
+            llm_response["confidence_global"] = int(sum(valid) / len(valid)) if valid else 0
+
         conn.execute(
             """
             INSERT INTO reponses_llm (
                 fichier_id, task_id, security_analysis, rgpd_analysis,
-                finance_analysis, legal_analysis, confidence_global,
+                finance_analysis, legal_analysis,
+                confidence_global, security_confidence, rgpd_confidence,
+                finance_confidence, legal_confidence,
                 processing_time_ms, api_tokens_used,
                 document_resume, llm_response_complete
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id,
@@ -102,7 +119,11 @@ class DBManager:
                 json.dumps(llm_response.get("rgpd")),
                 json.dumps(llm_response.get("finance")),
                 json.dumps(llm_response.get("legal")),
-                llm_response.get("confidence", 0),
+                llm_response.get("confidence_global", 0),
+                llm_response.get("security_confidence", 0),
+                llm_response.get("rgpd_confidence", 0),
+                llm_response.get("finance_confidence", 0),
+                llm_response.get("legal_confidence", 0),
                 llm_response.get("processing_time_ms", 0),
                 llm_response.get("api_tokens_used", 0),
                 document_resume,

@@ -83,24 +83,84 @@ scoring:
 templates:
   comprehensive:
     system_prompt: |
-      Tu es un expert en analyse de documents pour entreprise.
-      IMPORTANT: Tu dois retourner UNIQUEMENT un objet JSON valide, sans texte avant ni après.
-      Ne commence pas par "Voici l'analyse" ou "En conclusion".
-      Réponds SEULEMENT avec le JSON structuré demandé.
+      Tu es un expert en classification de documents d'entreprise avec spécialisation en sécurité informatique, conformité RGPD et analyse juridico-financière.
+
+      INSTRUCTIONS CRITIQUES :
+      1. Retourne UNIQUEMENT un objet JSON valide, sans texte avant ni après
+      2. Si le fichier est inaccessible, corrompu ou vide : utilise "N/A" pour tous les champs et confidence=0
+      3. Sois précis dans tes classifications selon les standards internationaux
+      4. Utilise une confidence de 0-100 pour chaque domaine analysé
 
     user_template: |
-      Fichier: {{ file_name }}
-      Taille: {{ file_size_readable }}
-      Propriétaire: {{ owner }}
-      Dernière modification: {{ last_modified }}
+      ANALYSE DE DOCUMENT - CLASSIFICATION MULTI-DOMAINES
 
-      Analyse ce fichier et retourne UNIQUEMENT ce JSON (rien d'autre) :
+      📁 Fichier: {{ file_name }}
+      📊 Taille: {{ file_size_readable }}
+      👤 Propriétaire: {{ owner }}
+      📅 Dernière modification: {{ last_modified }}
+      🔍 Signature: {{ file_signature }}
+
+      INSTRUCTIONS D'ANALYSE :
+
+      🛡️ SÉCURITÉ (Classification selon niveaux gouvernementaux/entreprise) :
+      - C0 = Public : Information accessible à tous sans restriction
+      - C1 = Interne : Information limitée au personnel de l'organisation
+      - C2 = Confidentiel : Information sensible, accès restreint avec autorisation
+      - C3 = Secret : Information hautement sensible, accès très restreint
+
+      🔒 RGPD (Selon Art. 4 GDPR - Données personnelles) :
+      - none = Aucune donnée personnelle détectée
+      - low = Données personnelles basiques (noms, emails professionnels)
+      - medium = Données personnelles sensibles (numéros ID, adresses)
+      - high = Données personnelles spéciales (santé, biométrie, opinions politiques)
+      - critical = Données ultra-sensibles (données bancaires, secrets médicaux)
+
+      💰 FINANCE (Types de documents financiers) :
+      - none = Pas de contenu financier
+      - invoice = Factures, devis, bons de commande
+      - contract = Contrats commerciaux, accords financiers
+      - budget = Budgets, prévisions, analyses financières
+      - accounting = Comptabilité, bilans, rapports financiers
+      - payment = Informations de paiement, virements, cartes bancaires
+
+      ⚖️ LÉGAL (Types de documents juridiques) :
+      - none = Pas de contenu juridique
+      - employment = Contrats de travail, politiques RH
+      - lease = Baux immobiliers, locations
+      - sale = Contrats de vente, cessions
+      - nda = Accords de confidentialité
+      - compliance = Documents de conformité, audits
+      - litigation = Documents judiciaires, procédures
+
+      GESTION D'ERREURS :
+      Si le fichier est inaccessible, corrompu, vide ou illisible :
+      - Toutes les classifications = "N/A"
+      - Toutes les confidences = 0
+      - Résumé = "Fichier inaccessible ou corrompu"
+
+      Retourne EXACTEMENT ce JSON (remplace par tes analyses) :
       {
-        "resume": "Résumé du document en 50 mots maximum décrivant son contenu principal",
-        "security": {"classification": "C0|C1|C2|C3", "confidence": 85, "justification": "..."},
-        "rgpd": {"risk_level": "none|low|medium|high", "data_types": [], "confidence": 90},
-        "finance": {"document_type": "none|invoice|contract|budget", "amounts": [], "confidence": 75},
-        "legal": {"contract_type": "none|employment|lease|sale", "parties": [], "confidence": 80}
+        "resume": "Résumé en 50 mots maximum du contenu principal du document",
+        "security": {
+          "classification": "C0|C1|C2|C3|N/A",
+          "confidence": 85,
+          "justification": "Explication concise de la classification"
+        },
+        "rgpd": {
+          "risk_level": "none|low|medium|high|critical|N/A",
+          "data_types": ["type1", "type2"],
+          "confidence": 90
+        },
+        "finance": {
+          "document_type": "none|invoice|contract|budget|accounting|payment|N/A",
+          "amounts": [{"value": "montant", "currency": "EUR", "context": "contexte"}],
+          "confidence": 75
+        },
+        "legal": {
+          "contract_type": "none|employment|lease|sale|nda|compliance|litigation|N/A",
+          "parties": ["partie1", "partie2"],
+          "confidence": 80
+        }
       }
   security_focused:
     system_prompt: "Expert sécurité"
