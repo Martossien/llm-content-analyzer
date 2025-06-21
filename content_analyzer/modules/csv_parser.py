@@ -421,6 +421,10 @@ class CSVParser:
             or row_dict.get("CreationTime", ""),
         }
 
+    def transform_metadata(self, row: "pd.Series") -> Dict[str, Any]:
+        """Compatibilité ancienne API utilisant pandas."""
+        return self.transform_metadata_from_dict(row.to_dict())
+
     def parse_csv(
         self,
         csv_file: Path,

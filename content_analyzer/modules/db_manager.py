@@ -40,6 +40,24 @@ class DBManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_id ON reponses_llm(task_id)"
         )
+        cursor.execute("PRAGMA table_info(reponses_llm)")
+        existing_cols = [row[1] for row in cursor.fetchall()]
+        expected = {
+            "security_analysis": "TEXT",
+            "rgpd_analysis": "TEXT",
+            "finance_analysis": "TEXT",
+            "legal_analysis": "TEXT",
+            "confidence_global": "INTEGER",
+            "processing_time_ms": "INTEGER",
+            "api_tokens_used": "INTEGER",
+            "created_at": "TIMESTAMP",
+            "document_resume": "TEXT",
+            "llm_response_complete": "TEXT",
+        }
+        for col, col_type in expected.items():
+            if col not in existing_cols:
+                cursor.execute(f"ALTER TABLE reponses_llm ADD COLUMN {col} {col_type}")
+
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_confidence ON reponses_llm(confidence_global DESC)"
         )
@@ -60,7 +78,12 @@ class DBManager:
         conn.close()
 
     def store_analysis_result(
-        self, file_id: int, task_id: str, llm_response: Dict[str, Any]
+        self,
+        file_id: int,
+        task_id: str,
+        llm_response: Dict[str, Any],
+        document_resume: str,
+        llm_response_complete: str,
     ) -> None:
         conn = self._connect()
         conn.execute(
@@ -68,8 +91,9 @@ class DBManager:
             INSERT INTO reponses_llm (
                 fichier_id, task_id, security_analysis, rgpd_analysis,
                 finance_analysis, legal_analysis, confidence_global,
-                processing_time_ms, api_tokens_used
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                processing_time_ms, api_tokens_used,
+                document_resume, llm_response_complete
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id,
@@ -81,6 +105,8 @@ class DBManager:
                 llm_response.get("confidence", 0),
                 llm_response.get("processing_time_ms", 0),
                 llm_response.get("api_tokens_used", 0),
+                document_resume,
+                llm_response_complete,
             ),
         )
         conn.commit()

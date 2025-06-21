@@ -96,10 +96,11 @@ templates:
 
       Analyse ce fichier et retourne UNIQUEMENT ce JSON (rien d'autre) :
       {
-        "security": {"classification": "C0|C1|C2|C3", "confidence": 85, "justification": "Raison du classement"},
-        "rgpd": {"risk_level": "none|low|medium|high", "data_types": ["email", "phone"], "confidence": 90},
-        "finance": {"document_type": "none|invoice|contract|budget", "amounts": [{"value": "1500€", "context": "facture"}], "confidence": 75},
-        "legal": {"contract_type": "none|employment|lease|sale", "parties": ["entreprise", "client"], "confidence": 80}
+        "resume": "Résumé du document en 50 mots maximum décrivant son contenu principal",
+        "security": {"classification": "C0|C1|C2|C3", "confidence": 85, "justification": "..."},
+        "rgpd": {"risk_level": "none|low|medium|high", "data_types": [], "confidence": 90},
+        "finance": {"document_type": "none|invoice|contract|budget", "amounts": [], "confidence": 75},
+        "legal": {"contract_type": "none|employment|lease|sale", "parties": [], "confidence": 80}
       }
   security_focused:
     system_prompt: "Expert sécurité"

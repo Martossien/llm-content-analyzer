@@ -58,6 +58,8 @@ class AnalysisThread(threading.Thread):
                         row["id"],
                         single_res.get("task_id", ""),
                         single_res.get("result", {}),
+                        single_res.get("resume", ""),
+                        single_res.get("raw_response", ""),
                     )
                     db_mgr.update_file_status(row["id"], "completed")
                 else:

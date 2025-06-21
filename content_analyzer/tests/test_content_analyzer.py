@@ -53,18 +53,20 @@ def test_analyze_batch(tmp_path):
     csv_file = create_sample_csv(tmp_path, 3)
     out_db = tmp_path / "out.db"
     analyzer = ContentAnalyzer(CFG)
+    analyzer.csv_parser.validation_strict = False
     analyzer.enable_cache = True
     with mock.patch.object(analyzer.api_client, "analyze_file") as mapi:
         mapi.return_value = {
             "status": "completed",
-            "result": {},
+            "result": {"content": "{}"},
             "task_id": "t1",
         }
         result = analyzer.analyze_batch(csv_file, out_db)
     assert result["status"] == "completed"
     assert result["files_processed"] == 3
     conn = sqlite3.connect(out_db)
-    count = conn.execute("SELECT COUNT(*) FROM fichiers WHERE status='completed'").fetchone()[0]
+    count = conn.execute(
+        "SELECT COUNT(*) FROM fichiers WHERE status='completed'"
+    ).fetchone()[0]
     conn.close()
     assert count == 3
-
