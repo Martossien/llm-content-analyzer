@@ -53,6 +53,39 @@ def test_get_pending_files(tmp_path):
     assert len(files) == 2
 
 
+def test_get_pending_files_no_limit(tmp_path):
+    db_file = tmp_path / "test.db"
+    db = setup_db(db_file)
+    conn = sqlite3.connect(db_file)
+    conn.executemany(
+        "INSERT INTO fichiers (id, priority_score, status) VALUES (?, ?, 'pending')",
+        [(1, 10), (2, 5), (3, 1)],
+    )
+    conn.commit()
+    conn.close()
+    files = db.get_pending_files(limit=None, priority_threshold=0)
+    assert len(files) == 3
+
+
+def test_dynamic_column_mapping(tmp_path):
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute(
+        "CREATE TABLE fichiers (id INTEGER PRIMARY KEY, path TEXT, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO fichiers (id, path, status) VALUES (1, '/tmp/a.txt', 'error')"
+    )
+    conn.commit()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM fichiers WHERE status='error'")
+    row = cursor.fetchone()
+    columns = [d[0] for d in cursor.description]
+    conn.close()
+    row_dict = dict(zip(columns, row))
+    assert row_dict["path"] == "/tmp/a.txt"
+
+
 def test_processing_stats(tmp_path):
     db_file = tmp_path / "test.db"
     db = setup_db(db_file)

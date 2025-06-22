@@ -134,19 +134,24 @@ class DBManager:
         conn.close()
 
     def get_pending_files(
-        self, limit: int = 100, priority_threshold: int = 0
+        self, limit: Optional[int] = 100, priority_threshold: int = 0
     ) -> List[Dict[str, Any]]:
+        """Return pending files ordered by priority.
+
+        If ``limit`` is ``None`` or ``<= 0`` all matching files are returned.
+        """
         conn = self._connect()
         cursor = conn.cursor()
-        rows = cursor.execute(
-            """
-            SELECT * FROM fichiers
-            WHERE status = 'pending' AND priority_score >= ?
-            ORDER BY priority_score DESC
-            LIMIT ?
-            """,
-            (priority_threshold, limit),
-        ).fetchall()
+        query = (
+            "SELECT * FROM fichiers\n"
+            "WHERE status = 'pending' AND priority_score >= ?\n"
+            "ORDER BY priority_score DESC"
+        )
+        params = [priority_threshold]
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = cursor.execute(query, params).fetchall()
         columns = [desc[0] for desc in cursor.description]
         conn.close()
         return [dict(zip(columns, row)) for row in rows]

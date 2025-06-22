@@ -11,7 +11,8 @@ import yaml
 import sqlite3
 import json
 import csv
-from typing import Any, Dict
+import threading
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -437,21 +438,31 @@ No need to run analysis to see your files.
         ttk.Button(
             batch_frame, text="START BATCH ANALYSIS", command=self.start_analysis
         ).pack(side="left", padx=5)
-        ttk.Button(
+        self.filtered_button = ttk.Button(
             batch_frame,
             text="ANALYZE FILTERED FILES",
             command=self.analyze_filtered_files,
-        ).pack(side="left", padx=5)
-        ttk.Button(
+        )
+        self.filtered_button.pack(side="left", padx=5)
+        self.reprocess_button = ttk.Button(
             batch_frame, text="REPROCESS ERRORS", command=self.reprocess_errors
-        ).pack(side="left", padx=5)
+        )
+        self.reprocess_button.pack(side="left", padx=5)
         ttk.Label(batch_frame, text="Max Files:").pack(side="left", padx=5)
         ttk.Entry(batch_frame, textvariable=self.max_files_var, width=6).pack(
             side="left"
         )
         ttk.Button(
-            batch_frame, text="ALL FILES", command=lambda: self.max_files_var.set("0")
+            batch_frame,
+            text="ALL FILES",
+            command=lambda: self.max_files_var.set("0"),
         ).pack(side="left", padx=5)
+
+        self.cancel_batch = False
+        self.cancel_batch_button = ttk.Button(
+            batch_frame, text="Cancel", command=self.cancel_batch_operation, state="disabled"
+        )
+        self.cancel_batch_button.pack(side="left", padx=5)
 
         # SECTION 6 ------------------------------------------------------
         status_bar = ttk.Frame(self.root)
@@ -1294,6 +1305,29 @@ No need to run analysis to see your files.
         self.log_action("Analysis stopped by user", "WARN")
         self.status_app_label.config(text="Stopped")
 
+    def _validate_batch_operation(self, operation_type: str) -> bool:
+        """Vérifie qu'il y a des fichiers à traiter avant de lancer l'opération."""
+        db_path = Path("analysis_results.db")
+        if not db_path.exists():
+            messagebox.showerror("No database found", "analysis_results.db missing", parent=self.root)
+            return False
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        if operation_type == "pending":
+            count = cursor.execute(
+                "SELECT COUNT(*) FROM fichiers WHERE status='pending'"
+            ).fetchone()[0]
+        else:
+            count = cursor.execute(
+                "SELECT COUNT(*) FROM fichiers WHERE status='error'"
+            ).fetchone()[0]
+        conn.close()
+        if count == 0:
+            messagebox.showinfo("No Files", f"No {operation_type} files found", parent=self.root)
+            return False
+        return True
+
     def analyze_selected_file(self) -> None:
         """Allow user to analyze a single file using the configured pipeline."""
         file_path = filedialog.askopenfilename(
@@ -1319,74 +1353,110 @@ No need to run analysis to see your files.
 
     def analyze_filtered_files(self) -> None:
         """Reanalyse les fichiers filtrés/pendants en base."""
-        try:
-            db_path = Path("analysis_results.db")
-            if not db_path.exists():
-                return
-            analyzer = ContentAnalyzer(self.config_path)
-            db_mgr = DBManager(db_path)
-            files = db_mgr.get_pending_files(limit=int(self.max_files_var.get() or 0))
-            for row in files:
-                res = analyzer.analyze_single_file(row)
-                if res.get("status") in {"completed", "cached"}:
-                    llm_data = res.get("result", {})
-                    llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
-                    db_mgr.store_analysis_result(
-                        row["id"],
-                        res.get("task_id", ""),
-                        llm_data,
-                        res.get("resume", ""),
-                        res.get("raw_response", ""),
-                    )
-                    db_mgr.update_file_status(row["id"], "completed")
-        except Exception as exc:
-            messagebox.showerror("Batch Error", str(exc))
+
+        if not self._validate_batch_operation("pending"):
+            return
+
+        max_input = self.max_files_var.get().strip()
+        limit = None if not max_input or max_input == "0" else int(max_input)
+
+        def _background_task() -> None:
+            try:
+                db_path = Path("analysis_results.db")
+                analyzer = ContentAnalyzer(self.config_path)
+                db_mgr = DBManager(db_path)
+                files = db_mgr.get_pending_files(limit=limit)
+                total = len(files)
+                processed = 0
+                for row in files:
+                    if self.cancel_batch:
+                        break
+                    res = analyzer.analyze_single_file(row)
+                    if res.get("status") in {"completed", "cached"}:
+                        llm_data = res.get("result", {})
+                        llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
+                        db_mgr.store_analysis_result(
+                            row["id"],
+                            res.get("task_id", ""),
+                            llm_data,
+                            res.get("resume", ""),
+                            res.get("raw_response", ""),
+                        )
+                        db_mgr.update_file_status(row["id"], "completed")
+                    else:
+                        db_mgr.update_file_status(row["id"], "error", res.get("error"))
+                    processed += 1
+                    self.root.after(0, self._update_batch_progress, processed, total)
+                result = {
+                    "processed": processed,
+                    "total": total,
+                    "status": "completed" if not self.cancel_batch else "cancelled",
+                }
+                self.root.after(0, self._on_batch_complete, result)
+            except Exception as exc:  # pragma: no cover - runtime
+                self.root.after(0, self._on_batch_error, str(exc))
+
+        self.cancel_batch = False
+        self._set_batch_buttons_state("disabled")
+        thread = threading.Thread(target=_background_task, daemon=True)
+        thread.start()
 
     def reprocess_errors(self) -> None:
         """Relance l'analyse des fichiers en erreur."""
-        try:
-            db_path = Path("analysis_results.db")
-            if not db_path.exists():
-                return
-            analyzer = ContentAnalyzer(self.config_path)
-            db_mgr = DBManager(db_path)
-            conn = sqlite3.connect(db_path)
-            rows = conn.execute(
-                "SELECT * FROM fichiers WHERE status='error'"
-            ).fetchall()
-            conn.close()
-            columns = [
-                "id",
-                "path",
-                "file_size",
-                "owner",
-                "fast_hash",
-                "access_time",
-                "file_attributes",
-                "file_signature",
-                "last_modified",
-                "status",
-                "exclusion_reason",
-                "priority_score",
-                "special_flags",
-                "processed_at",
-            ]
-            for r in rows[: int(self.max_files_var.get() or len(rows))]:
-                row = dict(zip(columns, r))
-                res = analyzer.analyze_single_file(row)
-                if res.get("status") in {"completed", "cached"}:
-                    llm_data = res.get("result", {})
-                    llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
-                    db_mgr.store_analysis_result(
-                        row["id"],
-                        res.get("task_id", ""),
-                        llm_data,
-                        res.get("resume", ""),
-                        res.get("raw_response", ""),
-                    )
-                    db_mgr.update_file_status(row["id"], "completed")
-        except Exception as exc:
-            messagebox.showerror("Reprocess Error", str(exc), parent=self.root)
+        if not self._validate_batch_operation("error"):
+            return
+
+        max_input = self.max_files_var.get().strip()
+        limit = None if not max_input or max_input == "0" else int(max_input)
+
+        def _background_task() -> None:
+            try:
+                db_path = Path("analysis_results.db")
+                analyzer = ContentAnalyzer(self.config_path)
+                db_mgr = DBManager(db_path)
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM fichiers WHERE status='error'")
+                rows = cursor.fetchall()
+                column_names = [d[0] for d in cursor.description]
+                conn.close()
+                if limit is not None and limit > 0:
+                    rows = rows[:limit]
+                total = len(rows)
+                processed = 0
+                for r in rows:
+                    if self.cancel_batch:
+                        break
+                    row = dict(zip(column_names, r))
+                    res = analyzer.analyze_single_file(row)
+                    if res.get("status") in {"completed", "cached"}:
+                        llm_data = res.get("result", {})
+                        llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
+                        db_mgr.store_analysis_result(
+                            row["id"],
+                            res.get("task_id", ""),
+                            llm_data,
+                            res.get("resume", ""),
+                            res.get("raw_response", ""),
+                        )
+                        db_mgr.update_file_status(row["id"], "completed")
+                    else:
+                        db_mgr.update_file_status(row["id"], "error", res.get("error"))
+                    processed += 1
+                    self.root.after(0, self._update_batch_progress, processed, total)
+                result = {
+                    "processed": processed,
+                    "total": total,
+                    "status": "completed" if not self.cancel_batch else "cancelled",
+                }
+                self.root.after(0, self._on_batch_complete, result)
+            except Exception as exc:  # pragma: no cover - runtime
+                self.root.after(0, self._on_batch_error, str(exc))
+
+        self.cancel_batch = False
+        self._set_batch_buttons_state("disabled")
+        thread = threading.Thread(target=_background_task, daemon=True)
+        thread.start()
 
     def on_analysis_progress(self, info: dict) -> None:
         self.current_file_path = info.get("current_file")
@@ -1430,6 +1500,44 @@ No need to run analysis to see your files.
         messagebox.showerror("Analysis Error", error, parent=self.root)
         self.log_action(f"Analysis error: {error}", "ERROR")
         self.status_app_label.config(text="Error")
+
+    # ------------------------------------------------------------------
+    # BATCH OPERATION HELPERS
+    # ------------------------------------------------------------------
+
+    def _set_batch_buttons_state(self, state: str) -> None:
+        self.start_button.config(state=state)
+        self.filtered_button.config(state=state)
+        self.reprocess_button.config(state=state)
+        self.cancel_batch_button.config(
+            state="normal" if state == "disabled" else "disabled"
+        )
+
+    def cancel_batch_operation(self) -> None:
+        self.cancel_batch = True
+
+    def _update_batch_progress(self, processed: int, total: int) -> None:
+        pct = (processed / total * 100) if total else 0
+        self.progress_bar["value"] = pct
+        self.progress_metrics_label.config(
+            text=f"Files: {processed}/{total} ({pct:.1f}%)"
+        )
+
+    def _on_batch_complete(self, result: dict) -> None:
+        self._set_batch_buttons_state("normal")
+        self.progress_bar["value"] = 0
+        status = result.get("status")
+        msg = (
+            f"Batch {status}!\nProcessed: {result.get('processed')}/{result.get('total')}"
+        )
+        if status == "completed":
+            messagebox.showinfo("Batch Complete", msg, parent=self.root)
+        else:
+            messagebox.showwarning("Batch Cancelled", msg, parent=self.root)
+
+    def _on_batch_error(self, error: str) -> None:
+        self._set_batch_buttons_state("normal")
+        messagebox.showerror("Batch Error", error, parent=self.root)
 
     # ------------------------------------------------------------------
     # RESULTS VIEWER AND EXPORTS
