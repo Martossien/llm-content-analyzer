@@ -14,7 +14,9 @@ def test_store_and_retrieve(tmp_path):
     cache = CacheManager(db_file, ttl_hours=1)
     cache.store_result("hash1", "ph1", {"result": "ok"})
     result = cache.get_cached_result("hash1", "ph1")
-    assert result == {"result": "ok"}
+    assert result["analysis_data"] == {"result": "ok"}
+    assert result["resume"] == ""
+    assert result["raw_response"] == ""
 
 
 def test_cache_expiration(tmp_path):
