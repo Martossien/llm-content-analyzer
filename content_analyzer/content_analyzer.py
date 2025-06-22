@@ -259,6 +259,7 @@ class ContentAnalyzer:
                 "owner": file_row.get("owner", "Unknown"),
                 "last_modified": file_row.get("last_modified", ""),
                 "file_extension": Path(file_row["path"]).suffix,
+                "file_signature": file_row.get("file_signature", "unknown"),
                 "metadata_summary": f"Fichier {Path(file_row['path']).suffix}, {file_row.get('file_size', 0)} bytes",
             }
 

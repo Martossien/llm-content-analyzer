@@ -31,6 +31,8 @@ exclusions:
   file_size:
     max_bytes: 104857600
     min_bytes: 100
+  paths:
+    excluded_patterns: []
 llm_limits:
   critical_threshold: 3950
   max_prompt_size: 4000
@@ -75,6 +77,11 @@ retry_config:
   wait_max: 10
   wait_min: 4
   wait_strategy: exponential
+scoring:
+  size_weight: 30
+  type_weight: 40
+  age_weight: 20
+  special_weight: 10
 templates:
   comprehensive:
     system_prompt: 'Tu es un expert en classification de documents d''entreprise avec

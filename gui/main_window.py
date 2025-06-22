@@ -11,6 +11,9 @@ import yaml
 import sqlite3
 import json
 import csv
+from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
@@ -18,6 +21,12 @@ from content_analyzer.modules.csv_parser import CSVParser
 from content_analyzer.modules.db_manager import DBManager
 from content_analyzer.modules.prompt_manager import PromptManager
 from content_analyzer.modules.cache_manager import CacheManager
+from content_analyzer.utils.prompt_validator import (
+    PromptSizeValidator,
+    DebouncedCalculator,
+    get_prompt_size_color,
+    validate_prompt_size,
+)
 
 from .utils.analysis_thread import AnalysisThread
 from .utils.service_monitor import ServiceMonitor
@@ -88,10 +97,15 @@ class MainWindow:
         self.analysis_thread: AnalysisThread | None = None
         self.analysis_running = False
 
+        self.prompt_validator = PromptSizeValidator(self.config_path)
+        self.prompt_debouncer = DebouncedCalculator(delay_ms=500)
+
         self.build_ui()
         self.load_api_configuration()
         self.load_exclusions()
         self.load_templates()
+        self.template_combobox.bind("<<ComboboxSelected>>", lambda e: self.update_prompt_info())
+        self.update_prompt_info()
         self.setup_log_viewer()
 
         self.update_service_status()
@@ -274,6 +288,28 @@ No need to run analysis to see your files.
             state="readonly",
         )
         self.template_combobox.pack(anchor="w", padx=2, pady=2)
+
+        ttk.Separator(prompt_frame, orient="horizontal").pack(fill="x", padx=2, pady=5)
+
+        self.prompt_info_frame = ttk.Frame(prompt_frame)
+        self.prompt_info_frame.pack(fill="x", padx=2, pady=2)
+
+        self.prompt_tpl_label = ttk.Label(self.prompt_info_frame, text="Template: N/A")
+        self.prompt_sys_label = ttk.Label(self.prompt_info_frame, text="System: 0 chars")
+        self.prompt_user_label = ttk.Label(self.prompt_info_frame, text="User: 0 chars")
+        self.prompt_total_label = ttk.Label(
+            self.prompt_info_frame,
+            text="Total: 0 chars",
+            font=("Arial", 9, "bold"),
+        )
+
+        for lbl in (
+            self.prompt_tpl_label,
+            self.prompt_sys_label,
+            self.prompt_user_label,
+            self.prompt_total_label,
+        ):
+            lbl.pack(anchor="w", pady=1)
 
         ttk.Button(prompt_frame, text="Edit Template", command=self.edit_template).pack(
             fill="x", padx=2, pady=2
@@ -795,6 +831,58 @@ No need to run analysis to see your files.
             user_text.pack(fill="both", expand=True, padx=5, pady=5)
             user_text.insert(1.0, user_template)
 
+            sys_count = ttk.Label(editor_window, text="System: 0 chars", foreground="gray")
+            sys_count.pack(anchor="w", padx=5)
+            user_count = ttk.Label(editor_window, text="User: 0 chars", foreground="gray")
+            user_count.pack(anchor="w", padx=5)
+            total_count = ttk.Label(editor_window, text="Total: 0 chars", font=("Arial", 9, "bold"))
+            total_count.pack(anchor="w", padx=5)
+
+            editor_debouncer = DebouncedCalculator(delay_ms=300)
+
+            def update_counts_debounced(_event=None) -> None:
+                def _calculate() -> None:
+                    try:
+                        system_text_content = system_text.get(1.0, tk.END)
+                        user_text_content = user_text.get(1.0, tk.END)
+
+                        info = validate_prompt_size(system_text_content, user_text_content)
+
+                        editor_window.after(0, _update_editor_labels, info)
+
+                    except Exception as e:
+                        logger.error(f"Error in editor calculation: {e}")
+
+                editor_debouncer.schedule_calculation(_calculate)
+
+            def _update_editor_labels(info: Dict[str, Any]) -> None:
+                try:
+                    def format_count(size: int) -> tuple[str, str]:
+                        color = get_prompt_size_color(size, self.prompt_validator)
+                        icon = "✅" if color == "green" else ("⚠️" if color == "orange" else "❌")
+                        return f"{size:,} chars {icon}", color
+
+                    sys_text_val, sys_color = format_count(info["system_size"])
+                    sys_count.config(text=sys_text_val, foreground=sys_color)
+
+                    user_text_val, user_color = format_count(info["user_size"])
+                    user_count.config(text=user_text_val, foreground=user_color)
+
+                    total_text_val, total_color = format_count(info["total_size"])
+                    total_count.config(text=f"Total: {total_text_val}", foreground=total_color)
+
+                except Exception as e:
+                    logger.error(f"Error updating editor labels: {e}")
+
+            system_text.bind("<KeyRelease>", update_counts_debounced)
+            user_text.bind("<KeyRelease>", update_counts_debounced)
+
+            def cleanup_editor():
+                editor_debouncer.cancel()
+                editor_window.destroy()
+
+            editor_window.protocol("WM_DELETE_WINDOW", cleanup_editor)
+
             buttons_frame = ttk.Frame(editor_window)
             buttons_frame.pack(fill="x", padx=5, pady=5)
 
@@ -873,6 +961,59 @@ No need to run analysis to see your files.
 
     def save_template(self) -> None:
         messagebox.showinfo("Save Template", "Template saved.")
+
+    def update_prompt_info(self) -> None:
+        """Update prompt size info with thread-safe debouncing."""
+        template_name = self.template_combobox.get()
+        if not template_name:
+            return
+
+        def _calculate_in_thread() -> None:
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f)
+
+                template_config = config.get("templates", {}).get(template_name, {})
+                system_prompt = template_config.get("system_prompt", "")
+                user_template = template_config.get("user_template", "")
+
+                info = validate_prompt_size(system_prompt, user_template)
+
+                self.root.after(0, self._update_prompt_labels, template_name, info)
+
+            except Exception as e:
+                logger.error(f"Error calculating prompt info: {e}")
+                self.root.after(0, self._update_prompt_labels_error, str(e))
+
+        self.prompt_debouncer.schedule_calculation(_calculate_in_thread)
+
+    def _update_prompt_labels(self, template_name: str, info: Dict[str, Any]) -> None:
+        """Update GUI labels with color coding (main thread only)."""
+        try:
+            def format_label(size: int) -> tuple[str, str]:
+                color = get_prompt_size_color(size, self.prompt_validator)
+                icon = "✅" if color == "green" else ("⚠️" if color == "orange" else "❌")
+                return f"{size:,} chars {icon}", color
+
+            self.prompt_tpl_label.config(text=f"Template: {template_name}")
+
+            sys_text, sys_color = format_label(info["system_size"])
+            self.prompt_sys_label.config(text=f"System: {sys_text}", foreground=sys_color)
+
+            user_text, user_color = format_label(info["user_size"])
+            self.prompt_user_label.config(text=f"User: {user_text}", foreground=user_color)
+
+            total_text, total_color = format_label(info["total_size"])
+            self.prompt_total_label.config(text=f"Total: {total_text}", foreground=total_color)
+
+        except Exception as e:
+            logger.error(f"Error updating prompt labels: {e}")
+
+    def _update_prompt_labels_error(self, error_msg: str) -> None:
+        """Display error state in labels."""
+        error_text = f"Error: {error_msg[:20]}..."
+        for label in (self.prompt_sys_label, self.prompt_user_label, self.prompt_total_label):
+            label.config(text=error_text, foreground="red")
 
     # ------------------------------------------------------------------
     # LOG VIEWER
