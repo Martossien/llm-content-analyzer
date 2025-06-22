@@ -126,6 +126,27 @@ No need to run analysis to see your files.
         y = int((screen_h - height) / 2)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
+    def create_dialog_window(
+        self, parent: tk.Toplevel | tk.Tk, title: str, geometry: str = "400x300"
+    ) -> tk.Toplevel:
+        """Standardized dialog window factory."""
+        dialog = tk.Toplevel(parent)
+        dialog.title(title)
+        dialog.geometry(geometry)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_set()
+        dialog.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (
+            dialog.winfo_width() // 2
+        )
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (
+            dialog.winfo_height() // 2
+        )
+        dialog.geometry(f"+{x}+{y}")
+        return dialog
+
     def build_ui(self) -> None:
         """Construct all UI sections."""
 
@@ -413,13 +434,14 @@ No need to run analysis to see your files.
     # FILE LOADING
     # ------------------------------------------------------------------
     def show_csv_preview(self, info: str) -> None:
-        messagebox.showinfo("CSV Preview", info)
+        messagebox.showinfo("CSV Preview", info, parent=self.root)
 
     def browse_csv_file(self) -> None:
         """Sélectionne, valide et importe automatiquement un fichier CSV."""
         file_path = filedialog.askopenfilename(
             title="Select SMBeagle CSV File",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            parent=self.root,
         )
         if file_path:
             try:
@@ -433,6 +455,7 @@ No need to run analysis to see your files.
                     messagebox.showerror(
                         "Invalid CSV Format",
                         "CSV validation failed:\n" + "\n".join(errors),
+                        parent=self.root,
                     )
                     self.file_path_label.config(
                         text="Invalid CSV format", background="red"
@@ -457,7 +480,9 @@ No need to run analysis to see your files.
                     error_msg = "Import failed:\n" + "\n".join(
                         import_result["errors"][:3]
                     )
-                    messagebox.showerror("Import Error", error_msg)
+                    messagebox.showerror(
+                        "Import Error", error_msg, parent=self.root
+                    )
                     self.file_path_label.config(text="Import failed", background="red")
                     self.csv_file_path = None
                     return
@@ -479,7 +504,9 @@ No need to run analysis to see your files.
                     f"⏱️ Processing time: {import_result['processing_time']:.1f}s\n"
                     f"💾 Database: {output_db.name} ({db_size_kb:.1f}KB)"
                 )
-                messagebox.showinfo("Import Complete", success_msg)
+                messagebox.showinfo(
+                    "Import Complete", success_msg, parent=self.root
+                )
 
                 self.log_action(
                     f"CSV imported: {import_result['imported_files']:,} files from {Path(file_path).name}",
@@ -495,7 +522,9 @@ No need to run analysis to see your files.
                 self.file_tooltip = Tooltip(self.file_path_label, tooltip_text)
 
             except Exception as e:  # pragma: no cover - I/O errors
-                messagebox.showerror("Import Error", f"Failed to import CSV:\n{str(e)}")
+                messagebox.showerror(
+                    "Import Error", f"Failed to import CSV:\n{str(e)}", parent=self.root
+                )
                 self.file_path_label.config(text="Import failed", background="red")
                 self.csv_file_path = None
                 self.log_action(f"CSV import failed: {str(e)}", "ERROR")
@@ -522,13 +551,13 @@ No need to run analysis to see your files.
             self.status_config_label.config(foreground="black")
         except Exception as e:  # pragma: no cover - file errors
             messagebox.showerror(
-                "Config Error", f"Cannot load configuration:\n{str(e)}"
+                "Config Error", f"Cannot load configuration:\n{str(e)}", parent=self.root
             )
 
     def test_api_connection(self) -> None:
         url = self.api_url_entry.get().strip()
         if not url:
-            messagebox.showerror("Error", "Please enter API URL")
+            messagebox.showerror("Error", "Please enter API URL", parent=self.root)
             return
         self.test_api_button.config(state="disabled", text="Testing...")
         self.root.update()
@@ -548,13 +577,18 @@ No need to run analysis to see your files.
                 messagebox.showinfo(
                     "Connection Successful",
                     f"API is accessible!\nResponse time: {response_time}ms",
+                    parent=self.root,
                 )
                 self.api_status_label.config(text="● API Connected", foreground="green")
             else:
-                messagebox.showerror("Connection Failed", "API is not accessible")
+                messagebox.showerror(
+                    "Connection Failed", "API is not accessible", parent=self.root
+                )
                 self.api_status_label.config(text="● API Failed", foreground="red")
         except Exception as e:  # pragma: no cover - network errors
-            messagebox.showerror("Connection Error", f"Connection failed:\n{str(e)}")
+            messagebox.showerror(
+                "Connection Error", f"Connection failed:\n{str(e)}", parent=self.root
+            )
             self.api_status_label.config(text="● API Error", foreground="red")
         finally:
             self.test_api_button.config(state="normal", text="Test Connection")
@@ -564,7 +598,7 @@ No need to run analysis to see your files.
             url = self.api_url_entry.get().strip()
             if not url.startswith(("http://", "https://")):
                 messagebox.showerror(
-                    "Invalid URL", "URL must start with http:// or https://"
+                    "Invalid URL", "URL must start with http:// or https://", parent=self.root
                 )
                 return
             try:
@@ -572,14 +606,14 @@ No need to run analysis to see your files.
                 if max_context < 1000 or max_context > 500000:
                     raise ValueError("Max context must be between 1000 and 500000")
             except ValueError as e:
-                messagebox.showerror("Invalid Max Context", str(e))
+                messagebox.showerror("Invalid Max Context", str(e), parent=self.root)
                 return
             try:
                 workers = int(self.workers_entry.get())
                 if workers < 1 or workers > 10:
                     raise ValueError("Workers must be between 1 and 10")
             except ValueError as e:
-                messagebox.showerror("Invalid Workers", str(e))
+                messagebox.showerror("Invalid Workers", str(e), parent=self.root)
                 return
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
@@ -590,14 +624,18 @@ No need to run analysis to see your files.
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(config, f, default_flow_style=False, indent=2)
             messagebox.showinfo(
-                "Configuration Saved", "API configuration has been saved successfully!"
+                "Configuration Saved",
+                "API configuration has been saved successfully!",
+                parent=self.root,
             )
             self.status_config_label.config(
                 text=f"Config: {self.config_path.name} (saved)", foreground="green"
             )
             self.log_action("API configuration saved")
         except Exception as e:  # pragma: no cover - file errors
-            messagebox.showerror("Save Error", f"Cannot save configuration:\n{str(e)}")
+            messagebox.showerror(
+                "Save Error", f"Cannot save configuration:\n{str(e)}", parent=self.root
+            )
 
     # ------------------------------------------------------------------
     # EXCLUSIONS MANAGEMENT
@@ -615,12 +653,16 @@ No need to run analysis to see your files.
             self.skip_system_var.set(file_attrs.get("skip_system", True))
             self.skip_hidden_var.set(file_attrs.get("skip_hidden", False))
         except Exception as e:  # pragma: no cover
-            messagebox.showerror("Load Error", f"Cannot load exclusions:\n{str(e)}")
+            messagebox.showerror(
+                "Load Error", f"Cannot load exclusions:\n{str(e)}", parent=self.root
+            )
 
     def add_extension(self) -> None:
         ext = self.add_ext_entry.get().strip()
         if not ext:
-            messagebox.showwarning("Empty Extension", "Please enter an extension")
+            messagebox.showwarning(
+                "Empty Extension", "Please enter an extension", parent=self.root
+            )
             return
         if not ext.startswith("."):
             ext = "." + ext
@@ -631,7 +673,7 @@ No need to run analysis to see your files.
         ]
         if ext in current_exts:
             messagebox.showwarning(
-                "Duplicate Extension", f"Extension {ext} is already blocked"
+                "Duplicate Extension", f"Extension {ext} is already blocked", parent=self.root
             )
             return
         try:
@@ -646,13 +688,15 @@ No need to run analysis to see your files.
             self.add_ext_entry.delete(0, tk.END)
             self.log_action(f"Added extension: {ext}")
         except Exception as e:  # pragma: no cover
-            messagebox.showerror("Add Error", f"Cannot add extension:\n{str(e)}")
+            messagebox.showerror(
+                "Add Error", f"Cannot add extension:\n{str(e)}", parent=self.root
+            )
 
     def remove_extension(self) -> None:
         selection = self.exclusions_listbox.curselection()
         if not selection:
             messagebox.showwarning(
-                "No Selection", "Please select an extension to remove"
+                "No Selection", "Please select an extension to remove", parent=self.root
             )
             return
         ext = self.exclusions_listbox.get(selection[0])
@@ -668,7 +712,9 @@ No need to run analysis to see your files.
             self.exclusions_listbox.delete(selection[0])
             self.log_action(f"Removed extension: {ext}")
         except Exception as e:  # pragma: no cover
-            messagebox.showerror("Remove Error", f"Cannot remove extension:\n{str(e)}")
+            messagebox.showerror(
+                "Remove Error", f"Cannot remove extension:\n{str(e)}", parent=self.root
+            )
 
     def toggle_system_files(self) -> None:
         skip_system = self.skip_system_var.get()
@@ -682,7 +728,9 @@ No need to run analysis to see your files.
                 f"Skip system files: {'enabled' if skip_system else 'disabled'}"
             )
         except Exception as e:  # pragma: no cover
-            messagebox.showerror("Toggle Error", f"Cannot update setting:\n{str(e)}")
+            messagebox.showerror(
+                "Toggle Error", f"Cannot update setting:\n{str(e)}", parent=self.root
+            )
 
     def toggle_hidden_files(self) -> None:
         skip_hidden = self.skip_hidden_var.get()
@@ -696,7 +744,9 @@ No need to run analysis to see your files.
                 f"Skip hidden files: {'enabled' if skip_hidden else 'disabled'}"
             )
         except Exception as e:
-            messagebox.showerror("Toggle Error", f"Cannot update setting:\n{str(e)}")
+            messagebox.showerror(
+                "Toggle Error", f"Cannot update setting:\n{str(e)}", parent=self.root
+            )
 
     # ------------------------------------------------------------------
     # PROMPT MANAGEMENT
@@ -709,12 +759,16 @@ No need to run analysis to see your files.
             if templates:
                 self.template_combobox.set(templates[0])
         except Exception as e:
-            messagebox.showerror("Load Error", f"Cannot load templates:\n{str(e)}")
+            messagebox.showerror(
+                "Load Error", f"Cannot load templates:\n{str(e)}", parent=self.root
+            )
 
     def edit_template(self) -> None:
         selected_template = self.template_combobox.get()
         if not selected_template:
-            messagebox.showwarning("No Template", "Please select a template to edit")
+            messagebox.showwarning(
+                "No Template", "Please select a template to edit", parent=self.root
+            )
             return
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
@@ -723,11 +777,9 @@ No need to run analysis to see your files.
             system_prompt = template_config.get("system_prompt", "")
             user_template = template_config.get("user_template", "")
 
-            editor_window = tk.Toplevel(self.root)
-            editor_window.title(f"Edit Template: {selected_template}")
-            editor_window.geometry("800x600")
-            editor_window.transient(self.root)
-            editor_window.grab_set()
+            editor_window = self.create_dialog_window(
+                self.root, f"Edit Template: {selected_template}", "800x600"
+            )
 
             ttk.Label(editor_window, text="System Prompt:").pack(
                 anchor="w", padx=5, pady=5
@@ -757,12 +809,13 @@ No need to run analysis to see your files.
                     messagebox.showinfo(
                         "Template Saved",
                         f"Template '{selected_template}' saved successfully!",
+                        parent=editor_window,
                     )
                     editor_window.destroy()
                     self.log_action(f"Template edited: {selected_template}")
                 except Exception as e:
                     messagebox.showerror(
-                        "Save Error", f"Cannot save template:\n{str(e)}"
+                        "Save Error", f"Cannot save template:\n{str(e)}", parent=editor_window
                     )
 
             def cancel_edit() -> None:
@@ -775,12 +828,16 @@ No need to run analysis to see your files.
                 side="right", padx=5
             )
         except Exception as e:  # pragma: no cover
-            messagebox.showerror("Edit Error", f"Cannot edit template:\n{str(e)}")
+            messagebox.showerror(
+                "Edit Error", f"Cannot edit template:\n{str(e)}", parent=self.root
+            )
 
     def test_prompt(self) -> None:
         selected_template = self.template_combobox.get()
         if not selected_template:
-            messagebox.showwarning("No Template", "Please select a template to test")
+            messagebox.showwarning(
+                "No Template", "Please select a template to test", parent=self.root
+            )
             return
         try:
             prompt_manager = PromptManager(self.config_path)
@@ -794,11 +851,9 @@ No need to run analysis to see your files.
             prompt = prompt_manager.build_analysis_prompt(
                 sample_metadata, selected_template
             )
-            preview_window = tk.Toplevel(self.root)
-            preview_window.title(f"Prompt Preview: {selected_template}")
-            preview_window.geometry("700x500")
-            preview_window.transient(self.root)
-            preview_window.grab_set()
+            preview_window = self.create_dialog_window(
+                self.root, f"Prompt Preview: {selected_template}", "700x500"
+            )
 
             ttk.Label(preview_window, text="Generated Prompt:").pack(
                 anchor="w", padx=5, pady=5
@@ -812,7 +867,9 @@ No need to run analysis to see your files.
             ).pack(pady=5)
             self.log_action(f"Prompt tested: {selected_template}")
         except Exception as e:
-            messagebox.showerror("Test Error", f"Cannot test prompt:\n{str(e)}")
+            messagebox.showerror(
+                "Test Error", f"Cannot test prompt:\n{str(e)}", parent=self.root
+            )
 
     def save_template(self) -> None:
         messagebox.showinfo("Save Template", "Template saved.")
@@ -1026,7 +1083,9 @@ No need to run analysis to see your files.
             return
         if not self.service_monitor.check_api_status():
             response = messagebox.askyesno(
-                "API Unavailable", "API is not accessible. Continue anyway?"
+                "API Unavailable",
+                "API is not accessible. Continue anyway?",
+                parent=self.root,
             )
             if not response:
                 return
@@ -1075,6 +1134,7 @@ No need to run analysis to see your files.
         response = messagebox.askyesno(
             "Stop Analysis",
             "Are you sure you want to stop the analysis?\nProgress will be lost.",
+            parent=self.root,
         )
         if not response:
             return
@@ -1095,7 +1155,9 @@ No need to run analysis to see your files.
 
     def analyze_selected_file(self) -> None:
         """Allow user to analyze a single file using the configured pipeline."""
-        file_path = filedialog.askopenfilename(title="Select File to Analyze")
+        file_path = filedialog.askopenfilename(
+            title="Select File to Analyze", parent=self.root
+        )
         if not file_path:
             return
         try:
@@ -1179,7 +1241,7 @@ No need to run analysis to see your files.
                     )
                     db_mgr.update_file_status(row["id"], "completed")
         except Exception as exc:
-            messagebox.showerror("Reprocess Error", str(exc))
+            messagebox.showerror("Reprocess Error", str(exc), parent=self.root)
 
     def on_analysis_progress(self, info: dict) -> None:
         self.current_file_path = info.get("current_file")
@@ -1203,14 +1265,14 @@ No need to run analysis to see your files.
             f"Errors: {len(errors)}"
         )
         if status == "completed":
-            messagebox.showinfo("Analysis Complete", completion_msg)
+            messagebox.showinfo("Analysis Complete", completion_msg, parent=self.root)
             self.log_action(
                 f"Analysis completed successfully: {files_processed}/{files_total} files",
                 "INFO",
             )
             self.status_app_label.config(text="Completed")
         else:
-            messagebox.showerror("Analysis Failed", completion_msg)
+            messagebox.showerror("Analysis Failed", completion_msg, parent=self.root)
             self.log_action(f"Analysis failed: {status}", "ERROR")
             self.status_app_label.config(text="Failed")
 
@@ -1220,7 +1282,7 @@ No need to run analysis to see your files.
         self.pause_button.config(state="disabled", text="PAUSE")
         self.stop_button.config(state="disabled")
         self.browse_button.config(state="normal")
-        messagebox.showerror("Analysis Error", error)
+        messagebox.showerror("Analysis Error", error, parent=self.root)
         self.log_action(f"Analysis error: {error}", "ERROR")
         self.status_app_label.config(text="Error")
 
@@ -1235,14 +1297,14 @@ No need to run analysis to see your files.
                 messagebox.showwarning(
                     "No Results",
                     "No analysis results database found.\nPlease run an analysis first.",
+                    parent=self.root,
                 )
                 self.log_action("Results viewer: no database found", "WARN")
                 return
 
-            results_window = tk.Toplevel(self.root)
-            results_window.title("Analysis Results Viewer")
-            results_window.geometry("1400x700")
-            results_window.transient(self.root)
+            results_window = self.create_dialog_window(
+                self.root, "Analysis Results Viewer", "1400x700"
+            )
 
             controls_frame = ttk.Frame(results_window)
             controls_frame.pack(fill="x", padx=10, pady=5)
@@ -1389,7 +1451,7 @@ No need to run analysis to see your files.
                 ),
             )
 
-            tree.bind("<Double-1>", lambda e: self.show_file_details(tree))
+            tree.bind("<Double-1>", lambda e: self.show_file_details(tree, results_window))
 
             # Navigation controls
             nav_frame = ttk.Frame(results_window)
@@ -1479,6 +1541,7 @@ No need to run analysis to see your files.
                     "Please:\n"
                     "1. Click 'Browse CSV...' to select and import a CSV file\n"
                     "2. The import will happen automatically after validation",
+                    parent=tree.winfo_toplevel(),
                 )
                 self.log_action("Results refresh: no database file", "WARN")
                 return
@@ -1496,6 +1559,7 @@ No need to run analysis to see your files.
                     "Please:\n"
                     "1. Click 'Browse CSV...' to select a CSV file\n"
                     "2. The import will happen automatically",
+                    parent=tree.winfo_toplevel(),
                 )
                 self.log_action("Results refresh: table 'fichiers' missing", "WARN")
                 return
@@ -1615,7 +1679,7 @@ No need to run analysis to see your files.
             )
             self.log_action(f"Results refresh failed: {str(e)}", "ERROR")
 
-    def show_file_details(self, tree):
+    def show_file_details(self, tree, parent_window: tk.Toplevel | tk.Tk | None = None):
         """Affiche les détails complets d'un fichier sélectionné."""
         selection = tree.selection()
         if not selection:
@@ -1623,6 +1687,9 @@ No need to run analysis to see your files.
 
         item = tree.item(selection[0])
         file_id = item["values"][0]
+
+        if parent_window is None:
+            parent_window = tree.winfo_toplevel()
 
         try:
             db_path = Path("analysis_results.db")
@@ -1649,13 +1716,14 @@ No need to run analysis to see your files.
             conn.close()
 
             if not row:
-                messagebox.showwarning("No Data", "No details found for this file")
+                messagebox.showwarning(
+                    "No Data", "No details found for this file", parent=parent_window
+                )
                 return
 
-            details_window = tk.Toplevel(self.root)
-            details_window.title(f"File Details - ID {file_id}")
-            details_window.geometry("800x600")
-            details_window.transient(self.root)
+            details_window = self.create_dialog_window(
+                parent_window, f"File Details - ID {file_id}", "800x600"
+            )
 
             text_widget = tk.Text(details_window, wrap="word", font=("Consolas", 10))
             text_widget.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1725,7 +1793,7 @@ RAW RESPONSE:
 
         except Exception as e:
             messagebox.showerror(
-                "Details Error", f"Failed to show file details:\n{str(e)}"
+                "Details Error", f"Failed to show file details:\n{str(e)}", parent=parent_window
             )
             self.log_action(f"File details failed: {str(e)}", "ERROR")
 
@@ -1742,10 +1810,7 @@ RAW RESPONSE:
             logging.error(f"Invalid JSON response: {e}")
             formatted_text = "❌ Réponse invalide de l'API"
 
-        window = tk.Toplevel(self.root)
-        window.title("Analysis Result")
-        window.geometry("600x500")
-        window.transient(self.root)
+        window = self.create_dialog_window(self.root, "Analysis Result", "600x500")
 
         text_widget = tk.Text(window, wrap="word", font=("Consolas", 10))
         text_widget.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1809,15 +1874,13 @@ RAW RESPONSE:
             db_path = Path("analysis_results.db")
             if not db_path.exists():
                 messagebox.showwarning(
-                    "No Results", "No analysis results found to export"
+                    "No Results", "No analysis results found to export", parent=self.root
                 )
                 return
 
-            export_window = tk.Toplevel(self.root)
-            export_window.title("Export Analysis Results")
-            export_window.geometry("500x400")
-            export_window.transient(self.root)
-            export_window.grab_set()
+            export_window = self.create_dialog_window(
+                self.root, "Export Analysis Results", "500x400"
+            )
 
             format_frame = ttk.LabelFrame(export_window, text="Export Format")
             format_frame.pack(fill="x", padx=10, pady=10)
@@ -1904,7 +1967,7 @@ RAW RESPONSE:
 
         except Exception as e:
             messagebox.showerror(
-                "Export Error", f"Failed to open export dialog:\n{str(e)}"
+                "Export Error", f"Failed to open export dialog:\n{str(e)}", parent=self.root
             )
             self.log_action(f"Export dialog failed: {str(e)}", "ERROR")
 
@@ -1970,6 +2033,7 @@ RAW RESPONSE:
             messagebox.showinfo(
                 "Export Complete",
                 f"Results exported successfully to:\n{Path(export_path).name}",
+                parent=self.root,
             )
             self.log_action(
                 f"Results exported to {self.export_format.get().upper()}: {Path(export_path).name} ({len(rows)} records)",
@@ -1977,7 +2041,9 @@ RAW RESPONSE:
             )
 
         except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export results:\n{str(e)}")
+            messagebox.showerror(
+                "Export Error", f"Failed to export results:\n{str(e)}", parent=export_window
+            )
             self.log_action(f"Export failed: {str(e)}", "ERROR")
 
     def export_to_csv(self, rows, export_path):
@@ -2350,7 +2416,7 @@ RAW RESPONSE:
                 title="Export Table to CSV",
                 defaultextension=".csv",
                 filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                parent=self.root,
+                parent=tree.winfo_toplevel(),
             )
             if not export_path:
                 return
@@ -2377,6 +2443,7 @@ RAW RESPONSE:
             messagebox.showinfo(
                 "Export Complete",
                 f"Table exported successfully to: {Path(export_path).name}",
+                parent=tree.winfo_toplevel(),
             )
             self.log_action(
                 f"Table exported to CSV: {Path(export_path).name}",
@@ -2384,7 +2451,9 @@ RAW RESPONSE:
             )
 
         except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export table:\n{str(e)}")
+            messagebox.showerror(
+                "Export Error", f"Failed to export table:\n{str(e)}", parent=tree.winfo_toplevel()
+            )
             self.log_action(f"Table export failed: {str(e)}", "ERROR")
 
     # ------------------------------------------------------------------
@@ -2392,11 +2461,9 @@ RAW RESPONSE:
     # ------------------------------------------------------------------
     def show_maintenance_dialog(self) -> None:
         self.log_action("Maintenance dialog opened", "INFO")
-        maintenance_window = tk.Toplevel(self.root)
-        maintenance_window.title("System Maintenance")
-        maintenance_window.geometry("500x400")
-        maintenance_window.transient(self.root)
-        maintenance_window.grab_set()
+        maintenance_window = self.create_dialog_window(
+            self.root, "System Maintenance", "500x400"
+        )
 
         db_frame = ttk.LabelFrame(maintenance_window, text="Database Maintenance")
         db_frame.pack(fill="x", padx=10, pady=10)
