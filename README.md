@@ -135,6 +135,8 @@ Exclusions
 exclusions:
   extensions:
     blocked: [".tmp", ".log", ".bak"]
+    # Extensions parsed from CSV are normalized with a leading dot so
+    # that values like "zip" match the blocked list [".zip"].
   file_size:
     min_bytes: 100
     max_bytes: 104857600

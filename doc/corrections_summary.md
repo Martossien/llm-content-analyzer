@@ -10,3 +10,7 @@ This document lists the main corrections and additions made to the project to re
 
 ## Notes
 These changes fix missing methods and allow proper processing of SMBeagle CSV files while preserving UNC paths.
+
+## Extension Normalization
+- Extensions from CSV rows are now normalized with a leading dot before filtering
+  to ensure blocked extensions like `.zip` are excluded correctly.
