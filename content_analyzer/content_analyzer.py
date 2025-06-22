@@ -243,10 +243,12 @@ class ContentAnalyzer:
             if cached:
                 return {
                     "status": "cached",
-                    "result": cached,
+                    "result": cached["analysis_data"],
                     "task_id": "",
                     "processing_time_ms": int((time.perf_counter() - start) * 1000),
                     "cache_used": True,
+                    "resume": cached.get("resume", ""),
+                    "raw_response": cached.get("raw_response", ""),
                 }
 
             file_metadata = {
@@ -273,6 +275,8 @@ class ContentAnalyzer:
                     file_row.get("fast_hash", ""),
                     "default_prompt_hash",
                     parsed_result.get("result", {}),
+                    parsed_result.get("resume", ""),
+                    parsed_result.get("raw_response", ""),
                 )
 
             return {
