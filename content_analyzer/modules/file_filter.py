@@ -13,9 +13,12 @@ class FileFilter:
 
     def should_process_file(self, file_row: Dict[str, Any]) -> Tuple[bool, str]:
         ext = str(file_row.get("extension", "")).lower()
+        if ext and not ext.startswith("."):
+            ext = "." + ext
         size = int(file_row.get("file_size", 0))
         path = file_row.get("path", "")
         attrs = file_row.get("file_attributes", "")
+        attr_tokens = [a.strip().lower() for a in attrs.replace(",", " ").split()]
         rules = self.cfg["exclusions"]
 
         if ext in rules["extensions"].get("blocked", []):
@@ -24,9 +27,9 @@ class FileFilter:
             return False, "too_small"
         if size > rules["file_size"].get("max_bytes", 1 << 30):
             return False, "too_large"
-        if rules["file_attributes"].get("skip_system") and "system" in attrs.lower():
+        if rules["file_attributes"].get("skip_system") and "system" in attr_tokens:
             return False, "system_file"
-        if rules["file_attributes"].get("skip_hidden") and "hidden" in attrs.lower():
+        if rules["file_attributes"].get("skip_hidden") and "hidden" in attr_tokens:
             return False, "hidden_file"
         for pattern in rules["paths"].get("excluded_patterns", []):
             if fnmatch.fnmatch(path, pattern):
@@ -35,10 +38,12 @@ class FileFilter:
 
     def calculate_priority_score(self, file_row: Dict[str, Any]) -> int:
         ext = str(file_row.get("extension", "")).lower()
+        if ext and not ext.startswith("."):
+            ext = "." + ext
         size = int(file_row.get("file_size", 0))
         age = file_row.get("last_modified", "0")
         attrs = file_row.get("file_attributes", "")
-
+        attr_tokens = [a.strip().lower() for a in attrs.replace(",", " ").split()]
         score_cfg = self.cfg["scoring"]
         weight_size = score_cfg.get("size_weight", 30)
         weight_type = score_cfg.get("type_weight", 40)
@@ -60,9 +65,9 @@ class FileFilter:
         age_score = weight_age  # simplification
 
         special = 0
-        if "hidden" in attrs.lower():
+        if "hidden" in attr_tokens:
             special += weight_special / 2
-        if "system" in attrs.lower():
+        if "system" in attr_tokens:
             special += weight_special / 2
 
         total = size_score + type_score + age_score + special
@@ -71,9 +76,10 @@ class FileFilter:
     def get_special_flags(self, file_row: Dict[str, Any]) -> List[str]:
         flags: List[str] = []
         attrs = file_row.get("file_attributes", "")
-        if "hidden" in attrs.lower():
+        attr_tokens = [a.strip().lower() for a in attrs.replace(",", " ").split()]
+        if "hidden" in attr_tokens:
             flags.append("hidden_file")
-        if "system" in attrs.lower():
+        if "system" in attr_tokens:
             flags.append("system_file")
         if file_row.get("file_signature") and file_row.get("extension"):
             if (

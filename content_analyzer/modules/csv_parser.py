@@ -399,7 +399,10 @@ class CSVParser:
         return {
             "name": name[:255],
             "host": row_dict.get("Host", "").strip(),
-            "extension": row_dict.get("Extension", "").strip().lower(),
+            "extension": (
+                ("." + row_dict.get("Extension", "").strip().lower().lstrip("."))
+                if row_dict.get("Extension") else ""
+            ),
             "username": row_dict.get("Username", "").strip(),
             "hostname": row_dict.get("Hostname", "").strip(),
             "unc_directory": unc_dir,
