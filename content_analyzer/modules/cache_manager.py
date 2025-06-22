@@ -38,6 +38,13 @@ class CacheManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_hits_count ON cache_prompts(hits_count DESC)"
         )
+
+        cursor.execute("PRAGMA table_info(cache_prompts)")
+        existing_cols = [row[1] for row in cursor.fetchall()]
+        for col in ["document_resume", "raw_llm_response"]:
+            if col not in existing_cols:
+                cursor.execute(f"ALTER TABLE cache_prompts ADD COLUMN {col} TEXT")
+
         conn.commit()
         conn.close()
 
@@ -48,12 +55,12 @@ class CacheManager:
         conn = self._connect()
         cursor = conn.cursor()
         row = cursor.execute(
-            "SELECT response_content, hits_count, ttl_expiry FROM cache_prompts WHERE cache_key = ?",
+            "SELECT response_content, document_resume, raw_llm_response, hits_count, ttl_expiry FROM cache_prompts WHERE cache_key = ?",
             (key,),
         ).fetchone()
         result = None
         if row:
-            expiry = row[2]
+            expiry = row[4]
             if expiry and time.time() > float(expiry):
                 conn.execute("DELETE FROM cache_prompts WHERE cache_key = ?", (key,))
                 conn.commit()
@@ -63,12 +70,21 @@ class CacheManager:
                     (key,),
                 )
                 conn.commit()
-                result = json.loads(row[0])
+                result = {
+                    "analysis_data": json.loads(row[0]),
+                    "resume": row[1] or "",
+                    "raw_response": row[2] or "",
+                }
         conn.close()
         return result
 
     def store_result(
-        self, fast_hash: str, prompt_hash: str, result: Dict[str, Any]
+        self,
+        fast_hash: str,
+        prompt_hash: str,
+        result: Dict[str, Any],
+        document_resume: str = "",
+        raw_llm_response: str = "",
     ) -> None:
         key = f"{fast_hash}_{prompt_hash}"
         expiry = time.time() + self.ttl_hours * 3600
@@ -76,8 +92,14 @@ class CacheManager:
         conn.execute(
             """
             INSERT OR REPLACE INTO cache_prompts (
-                cache_key, prompt_hash, response_content, ttl_expiry, file_size
-            ) VALUES (?, ?, ?, ?, ?)
+                cache_key,
+                prompt_hash,
+                response_content,
+                ttl_expiry,
+                file_size,
+                document_resume,
+                raw_llm_response
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key,
@@ -85,6 +107,8 @@ class CacheManager:
                 json.dumps(result),
                 expiry,
                 result.get("file_size"),
+                document_resume,
+                raw_llm_response,
             ),
         )
         conn.commit()
