@@ -54,10 +54,14 @@ class AnalysisThread(threading.Thread):
                 self.current_file = row.get("path")
                 single_res = analyzer.analyze_single_file(row)
                 if single_res.get("status") in {"completed", "cached"}:
+                    llm_data = single_res.get("result", {})
+                    llm_data["processing_time_ms"] = single_res.get(
+                        "processing_time_ms", 0
+                    )
                     db_mgr.store_analysis_result(
                         row["id"],
                         single_res.get("task_id", ""),
-                        single_res.get("result", {}),
+                        llm_data,
                         single_res.get("resume", ""),
                         single_res.get("raw_response", ""),
                     )
