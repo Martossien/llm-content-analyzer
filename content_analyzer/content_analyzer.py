@@ -304,7 +304,8 @@ class ContentAnalyzer:
         start_time = time.perf_counter()
         for row in files:
             res = self.analyze_single_file(row)
-            if res.get("status") in {"completed", "cached"}:
+            actual_status = res.get("status")
+            if actual_status in {"completed", "cached"}:
                 llm_data = res.get("result", {})
                 llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
                 self.db_manager.store_analysis_result(
@@ -314,9 +315,10 @@ class ContentAnalyzer:
                     res.get("resume", ""),
                     res.get("raw_response", ""),
                 )
-                self.db_manager.update_file_status(row["id"], "completed")
-            else:
+            if actual_status == "error":
                 self.db_manager.update_file_status(row["id"], "error", res.get("error"))
+            else:
+                self.db_manager.update_file_status(row["id"], actual_status)
             processed += 1
 
         return {

@@ -65,8 +65,11 @@ def test_analyze_batch(tmp_path):
     assert result["status"] == "completed"
     assert result["files_processed"] == 3
     conn = sqlite3.connect(out_db)
-    count = conn.execute(
+    completed = conn.execute(
         "SELECT COUNT(*) FROM fichiers WHERE status='completed'"
     ).fetchone()[0]
+    cached = conn.execute(
+        "SELECT COUNT(*) FROM fichiers WHERE status='cached'"
+    ).fetchone()[0]
     conn.close()
-    assert count == 3
+    assert completed + cached == 3
