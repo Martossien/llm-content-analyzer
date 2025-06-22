@@ -1,167 +1,158 @@
-# Configuration Brique 2 Content Analyzer V2.3
-project:
-  name: "llm-content-analyzer"
-  version: "2.3.0"
-  stack_philosophy: "minimal_dependencies_maximum_efficiency"
-
 api_config:
-  url: "http://localhost:8080"
-  token: "sk-d88e3244ae2e4b64a5256c6f4946155a"
+  batch_size: 1
   max_tokens: 32000
   timeout_seconds: 300
-  batch_size: 100
-
-# Configuration tenacity retry
-retry_config:
-  max_attempts: 3
-  wait_strategy: "exponential"
-  wait_min: 4
-  wait_max: 10
-  retry_on: ["requests.RequestException", "requests.Timeout"]
-
-# Configuration circuitbreaker  
+  token: sk-d88e3244ae2e4b64a5256c6f4946155a
+  url: http://localhost:8080
 circuit_config:
+  expected_exception: requests.RequestException
   failure_threshold: 5
   recovery_timeout: 30
-  expected_exception: "requests.RequestException"
-
-modules:
-  csv_parser:
-    library: "pandas"
-    chunk_size: 10000
-    validation_strict: true
-    encoding: "utf-8"
-    
-  cache_manager:
-    backend: "sqlite3_custom"
-    max_memory_mb: 512
-    ttl_hours: 168  # 7 jours
-    compression: false
-    
-  file_filter:
-    backend: "python_native"
-    priority_scoring: true
-    
-  api_client:
-    backend: "requests_tenacity_circuitbreaker"
-    connection_pool: false
-    
-  db_manager:
-    backend: "sqlite3_pure"
-    wal_mode: true
-    pragma_optimizations: true
-    
-  prompt_manager:
-    backend: "jinja2_yaml"
-    template_caching: true
-
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "logs/content_analyzer.log"
-
 exclusions:
   extensions:
-    blocked: [".tmp", ".log", ".bak", ".cache"]
-    low_priority: [".txt", ".ini", ".cfg"]
-    high_priority: [".pdf", ".docx", ".doc", ".xlsx"]
-  file_size:
-    min_bytes: 100
-    max_bytes: 104857600
+    blocked:
+    - .tmp
+    - .log
+    - .bak
+    - .cache
+    - .zip
+    high_priority:
+    - .pdf
+    - .docx
+    - .doc
+    - .xlsx
+    low_priority:
+    - .txt
+    - .ini
+    - .cfg
   file_attributes:
-    skip_system: true
     skip_hidden: false
+    skip_system: true
+  file_size:
+    max_bytes: 104857600
+    min_bytes: 100
   paths:
     excluded_patterns: []
-
+logging:
+  file: logs/content_analyzer.log
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  level: INFO
+modules:
+  api_client:
+    backend: requests_tenacity_circuitbreaker
+    connection_pool: false
+  cache_manager:
+    backend: sqlite3_custom
+    compression: false
+    max_memory_mb: 512
+    ttl_hours: 168
+  csv_parser:
+    chunk_size: 10000
+    encoding: utf-8
+    library: pandas
+    validation_strict: true
+  db_manager:
+    backend: sqlite3_pure
+    pragma_optimizations: true
+    wal_mode: true
+  file_filter:
+    backend: python_native
+    priority_scoring: true
+  prompt_manager:
+    backend: jinja2_yaml
+    template_caching: true
+project:
+  name: llm-content-analyzer
+  stack_philosophy: minimal_dependencies_maximum_efficiency
+  version: 2.3.0
+retry_config:
+  max_attempts: 3
+  retry_on:
+  - requests.RequestException
+  - requests.Timeout
+  wait_max: 10
+  wait_min: 4
+  wait_strategy: exponential
 scoring:
-  size_weight: 30
-  type_weight: 40
   age_weight: 20
+  size_weight: 30
   special_weight: 10
-
+  type_weight: 40
 templates:
   comprehensive:
-    system_prompt: |
-      Tu es un expert en classification de documents d'entreprise avec spécialisation en sécurité informatique, conformité RGPD et analyse juridico-financière.
+    system_prompt: 'Tu es un expert en classification de documents d''entreprise avec
+      specialisation en securite informatique, conformite RGPD et analyse juridico-financiere.
 
-      INSTRUCTIONS CRITIQUES :
-      1. Retourne UNIQUEMENT un objet JSON valide, sans texte avant ni après
-      2. Si le fichier est inaccessible, corrompu ou vide : utilise "N/A" pour tous les champs et confidence=0
-      3. Sois précis dans tes classifications selon les standards internationaux
-      4. Utilise une confidence de 0-100 pour chaque domaine analysé
+      REGLES ABSOLUES AUCUNE EXCEPTION AUTORISEE :
 
-    user_template: |
-      ANALYSE DE DOCUMENT - CLASSIFICATION MULTI-DOMAINES
+      INTERDIT : Tout texte avant ou apres le JSON, Commentaires dans la reponse,
+      Reponses partielles ou incompletes
 
-      📁 Fichier: {{ file_name }}
-      📊 Taille: {{ file_size_readable }}
-      👤 Propriétaire: {{ owner }}
-      📅 Dernière modification: {{ last_modified }}
-      🔍 Signature: {{ file_signature }}
+      OBLIGATOIRE : JSON valide et complet uniquement, Tous les 4 domaines analyses,
+      Un resume de 30-50 mots
 
-      INSTRUCTIONS D'ANALYSE :
+      VALIDATION INTERNE REQUISE :
 
-      🛡️ SÉCURITÉ (Classification selon niveaux gouvernementaux/entreprise) :
-      - C0 = Public : Information accessible à tous sans restriction
-      - C1 = Interne : Information limitée au personnel de l'organisation
-      - C2 = Confidentiel : Information sensible, accès restreint avec autorisation
-      - C3 = Secret : Information hautement sensible, accès très restreint
+      verifie que tu as :
 
-      🔒 RGPD (Selon Art. 4 GDPR - Données personnelles) :
-      - none = Aucune donnée personnelle détectée
-      - low = Données personnelles basiques (noms, emails professionnels)
-      - medium = Données personnelles sensibles (numéros ID, adresses)
-      - high = Données personnelles spéciales (santé, biométrie, opinions politiques)
-      - critical = Données ultra-sensibles (données bancaires, secrets médicaux)
+      Un resume present
 
-      💰 FINANCE (Types de documents financiers) :
-      - none = Pas de contenu financier
-      - invoice = Factures, devis, bons de commande
-      - contract = Contrats commerciaux, accords financiers
-      - budget = Budgets, prévisions, analyses financières
-      - accounting = Comptabilité, bilans, rapports financiers
-      - payment = Informations de paiement, virements, cartes bancaires
+      Une classification securite
 
-      ⚖️ LÉGAL (Types de documents juridiques) :
-      - none = Pas de contenu juridique
-      - employment = Contrats de travail, politiques RH
-      - lease = Baux immobiliers, locations
-      - sale = Contrats de vente, cessions
-      - nda = Accords de confidentialité
-      - compliance = Documents de conformité, audits
-      - litigation = Documents judiciaires, procédures
+      Une analyse RGPD
 
-      GESTION D'ERREURS :
-      Si le fichier est inaccessible, corrompu, vide ou illisible :
-      - Toutes les classifications = "N/A"
-      - Toutes les confidences = 0
-      - Résumé = "Fichier inaccessible ou corrompu"
+      Une classification finance
 
-      Retourne EXACTEMENT ce JSON (remplace par tes analyses) :
-      {
-        "resume": "Résumé en 50 mots maximum du contenu principal du document",
-        "security": {
-          "classification": "C0|C1|C2|C3|N/A",
-          "confidence": 85,
-          "justification": "Explication concise de la classification"
-        },
-        "rgpd": {
-          "risk_level": "none|low|medium|high|critical|N/A",
-          "data_types": ["type1", "type2"],
-          "confidence": 90
-        },
-        "finance": {
-          "document_type": "none|invoice|contract|budget|accounting|payment|N/A",
-          "amounts": [{"value": "montant", "currency": "EUR", "context": "contexte"}],
-          "confidence": 75
-        },
-        "legal": {
-          "contract_type": "none|employment|lease|sale|nda|compliance|litigation|N/A",
-          "parties": ["partie1", "partie2"],
-          "confidence": 80
-        }
-      }
+      Une classification legale
+
+      Un JSON syntaxiquement correct'
+    user_template: "FICHIER :\nNom : {{ file_name }}\nTaille : {{ file_size_readable\
+      \ }}\nProprietaire : {{ owner }}\nDerniere modification : {{ last_modified }}\n\
+      Signature : {{ file_signature }}\nINSTRUCTIONS OBLIGATOIRES, Tu DOIS analyser\
+      \ EXACTEMENT ces 4 domaines (AUCUN OUBLI AUTORISE) :\n[DOMAINE 1/4] SECURITE\
+      \ - choix unique :\n- C0 (Public) : Accessible a tous, aucune restriction\n\
+      - C1 (Interne) : Personnel organisation uniquement\n- C2 (Confidentiel) : Acces\
+      \ restreint avec autorisation\n- C3 (Secret) : Acces tres restreint, hautement\
+      \ sensible\n- N/A : Fichier inaccessible/corrompu\n[DOMAINE 2/4] RGPD - choix\
+      \ unique :\n- none : Aucune donnee personnelle\n- low : Donnees basiques (noms,\
+      \ emails pro)\n- medium : Donnees sensibles (ID, adresses)\n- high : Donnees\
+      \ speciales (sante, biometrie)\n- critical : Ultra-sensibles (bancaire, medical\
+      \ secret)\n- N/A : Fichier inaccessible/corrompu\n[DOMAINE 3/4] FINANCE - choix\
+      \ unique :\n- none : Pas de contenu financier\n- invoice : Factures, devis,\
+      \ commandes\n- contract : Contrats commerciaux, accords\n- budget : Budgets,\
+      \ previsions, analyses\n- accounting : Comptabilite, bilans, rapports\n- payment\
+      \ : Paiements, virements, cartes bancaires\n- N/A : Fichier inaccessible/corrompu\n\
+      [DOMAINE 4/4] LEGAL - choix unique :\n- none : Pas de contenu juridique\n- employment\
+      \ : Contrats travail, RH\n- lease : Baux, locations\n- sale : Contrats vente,\
+      \ cessions\n- nda : Accords confidentialite\n- compliance : Conformite, audits\n\
+      - litigation : Documents judiciaires\n- N/A : Fichier inaccessible/corrompu\n\
+      GESTION D'ERREURS OBLIGATOIRE\nSI fichier inaccessible/corrompu/vide/illisible\
+      \ :\nresume = \"Fichier inaccessible ou corrompu\"\nToutes classifications =\
+      \ \"N/A\"\nToutes confidences = 0\nArrays vides = []\nFORMAT DE REPONSE EXACT\
+      \ - COPIE ET COMPLETE\nINSTRUCTIONS DE REMPLACEMENT :\n\"resume\" - Ton resume\
+      \ en 30-50 mots\n\"classification\" - Une seule valeur parmi : C0, C1, C2, C3,\
+      \ N/A\n\"risk_level\" - Une seule valeur parmi : none, low, medium, high, critical,\
+      \ N/A\n\"document_type\" - Une seule valeur parmi : none, invoice, contract,\
+      \ budget, accounting, payment, N/A\n\"contract_type\" - Une seule valeur parmi\
+      \ : none, employment, lease, sale, nda, compliance, litigation, N/A\n\"data_types\"\
+      \ - Array des types detectes (ex: [\"emails\", \"adresses\"])\n\"parties\" -\
+      \ Array des parties identifiees (ex: [\"Entreprise A\", \"Jean Dupont\"])\n\"\
+      amounts\" - Array des montants trouves ou [] si aucun\nATTENTION : Remplace\
+      \ chaque valeur par ton analyse, garde la structure EXACTE.\nRAPPEL : retournes\
+      \ UNIQUEMENT ce JSON, rien d'autre.\n{\n  \"resume\": \"Resume en 30-50 mots\
+      \ maximum du contenu principal du document\",\n  \"security\": {\n    \"classification\"\
+      : \"C0\",\n    \"confidence\": 85,\n    \"justification\": \"Explication concise\
+      \ de la classification\"\n  },\n  \"rgpd\": {\n    \"risk_level\": \"none\"\
+      ,\n    \"data_types\": [\"type1\", \"type2\"],\n    \"confidence\": 90\n  },\n\
+      \  \"finance\": {\n    \"document_type\": \"none\",\n    \"amounts\": [{\"value\"\
+      : \"montant\", \"currency\": \"EUR\", \"context\": \"contexte\"}],\n    \"confidence\"\
+      : 75\n  },\n  \"legal\": {\n    \"contract_type\": \"none\",\n    \"parties\"\
+      : [\"partie1\", \"partie2\"],\n    \"confidence\": 80\n  }\n}\nVALIDATION FINALE\
+      \ AVANT ENVOI\nverifie mentalement :\nJ'ai un resume de 30-50 mots ?\nJ'ai choisi\
+      \ UNE classification securite ?\nJ'ai choisi UN niveau RGPD ?\nJ'ai choisi UN\
+      \ type financier ?\nJ'ai choisi UN type legal ?\nMon JSON est syntaxiquement\
+      \ correct ?\nJe n'ai ajoute AUCUN texte en dehors du JSON ?"
   security_focused:
-    system_prompt: "Expert sécurité"
-    user_template: "Analyse de sécurité pour {{ file_name }}\nClassification :"
+    system_prompt: "Expert s\xE9curit\xE9"
+    user_template: "Analyse de s\xE9curit\xE9 pour {{ file_name }}\nClassification\
+      \ :"
