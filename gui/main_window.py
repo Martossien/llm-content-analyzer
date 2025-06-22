@@ -134,7 +134,6 @@ No need to run analysis to see your files.
         dialog.title(title)
         dialog.geometry(geometry)
         dialog.transient(parent)
-        dialog.grab_set()
         dialog.lift()
         dialog.focus_set()
         dialog.update_idletasks()
@@ -145,6 +144,7 @@ No need to run analysis to see your files.
             dialog.winfo_height() // 2
         )
         dialog.geometry(f"+{x}+{y}")
+        dialog.after_idle(lambda: dialog.grab_set())
         return dialog
 
     def build_ui(self) -> None:
@@ -1188,10 +1188,12 @@ No need to run analysis to see your files.
             for row in files:
                 res = analyzer.analyze_single_file(row)
                 if res.get("status") in {"completed", "cached"}:
+                    llm_data = res.get("result", {})
+                    llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
                     db_mgr.store_analysis_result(
                         row["id"],
                         res.get("task_id", ""),
-                        res.get("result", {}),
+                        llm_data,
                         res.get("resume", ""),
                         res.get("raw_response", ""),
                     )
@@ -1232,10 +1234,12 @@ No need to run analysis to see your files.
                 row = dict(zip(columns, r))
                 res = analyzer.analyze_single_file(row)
                 if res.get("status") in {"completed", "cached"}:
+                    llm_data = res.get("result", {})
+                    llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
                     db_mgr.store_analysis_result(
                         row["id"],
                         res.get("task_id", ""),
-                        res.get("result", {}),
+                        llm_data,
                         res.get("resume", ""),
                         res.get("raw_response", ""),
                     )

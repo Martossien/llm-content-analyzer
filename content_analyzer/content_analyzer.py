@@ -301,10 +301,12 @@ class ContentAnalyzer:
         for row in files:
             res = self.analyze_single_file(row)
             if res.get("status") in {"completed", "cached"}:
+                llm_data = res.get("result", {})
+                llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
                 self.db_manager.store_analysis_result(
                     row["id"],
                     res.get("task_id", ""),
-                    res.get("result", {}),
+                    llm_data,
                     res.get("resume", ""),
                     res.get("raw_response", ""),
                 )
