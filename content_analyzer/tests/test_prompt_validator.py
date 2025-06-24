@@ -1,12 +1,13 @@
 import time
 from pathlib import Path
 import sys
+import tkinter as tk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from content_analyzer.utils.prompt_validator import (
     PromptSizeValidator,
-    DebouncedCalculator,
+    TkinterDebouncer,
     calculate_real_prompt_size,
     validate_prompt_size,
 )
@@ -28,16 +29,19 @@ def test_utf8_edge_cases():
     assert size == len(text.encode("utf-8"))
 
 
-def test_debounced_calculator():
+def test_tkinter_debouncer():
     calls = []
 
     def callback(arg):
         calls.append(arg)
 
-    debouncer = DebouncedCalculator(delay_ms=200)
+    root = tk.Tcl()
+    debouncer = TkinterDebouncer(root, delay_ms=200)
     debouncer.schedule_calculation(callback, 1)
     debouncer.schedule_calculation(callback, 2)
-    time.sleep(0.3)
+    for _ in range(6):
+        root.update()
+        time.sleep(0.1)
     assert calls == [2]
     debouncer.cancel()
 
