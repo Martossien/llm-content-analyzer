@@ -1,8 +1,8 @@
 """Utility functions to validate prompt sizes for LLM templates."""
 
 import logging
-import threading
 from typing import Dict, Union, Any, Optional
+import tkinter as tk
 from pathlib import Path
 
 import yaml
@@ -95,31 +95,34 @@ def validate_prompt_size(
         }
 
 
-class DebouncedCalculator:
-    """Debounced calculator for real-time GUI updates."""
+class TkinterDebouncer:
+    """Debouncer using Tkinter's event loop for thread safety."""
 
-    def __init__(self, delay_ms: int = 500) -> None:
+    def __init__(self, root: tk.Misc, delay_ms: int = 500) -> None:
+        self.root = root
         self.delay_ms = delay_ms
-        self._timer: Optional[threading.Timer] = None
-        self._lock = threading.Lock()
+        self._scheduled_id: Optional[str] = None
 
     def schedule_calculation(self, callback, *args, **kwargs) -> None:
-        """Schedule calculation with debouncing."""
-        with self._lock:
-            if self._timer:
-                self._timer.cancel()
-            self._timer = threading.Timer(
-                self.delay_ms / 1000.0,
-                callback,
-                args,
-                kwargs,
-            )
-            self._timer.start()
+        """Schedule callback with debouncing via ``root.after``."""
+        if self._scheduled_id:
+            self.root.after_cancel(self._scheduled_id)
+
+        self._scheduled_id = self.root.after(
+            self.delay_ms,
+            lambda: self._execute_callback(callback, *args, **kwargs),
+        )
+
+    def _execute_callback(self, callback, *args, **kwargs) -> None:
+        self._scheduled_id = None
+        try:
+            callback(*args, **kwargs)
+        except Exception as e:  # pragma: no cover - log and continue
+            print(f"Debouncer callback error: {e}")
 
     def cancel(self) -> None:
-        """Cancel pending calculation."""
-        with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
+        """Cancel any pending callback."""
+        if self._scheduled_id:
+            self.root.after_cancel(self._scheduled_id)
+            self._scheduled_id = None
 

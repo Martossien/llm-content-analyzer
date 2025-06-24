@@ -24,7 +24,7 @@ from content_analyzer.modules.prompt_manager import PromptManager
 from content_analyzer.modules.cache_manager import CacheManager
 from content_analyzer.utils.prompt_validator import (
     PromptSizeValidator,
-    DebouncedCalculator,
+    TkinterDebouncer,
     get_prompt_size_color,
     validate_prompt_size,
 )
@@ -99,7 +99,7 @@ class MainWindow:
         self.analysis_running = False
 
         self.prompt_validator = PromptSizeValidator(self.config_path)
-        self.prompt_debouncer = DebouncedCalculator(delay_ms=500)
+        self.prompt_debouncer = TkinterDebouncer(self.root, delay_ms=500)
 
         self.build_ui()
         self.load_api_configuration()
@@ -849,7 +849,7 @@ No need to run analysis to see your files.
             total_count = ttk.Label(editor_window, text="Total: 0 chars", font=("Arial", 9, "bold"))
             total_count.pack(anchor="w", padx=5)
 
-            editor_debouncer = DebouncedCalculator(delay_ms=300)
+            editor_debouncer = TkinterDebouncer(editor_window, delay_ms=300)
 
             def update_counts_debounced(_event=None) -> None:
                 def _calculate() -> None:
@@ -859,7 +859,7 @@ No need to run analysis to see your files.
 
                         info = validate_prompt_size(system_text_content, user_text_content)
 
-                        editor_window.after(0, _update_editor_labels, info)
+                        _update_editor_labels(info)
 
                     except Exception as e:
                         logger.error(f"Error in editor calculation: {e}")
@@ -974,12 +974,13 @@ No need to run analysis to see your files.
         messagebox.showinfo("Save Template", "Template saved.")
 
     def update_prompt_info(self) -> None:
-        """Update prompt size info with thread-safe debouncing."""
+        """Update prompt size info with debouncing in the main thread."""
         template_name = self.template_combobox.get()
         if not template_name:
             return
 
-        def _calculate_in_thread() -> None:
+        def _calculate_safely() -> None:
+            """Perform calculations directly in the Tk event loop."""
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     config = yaml.safe_load(f)
@@ -990,13 +991,13 @@ No need to run analysis to see your files.
 
                 info = validate_prompt_size(system_prompt, user_template)
 
-                self.root.after(0, self._update_prompt_labels, template_name, info)
+                self._update_prompt_labels(template_name, info)
 
             except Exception as e:
                 logger.error(f"Error calculating prompt info: {e}")
-                self.root.after(0, self._update_prompt_labels_error, str(e))
+                self._update_prompt_labels_error(str(e))
 
-        self.prompt_debouncer.schedule_calculation(_calculate_in_thread)
+        self.prompt_debouncer.schedule_calculation(_calculate_safely)
 
     def _update_prompt_labels(self, template_name: str, info: Dict[str, Any]) -> None:
         """Update GUI labels with color coding (main thread only)."""
@@ -3133,3 +3134,8 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
                 parent=parent_window,
             )
             self.log_action(f"Configuration reset failed: {str(e)}", "ERROR")
+
+    def __del__(self) -> None:
+        """Cleanup scheduled callbacks on destruction."""
+        if hasattr(self, "prompt_debouncer"):
+            self.prompt_debouncer.cancel()
