@@ -8,9 +8,12 @@ from typing import Any, Dict, Optional
 class CacheManager:
     """Cache SQLite intelligent basé sur FastHash."""
 
-    def __init__(self, db_path: Path, ttl_hours: int = 168) -> None:
+    def __init__(
+        self, db_path: Path, ttl_hours: int = 168, max_size_mb: int = 1024
+    ) -> None:
         self.db_path = db_path
         self.ttl_hours = ttl_hours
+        self.max_size_mb = max_size_mb
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -126,6 +129,48 @@ class CacheManager:
         conn.commit()
         conn.close()
         return deleted
+
+    def cleanup_expired_and_oversized(self) -> Dict[str, int]:
+        """Nettoie les entrées expirées et si la taille dépasse la limite."""
+        stats = {"expired_deleted": 0, "oversized_deleted": 0}
+
+        stats["expired_deleted"] = self.cleanup_expired()
+
+        size_mb = Path(self.db_path).stat().st_size / (1024 * 1024)
+        if size_mb <= self.max_size_mb:
+            return stats
+
+        conn = self._connect()
+        cursor = conn.cursor()
+        to_remove = size_mb - self.max_size_mb
+        cursor.execute(
+            "SELECT cache_key, file_size FROM cache_prompts ORDER BY hits_count ASC, created_at ASC"
+        )
+        removed_mb = 0.0
+        keys_to_delete = []
+        for key, file_size in cursor.fetchall():
+            removed_mb += (file_size or 0) / (1024 * 1024)
+            keys_to_delete.append(key)
+            if removed_mb >= to_remove:
+                break
+        for key in keys_to_delete:
+            cursor.execute("DELETE FROM cache_prompts WHERE cache_key = ?", (key,))
+        stats["oversized_deleted"] = len(keys_to_delete)
+        conn.commit()
+        conn.close()
+        return stats
+
+    def schedule_automatic_cleanup(self) -> None:
+        """Planifie un nettoyage automatique quotidien."""
+        from threading import Timer
+
+        def _cleanup() -> None:
+            try:
+                self.cleanup_expired_and_oversized()
+            finally:
+                Timer(24 * 3600, _cleanup).start()
+
+        Timer(24 * 3600, _cleanup).start()
 
     def get_stats(self) -> Dict[str, Any]:
         conn = self._connect()
