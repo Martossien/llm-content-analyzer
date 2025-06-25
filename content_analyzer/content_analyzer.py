@@ -295,11 +295,22 @@ class ContentAnalyzer:
     # ------------------------------------------------------------------
     # Batch analysis helper
     # ------------------------------------------------------------------
-    def analyze_batch(self, csv_file: Path, output_db: Path) -> Dict[str, Any]:
-        """Analyse un ensemble de fichiers listés dans un CSV."""
+    def analyze_batch(
+        self,
+        csv_file: Path,
+        output_db: Path,
+        max_files: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Analyse un ensemble de fichiers listés dans un CSV.
+
+        Args:
+            csv_file: Fichier CSV SMBeagle enrichi.
+            output_db: Base SQLite de sortie.
+            max_files: Nombre maximum de fichiers à analyser. ``None`` pour tout traiter.
+        """
         parse_res = self.csv_parser.parse_csv(csv_file, output_db)
         self.db_manager = DBManager(output_db)
-        files = self.db_manager.get_pending_files(limit=100000)
+        files = self.db_manager.get_pending_files(limit=max_files)
 
         processed = 0
         start_time = time.perf_counter()

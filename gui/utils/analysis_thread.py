@@ -43,7 +43,7 @@ class AnalysisThread(threading.Thread):
             analyzer = ContentAnalyzer(self.config_path)
             parse_res = analyzer.csv_parser.parse_csv(self.csv_file, self.output_db)
             db_mgr = DBManager(self.output_db)
-            files = db_mgr.get_pending_files(limit=100000)
+            files = db_mgr.get_pending_files(limit=None)
             total = len(files)
             processed = 0
             for row in files:
