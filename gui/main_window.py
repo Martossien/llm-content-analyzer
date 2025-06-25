@@ -102,9 +102,13 @@ class MainWindow:
         self.results_offset = 0
         self.results_limit = 1000
         self.results_total = 0
-        self.results_page_label = None
-        self.prev_page_btn = None
-        self.next_page_btn = None
+
+        # IDs for periodic callbacks
+        self._logs_update_id: str | None = None
+        self._service_update_id: str | None = None
+
+        # Debouncer for heavy refresh operations
+        self.results_refresh_debouncer = TkinterDebouncer(self.root, delay_ms=300)
 
         self.prompt_validator = PromptSizeValidator(self.config_path)
         self.prompt_debouncer = TkinterDebouncer(self.root, delay_ms=500)
@@ -1088,7 +1092,7 @@ No need to run analysis to see your files.
 
     def update_logs_display(self) -> None:
         try:
-            if not self.log_file_path.exists():
+            if not (self.log_file_path.exists() and self.logs_text.winfo_exists()):
                 return
             current_size = self.log_file_path.stat().st_size
             if current_size <= self.last_log_size:
@@ -1123,7 +1127,9 @@ No need to run analysis to see your files.
         except Exception as e:  # pragma: no cover
             print(f"Log update error: {e}")
         finally:
-            self.root.after(3000, self.update_logs_display)
+            if self._logs_update_id:
+                self.root.after_cancel(self._logs_update_id)
+            self._logs_update_id = self.root.after(3000, self.update_logs_display)
 
     def parse_log_level(self, line: str) -> str:
         if " [INFO] " in line:
@@ -1166,6 +1172,13 @@ No need to run analysis to see your files.
     # SERVICE STATUS AND PROGRESS
     # ------------------------------------------------------------------
     def update_service_status(self) -> None:
+        if not (
+            self.api_status_label.winfo_exists()
+            and self.cache_status_label.winfo_exists()
+            and self.db_status_label.winfo_exists()
+        ):
+            return
+
         api_status = self.service_monitor.check_api_status()
         self.api_status_label.config(
             foreground="green" if api_status else "red",
@@ -1186,7 +1199,10 @@ No need to run analysis to see your files.
             text=db_text,
             foreground="green" if db_status["accessible"] else "red",
         )
-        self.root.after(5000, self.update_service_status)
+
+        if self._service_update_id:
+            self.root.after_cancel(self._service_update_id)
+        self._service_update_id = self.root.after(5000, self.update_service_status)
 
     def get_cache_hit_rate(self) -> float:
         stats = self.service_monitor.check_cache_status()
@@ -1593,24 +1609,27 @@ No need to run analysis to see your files.
         self._set_batch_buttons_state("normal")
         messagebox.showerror("Batch Error", error, parent=self.root)
 
-    def _update_page_controls(self) -> None:
+    def _update_page_controls(
+        self,
+        page_label: ttk.Label | None = None,
+        prev_btn: ttk.Button | None = None,
+        next_btn: ttk.Button | None = None,
+    ) -> None:
         """Update pagination controls state in the results viewer."""
-        if self.results_page_label:
+        if page_label:
             start = self.results_offset + 1
             end = min(self.results_offset + self.results_limit, self.results_total)
-            self.results_page_label.config(
-                text=f"Showing {start}-{end} of {self.results_total}"
-            )
-        if self.prev_page_btn:
+            page_label.config(text=f"Showing {start}-{end} of {self.results_total}")
+        if prev_btn:
             state = "normal" if self.results_offset > 0 else "disabled"
-            self.prev_page_btn.config(state=state)
-        if self.next_page_btn:
+            prev_btn.config(state=state)
+        if next_btn:
             state = (
                 "normal"
                 if self.results_offset + self.results_limit < self.results_total
                 else "disabled"
             )
-            self.next_page_btn.config(state=state)
+            next_btn.config(state=state)
 
     # ------------------------------------------------------------------
     # RESULTS VIEWER AND EXPORTS
@@ -1630,6 +1649,10 @@ No need to run analysis to see your files.
 
             results_window = self.create_dialog_window(
                 self.root, "Analysis Results Viewer", "1400x700"
+            )
+            results_window.protocol(
+                "WM_DELETE_WINDOW",
+                lambda win=results_window: self._cleanup_results_window(win),
             )
 
             controls_frame = ttk.Frame(results_window)
@@ -1764,7 +1787,9 @@ No need to run analysis to see your files.
                     self.refresh_results_table(
                         tr, sf.get(), cf.get(), self.results_offset
                     ),
-                    self._update_page_controls(),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
                 ),
             )
             refresh_btn.pack(side="right", padx=5)
@@ -1778,7 +1803,7 @@ No need to run analysis to see your files.
 
             self.results_offset = 0
             self.refresh_results_table(tree, "All", "All", self.results_offset)
-            self._update_page_controls()
+            self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
             status_filter.bind(
                 "<<ComboboxSelected>>",
@@ -1790,7 +1815,9 @@ No need to run analysis to see your files.
                         cf.get(),
                         self.results_offset,
                     ),
-                    self._update_page_controls(),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
                 ),
             )
             classification_filter.bind(
@@ -1803,7 +1830,9 @@ No need to run analysis to see your files.
                         cf.get(),
                         self.results_offset,
                     ),
-                    self._update_page_controls(),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
                 ),
             )
 
@@ -1816,7 +1845,9 @@ No need to run analysis to see your files.
                         cf.get(),
                         0,
                     ),
-                    self._update_page_controls(),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
                 )
             )
 
@@ -1830,7 +1861,6 @@ No need to run analysis to see your files.
 
             page_label = ttk.Label(nav_frame, text="")
             page_label.pack(side="right", padx=5)
-            self.results_page_label = page_label
 
             def goto_first():
                 items = tree.get_children()
@@ -1876,7 +1906,7 @@ No need to run analysis to see your files.
                     classification_filter.get(),
                     self.results_offset,
                 )
-                self._update_page_controls()
+                self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
             ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(
                 side="left", padx=2
@@ -1941,7 +1971,10 @@ No need to run analysis to see your files.
                             f'%"classification": "{classification_filter.get()}"%'
                         )
 
-                    if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+                    if (
+                        hasattr(self, "show_duplicates_var")
+                        and self.show_duplicates_var.get()
+                    ):
                         base_query += (
                             " AND f.fast_hash IN ("
                             "SELECT fast_hash FROM fichiers "
@@ -1986,7 +2019,7 @@ No need to run analysis to see your files.
                         classification_filter.get(),
                         self.results_offset,
                     )
-                    self._update_page_controls()
+                    self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
                     # Highlight the target item
                     for itm in tree.get_children():
@@ -2014,15 +2047,13 @@ No need to run analysis to see your files.
                 nav_frame, text="◀ PREV 1000", command=lambda: change_page(-1)
             )
             prev_page_btn.pack(side="right", padx=2)
-            self.prev_page_btn = prev_page_btn
 
             next_page_btn = ttk.Button(
                 nav_frame, text="NEXT 1000 ▶", command=lambda: change_page(1)
             )
             next_page_btn.pack(side="right", padx=2)
-            self.next_page_btn = next_page_btn
 
-            self._update_page_controls()
+            self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
             self.log_action("Results viewer opened", "INFO")
 
@@ -2032,6 +2063,13 @@ No need to run analysis to see your files.
             )
             self.log_action(f"Results viewer failed: {str(e)}", "ERROR")
 
+    def _cleanup_results_window(self, window: tk.Toplevel) -> None:
+        """Cleanup resources when closing the results viewer."""
+        self.results_refresh_debouncer.cancel()
+        self.results_offset = 0
+        self.results_total = 0
+        window.destroy()
+
     def refresh_results_table(
         self,
         tree,
@@ -2039,10 +2077,26 @@ No need to run analysis to see your files.
         classification_filter,
         offset: int = 0,
     ):
-        """Rafraîchit le tableau des résultats avec filtres et pagination."""
+        """Schedule a debounced refresh of the results table."""
+        self.results_refresh_debouncer.schedule_calculation(
+            self._perform_refresh_results_table,
+            tree,
+            status_filter,
+            classification_filter,
+            offset,
+        )
+
+    def _perform_refresh_results_table(
+        self,
+        tree,
+        status_filter,
+        classification_filter,
+        offset: int = 0,
+    ) -> None:
+        """Refresh the results table with filters and pagination."""
         try:
-            for item in tree.get_children():
-                tree.delete(item)
+            tree.delete(*tree.get_children())
+            tree.update_idletasks()
 
             db_path = Path("analysis_results.db")
 
