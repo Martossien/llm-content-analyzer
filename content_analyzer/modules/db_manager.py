@@ -134,11 +134,17 @@ class DBManager:
         conn.close()
 
     def get_pending_files(
-        self, limit: Optional[int] = 100, priority_threshold: int = 0
+        self,
+        limit: Optional[int] = None,
+        priority_threshold: int = 0,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """Return pending files ordered by priority.
 
-        If ``limit`` is ``None`` or ``<= 0`` all matching files are returned.
+        Args:
+            limit: Maximum files to return. ``None`` means no limit.
+            priority_threshold: Minimum priority score required.
+            offset: Row offset for pagination.
         """
         conn = self._connect()
         cursor = conn.cursor()
@@ -151,6 +157,12 @@ class DBManager:
         if limit is not None and limit > 0:
             query += " LIMIT ?"
             params.append(limit)
+        if offset > 0:
+            if "LIMIT" not in query:
+                query += " LIMIT -1"
+            query += " OFFSET ?"
+            params.append(offset)
+
         rows = cursor.execute(query, params).fetchall()
         columns = [desc[0] for desc in cursor.description]
         conn.close()
