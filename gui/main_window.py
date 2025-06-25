@@ -98,6 +98,14 @@ class MainWindow:
         self.analysis_thread: AnalysisThread | None = None
         self.analysis_running = False
 
+        # Pagination state for results viewer
+        self.results_offset = 0
+        self.results_limit = 1000
+        self.results_total = 0
+        self.results_page_label = None
+        self.prev_page_btn = None
+        self.next_page_btn = None
+
         self.prompt_validator = PromptSizeValidator(self.config_path)
         self.prompt_debouncer = TkinterDebouncer(self.root, delay_ms=500)
 
@@ -1588,8 +1596,14 @@ No need to run analysis to see your files.
             refresh_btn = ttk.Button(
                 controls_frame,
                 text="Refresh",
-                command=lambda: self.refresh_results_table(
-                    tree, status_filter.get(), classification_filter.get()
+                command=lambda: (
+                    self.refresh_results_table(
+                        tree,
+                        status_filter.get(),
+                        classification_filter.get(),
+                        self.results_offset,
+                    ),
+                    update_page_controls(),
                 ),
             )
             refresh_btn.pack(side="right", padx=5)
@@ -1690,18 +1704,34 @@ No need to run analysis to see your files.
             v_scrollbar.pack(side="right", fill="y")
             h_scrollbar.pack(side="bottom", fill="x")
 
-            self.refresh_results_table(tree, "All", "All")
+            self.results_offset = 0
+            self.refresh_results_table(tree, "All", "All", self.results_offset)
+            update_page_controls()
 
             status_filter.bind(
                 "<<ComboboxSelected>>",
-                lambda e: self.refresh_results_table(
-                    tree, status_filter.get(), classification_filter.get()
+                lambda e: (
+                    setattr(self, "results_offset", 0),
+                    self.refresh_results_table(
+                        tree,
+                        status_filter.get(),
+                        classification_filter.get(),
+                        self.results_offset,
+                    ),
+                    update_page_controls(),
                 ),
             )
             classification_filter.bind(
                 "<<ComboboxSelected>>",
-                lambda e: self.refresh_results_table(
-                    tree, status_filter.get(), classification_filter.get()
+                lambda e: (
+                    setattr(self, "results_offset", 0),
+                    self.refresh_results_table(
+                        tree,
+                        status_filter.get(),
+                        classification_filter.get(),
+                        self.results_offset,
+                    ),
+                    update_page_controls(),
                 ),
             )
 
@@ -1710,6 +1740,28 @@ No need to run analysis to see your files.
             # Navigation controls
             nav_frame = ttk.Frame(results_window)
             nav_frame.pack(fill="x", padx=10, pady=5)
+
+            page_label = ttk.Label(nav_frame, text="")
+            page_label.pack(side="right", padx=5)
+            self.results_page_label = page_label
+
+            def update_page_controls() -> None:
+                if self.results_page_label:
+                    start = self.results_offset + 1
+                    end = min(self.results_offset + self.results_limit, self.results_total)
+                    self.results_page_label.config(
+                        text=f"Showing {start}-{end} of {self.results_total}"
+                    )
+                if self.prev_page_btn:
+                    state = "normal" if self.results_offset > 0 else "disabled"
+                    self.prev_page_btn.config(state=state)
+                if self.next_page_btn:
+                    state = (
+                        "normal"
+                        if self.results_offset + self.results_limit < self.results_total
+                        else "disabled"
+                    )
+                    self.next_page_btn.config(state=state)
 
             def goto_first():
                 items = tree.get_children()
@@ -1741,6 +1793,20 @@ No need to run analysis to see your files.
                     tree.selection_set(items[-1])
                     tree.see(items[-1])
 
+            def change_page(delta: int) -> None:
+                self.results_offset += delta * self.results_limit
+                if self.results_offset < 0:
+                    self.results_offset = 0
+                if self.results_offset >= self.results_total:
+                    self.results_offset = max(0, self.results_total - self.results_limit)
+                self.refresh_results_table(
+                    tree,
+                    status_filter.get(),
+                    classification_filter.get(),
+                    self.results_offset,
+                )
+                update_page_controls()
+
             ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(
                 side="left", padx=2
             )
@@ -1771,6 +1837,20 @@ No need to run analysis to see your files.
 
             ttk.Button(nav_frame, text="JUMP", command=jump).pack(side="left", padx=2)
 
+            prev_page_btn = ttk.Button(
+                nav_frame, text="◀ PREV 1000", command=lambda: change_page(-1)
+            )
+            prev_page_btn.pack(side="right", padx=2)
+            self.prev_page_btn = prev_page_btn
+
+            next_page_btn = ttk.Button(
+                nav_frame, text="NEXT 1000 ▶", command=lambda: change_page(1)
+            )
+            next_page_btn.pack(side="right", padx=2)
+            self.next_page_btn = next_page_btn
+
+            update_page_controls()
+
             self.log_action("Results viewer opened", "INFO")
 
         except Exception as e:
@@ -1779,8 +1859,14 @@ No need to run analysis to see your files.
             )
             self.log_action(f"Results viewer failed: {str(e)}", "ERROR")
 
-    def refresh_results_table(self, tree, status_filter, classification_filter):
-        """Rafraîchit le tableau des résultats avec filtres."""
+    def refresh_results_table(
+        self,
+        tree,
+        status_filter,
+        classification_filter,
+        offset: int = 0,
+    ):
+        """Rafraîchit le tableau des résultats avec filtres et pagination."""
         try:
             for item in tree.get_children():
                 tree.delete(item)
@@ -1818,31 +1904,37 @@ No need to run analysis to see your files.
                 self.log_action("Results refresh: table 'fichiers' missing", "WARN")
                 return
 
-            query = """
-        SELECT f.id, f.name, f.host, f.extension, f.username, f.path, f.file_size,
-               f.owner, f.creation_time, f.last_modified, f.status,
-               r.security_analysis, r.security_confidence,
-               r.rgpd_analysis, r.rgpd_confidence,
-               r.finance_analysis, r.finance_confidence,
-               r.legal_analysis, r.legal_confidence,
-               r.document_resume, r.confidence_global, r.processing_time_ms
+            base_query = """
         FROM fichiers f
         LEFT JOIN reponses_llm r ON f.id = r.fichier_id
         WHERE 1=1
         """
-            params = []
+            params: list[Any] = []
 
             if status_filter != "All":
-                query += " AND f.status = ?"
+                base_query += " AND f.status = ?"
                 params.append(status_filter)
 
             if classification_filter != "All":
-                query += " AND r.security_analysis LIKE ?"
+                base_query += " AND r.security_analysis LIKE ?"
                 params.append(f'%"classification": "{classification_filter}"%')
 
-            query += " ORDER BY f.id DESC LIMIT 1000"
+            count_query = "SELECT COUNT(*) " + base_query
+            cursor.execute(count_query, params)
+            self.results_total = cursor.fetchone()[0]
 
-            cursor.execute(query, params)
+            data_query = (
+                "SELECT f.id, f.name, f.host, f.extension, f.username, f.path, f.file_size,"
+                " f.owner, f.creation_time, f.last_modified, f.status,"
+                " r.security_analysis, r.security_confidence,"
+                " r.rgpd_analysis, r.rgpd_confidence,"
+                " r.finance_analysis, r.finance_confidence,"
+                " r.legal_analysis, r.legal_confidence,"
+                " r.document_resume, r.confidence_global, r.processing_time_ms "
+                + base_query
+                + " ORDER BY f.id DESC LIMIT ? OFFSET ?"
+            )
+            cursor.execute(data_query, params + [self.results_limit, offset])
             rows = cursor.fetchall()
             conn.close()
 
