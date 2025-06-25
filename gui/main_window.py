@@ -1657,6 +1657,17 @@ No need to run analysis to see your files.
             classification_filter.set("All")
             classification_filter.pack(side="left", padx=5)
 
+            ttk.Label(controls_frame, text="Advanced Filters:").pack(
+                side="left", padx=10
+            )
+            self.show_duplicates_var = tk.BooleanVar(value=False)
+            duplicates_check = ttk.Checkbutton(
+                controls_frame,
+                text="Doublons FastHash uniquement",
+                variable=self.show_duplicates_var,
+            )
+            duplicates_check.pack(side="left", padx=5)
+
             tree_frame = ttk.Frame(results_window)
             tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -1796,6 +1807,19 @@ No need to run analysis to see your files.
                 ),
             )
 
+            duplicates_check.config(
+                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
+                    setattr(self, "results_offset", 0),
+                    self.refresh_results_table(
+                        tr,
+                        sf.get(),
+                        cf.get(),
+                        0,
+                    ),
+                    self._update_page_controls(),
+                )
+            )
+
             tree.bind(
                 "<Double-1>", lambda e: self.show_file_details(tree, results_window)
             )
@@ -1915,6 +1939,14 @@ No need to run analysis to see your files.
                         base_query += " AND r.security_analysis LIKE ?"
                         params.append(
                             f'%"classification": "{classification_filter.get()}"%'
+                        )
+
+                    if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+                        base_query += (
+                            " AND f.fast_hash IN ("
+                            "SELECT fast_hash FROM fichiers "
+                            "WHERE fast_hash IS NOT NULL AND fast_hash != '' "
+                            "GROUP BY fast_hash HAVING COUNT(*) > 1)"
                         )
 
                     # Verify file existence with current filters
@@ -2059,6 +2091,14 @@ No need to run analysis to see your files.
             if classification_filter != "All":
                 base_query += " AND r.security_analysis LIKE ?"
                 params.append(f'%"classification": "{classification_filter}"%')
+
+            if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+                base_query += (
+                    " AND f.fast_hash IN ("
+                    "SELECT fast_hash FROM fichiers "
+                    "WHERE fast_hash IS NOT NULL AND fast_hash != '' "
+                    "GROUP BY fast_hash HAVING COUNT(*) > 1)"
+                )
 
             count_query = "SELECT COUNT(*) " + base_query
             cursor.execute(count_query, params)
@@ -2444,6 +2484,13 @@ RAW RESPONSE:
                 variable=self.include_statistics,
             ).pack(anchor="w", padx=5, pady=2)
 
+            self.export_duplicates_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                options_frame,
+                text="Doublons FastHash uniquement",
+                variable=self.export_duplicates_var,
+            ).pack(anchor="w", padx=5, pady=2)
+
             buttons_frame = ttk.Frame(export_window)
             buttons_frame.pack(fill="x", padx=10, pady=10)
 
@@ -2511,6 +2558,14 @@ RAW RESPONSE:
                 query += " AND r.security_analysis LIKE ?"
                 params.append(
                     f'%"classification": "{self.export_classification_filter.get()}"%'
+                )
+
+            if self.export_duplicates_var.get():
+                query += (
+                    " AND f.fast_hash IN ("
+                    "SELECT fast_hash FROM fichiers "
+                    "WHERE fast_hash IS NOT NULL AND fast_hash != '' "
+                    "GROUP BY fast_hash HAVING COUNT(*) > 1)"
                 )
 
             cursor.execute(query, params)
