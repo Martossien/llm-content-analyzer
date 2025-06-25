@@ -113,7 +113,9 @@ class MainWindow:
         self.load_api_configuration()
         self.load_exclusions()
         self.load_templates()
-        self.template_combobox.bind("<<ComboboxSelected>>", lambda e: self.update_prompt_info())
+        self.template_combobox.bind(
+            "<<ComboboxSelected>>", lambda e: self.update_prompt_info()
+        )
         self.update_prompt_info()
         self.setup_log_viewer()
 
@@ -160,11 +162,11 @@ No need to run analysis to see your files.
         dialog.lift()
         dialog.focus_set()
         dialog.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() // 2) - (
-            dialog.winfo_width() // 2
-        )
-        y = parent.winfo_y() + (parent.winfo_height() // 2) - (
-            dialog.winfo_height() // 2
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = (
+            parent.winfo_y()
+            + (parent.winfo_height() // 2)
+            - (dialog.winfo_height() // 2)
         )
         dialog.geometry(f"+{x}+{y}")
         dialog.after_idle(lambda: dialog.grab_set())
@@ -304,7 +306,9 @@ No need to run analysis to see your files.
         self.prompt_info_frame.pack(fill="x", padx=2, pady=2)
 
         self.prompt_tpl_label = ttk.Label(self.prompt_info_frame, text="Template: N/A")
-        self.prompt_sys_label = ttk.Label(self.prompt_info_frame, text="System: 0 chars")
+        self.prompt_sys_label = ttk.Label(
+            self.prompt_info_frame, text="System: 0 chars"
+        )
         self.prompt_user_label = ttk.Label(self.prompt_info_frame, text="User: 0 chars")
         self.prompt_total_label = ttk.Label(
             self.prompt_info_frame,
@@ -468,7 +472,10 @@ No need to run analysis to see your files.
 
         self.cancel_batch = False
         self.cancel_batch_button = ttk.Button(
-            batch_frame, text="Cancel", command=self.cancel_batch_operation, state="disabled"
+            batch_frame,
+            text="Cancel",
+            command=self.cancel_batch_operation,
+            state="disabled",
         )
         self.cancel_batch_button.pack(side="left", padx=5)
 
@@ -535,9 +542,7 @@ No need to run analysis to see your files.
                     error_msg = "Import failed:\n" + "\n".join(
                         import_result["errors"][:3]
                     )
-                    messagebox.showerror(
-                        "Import Error", error_msg, parent=self.root
-                    )
+                    messagebox.showerror("Import Error", error_msg, parent=self.root)
                     self.file_path_label.config(text="Import failed", background="red")
                     self.csv_file_path = None
                     return
@@ -559,9 +564,7 @@ No need to run analysis to see your files.
                     f"⏱️ Processing time: {import_result['processing_time']:.1f}s\n"
                     f"💾 Database: {output_db.name} ({db_size_kb:.1f}KB)"
                 )
-                messagebox.showinfo(
-                    "Import Complete", success_msg, parent=self.root
-                )
+                messagebox.showinfo("Import Complete", success_msg, parent=self.root)
 
                 self.log_action(
                     f"CSV imported: {import_result['imported_files']:,} files from {Path(file_path).name}",
@@ -606,7 +609,9 @@ No need to run analysis to see your files.
             self.status_config_label.config(foreground="black")
         except Exception as e:  # pragma: no cover - file errors
             messagebox.showerror(
-                "Config Error", f"Cannot load configuration:\n{str(e)}", parent=self.root
+                "Config Error",
+                f"Cannot load configuration:\n{str(e)}",
+                parent=self.root,
             )
 
     def test_api_connection(self) -> None:
@@ -653,7 +658,9 @@ No need to run analysis to see your files.
             url = self.api_url_entry.get().strip()
             if not url.startswith(("http://", "https://")):
                 messagebox.showerror(
-                    "Invalid URL", "URL must start with http:// or https://", parent=self.root
+                    "Invalid URL",
+                    "URL must start with http:// or https://",
+                    parent=self.root,
                 )
                 return
             try:
@@ -728,7 +735,9 @@ No need to run analysis to see your files.
         ]
         if ext in current_exts:
             messagebox.showwarning(
-                "Duplicate Extension", f"Extension {ext} is already blocked", parent=self.root
+                "Duplicate Extension",
+                f"Extension {ext} is already blocked",
+                parent=self.root,
             )
             return
         try:
@@ -850,11 +859,17 @@ No need to run analysis to see your files.
             user_text.pack(fill="both", expand=True, padx=5, pady=5)
             user_text.insert(1.0, user_template)
 
-            sys_count = ttk.Label(editor_window, text="System: 0 chars", foreground="gray")
+            sys_count = ttk.Label(
+                editor_window, text="System: 0 chars", foreground="gray"
+            )
             sys_count.pack(anchor="w", padx=5)
-            user_count = ttk.Label(editor_window, text="User: 0 chars", foreground="gray")
+            user_count = ttk.Label(
+                editor_window, text="User: 0 chars", foreground="gray"
+            )
             user_count.pack(anchor="w", padx=5)
-            total_count = ttk.Label(editor_window, text="Total: 0 chars", font=("Arial", 9, "bold"))
+            total_count = ttk.Label(
+                editor_window, text="Total: 0 chars", font=("Arial", 9, "bold")
+            )
             total_count.pack(anchor="w", padx=5)
 
             editor_debouncer = TkinterDebouncer(editor_window, delay_ms=300)
@@ -865,7 +880,9 @@ No need to run analysis to see your files.
                         system_text_content = system_text.get(1.0, tk.END)
                         user_text_content = user_text.get(1.0, tk.END)
 
-                        info = validate_prompt_size(system_text_content, user_text_content)
+                        info = validate_prompt_size(
+                            system_text_content, user_text_content
+                        )
 
                         _update_editor_labels(info)
 
@@ -876,9 +893,14 @@ No need to run analysis to see your files.
 
             def _update_editor_labels(info: Dict[str, Any]) -> None:
                 try:
+
                     def format_count(size: int) -> tuple[str, str]:
                         color = get_prompt_size_color(size, self.prompt_validator)
-                        icon = "✅" if color == "green" else ("⚠️" if color == "orange" else "❌")
+                        icon = (
+                            "✅"
+                            if color == "green"
+                            else ("⚠️" if color == "orange" else "❌")
+                        )
                         return f"{size:,} chars {icon}", color
 
                     sys_text_val, sys_color = format_count(info["system_size"])
@@ -888,7 +910,9 @@ No need to run analysis to see your files.
                     user_count.config(text=user_text_val, foreground=user_color)
 
                     total_text_val, total_color = format_count(info["total_size"])
-                    total_count.config(text=f"Total: {total_text_val}", foreground=total_color)
+                    total_count.config(
+                        text=f"Total: {total_text_val}", foreground=total_color
+                    )
 
                 except Exception as e:
                     logger.error(f"Error updating editor labels: {e}")
@@ -922,7 +946,9 @@ No need to run analysis to see your files.
                     self.log_action(f"Template edited: {selected_template}")
                 except Exception as e:
                     messagebox.showerror(
-                        "Save Error", f"Cannot save template:\n{str(e)}", parent=editor_window
+                        "Save Error",
+                        f"Cannot save template:\n{str(e)}",
+                        parent=editor_window,
                     )
 
             def cancel_edit() -> None:
@@ -1010,21 +1036,30 @@ No need to run analysis to see your files.
     def _update_prompt_labels(self, template_name: str, info: Dict[str, Any]) -> None:
         """Update GUI labels with color coding (main thread only)."""
         try:
+
             def format_label(size: int) -> tuple[str, str]:
                 color = get_prompt_size_color(size, self.prompt_validator)
-                icon = "✅" if color == "green" else ("⚠️" if color == "orange" else "❌")
+                icon = (
+                    "✅" if color == "green" else ("⚠️" if color == "orange" else "❌")
+                )
                 return f"{size:,} chars {icon}", color
 
             self.prompt_tpl_label.config(text=f"Template: {template_name}")
 
             sys_text, sys_color = format_label(info["system_size"])
-            self.prompt_sys_label.config(text=f"System: {sys_text}", foreground=sys_color)
+            self.prompt_sys_label.config(
+                text=f"System: {sys_text}", foreground=sys_color
+            )
 
             user_text, user_color = format_label(info["user_size"])
-            self.prompt_user_label.config(text=f"User: {user_text}", foreground=user_color)
+            self.prompt_user_label.config(
+                text=f"User: {user_text}", foreground=user_color
+            )
 
             total_text, total_color = format_label(info["total_size"])
-            self.prompt_total_label.config(text=f"Total: {total_text}", foreground=total_color)
+            self.prompt_total_label.config(
+                text=f"Total: {total_text}", foreground=total_color
+            )
 
         except Exception as e:
             logger.error(f"Error updating prompt labels: {e}")
@@ -1032,7 +1067,11 @@ No need to run analysis to see your files.
     def _update_prompt_labels_error(self, error_msg: str) -> None:
         """Display error state in labels."""
         error_text = f"Error: {error_msg[:20]}..."
-        for label in (self.prompt_sys_label, self.prompt_user_label, self.prompt_total_label):
+        for label in (
+            self.prompt_sys_label,
+            self.prompt_user_label,
+            self.prompt_total_label,
+        ):
             label.config(text=error_text, foreground="red")
 
     # ------------------------------------------------------------------
@@ -1318,7 +1357,9 @@ No need to run analysis to see your files.
         """Vérifie qu'il y a des fichiers à traiter avant de lancer l'opération."""
         db_path = Path("analysis_results.db")
         if not db_path.exists():
-            messagebox.showerror("No database found", "analysis_results.db missing", parent=self.root)
+            messagebox.showerror(
+                "No database found", "analysis_results.db missing", parent=self.root
+            )
             return False
 
         conn = sqlite3.connect(db_path)
@@ -1333,7 +1374,9 @@ No need to run analysis to see your files.
             ).fetchone()[0]
         conn.close()
         if count == 0:
-            messagebox.showinfo("No Files", f"No {operation_type} files found", parent=self.root)
+            messagebox.showinfo(
+                "No Files", f"No {operation_type} files found", parent=self.root
+            )
             return False
         return True
 
@@ -1383,7 +1426,9 @@ No need to run analysis to see your files.
                     res = analyzer.analyze_single_file(row)
                     if res.get("status") in {"completed", "cached"}:
                         llm_data = res.get("result", {})
-                        llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
+                        llm_data["processing_time_ms"] = res.get(
+                            "processing_time_ms", 0
+                        )
                         db_mgr.store_analysis_result(
                             row["id"],
                             res.get("task_id", ""),
@@ -1440,7 +1485,9 @@ No need to run analysis to see your files.
                     res = analyzer.analyze_single_file(row)
                     if res.get("status") in {"completed", "cached"}:
                         llm_data = res.get("result", {})
-                        llm_data["processing_time_ms"] = res.get("processing_time_ms", 0)
+                        llm_data["processing_time_ms"] = res.get(
+                            "processing_time_ms", 0
+                        )
                         db_mgr.store_analysis_result(
                             row["id"],
                             res.get("task_id", ""),
@@ -1536,9 +1583,7 @@ No need to run analysis to see your files.
         self._set_batch_buttons_state("normal")
         self.progress_bar["value"] = 0
         status = result.get("status")
-        msg = (
-            f"Batch {status}!\nProcessed: {result.get('processed')}/{result.get('total')}"
-        )
+        msg = f"Batch {status}!\nProcessed: {result.get('processed')}/{result.get('total')}"
         if status == "completed":
             messagebox.showinfo("Batch Complete", msg, parent=self.root)
         else:
@@ -1547,6 +1592,25 @@ No need to run analysis to see your files.
     def _on_batch_error(self, error: str) -> None:
         self._set_batch_buttons_state("normal")
         messagebox.showerror("Batch Error", error, parent=self.root)
+
+    def _update_page_controls(self) -> None:
+        """Update pagination controls state in the results viewer."""
+        if self.results_page_label:
+            start = self.results_offset + 1
+            end = min(self.results_offset + self.results_limit, self.results_total)
+            self.results_page_label.config(
+                text=f"Showing {start}-{end} of {self.results_total}"
+            )
+        if self.prev_page_btn:
+            state = "normal" if self.results_offset > 0 else "disabled"
+            self.prev_page_btn.config(state=state)
+        if self.next_page_btn:
+            state = (
+                "normal"
+                if self.results_offset + self.results_limit < self.results_total
+                else "disabled"
+            )
+            self.next_page_btn.config(state=state)
 
     # ------------------------------------------------------------------
     # RESULTS VIEWER AND EXPORTS
@@ -1596,14 +1660,14 @@ No need to run analysis to see your files.
             refresh_btn = ttk.Button(
                 controls_frame,
                 text="Refresh",
-                command=lambda: (
+                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
                     self.refresh_results_table(
-                        tree,
-                        status_filter.get(),
-                        classification_filter.get(),
+                        tr,
+                        sf.get(),
+                        cf.get(),
                         self.results_offset,
                     ),
-                    update_page_controls(),
+                    self._update_page_controls(),
                 ),
             )
             refresh_btn.pack(side="right", padx=5)
@@ -1706,36 +1770,38 @@ No need to run analysis to see your files.
 
             self.results_offset = 0
             self.refresh_results_table(tree, "All", "All", self.results_offset)
-            update_page_controls()
+            self._update_page_controls()
 
             status_filter.bind(
                 "<<ComboboxSelected>>",
-                lambda e: (
+                lambda e, tr=tree, sf=status_filter, cf=classification_filter: (
                     setattr(self, "results_offset", 0),
                     self.refresh_results_table(
-                        tree,
-                        status_filter.get(),
-                        classification_filter.get(),
+                        tr,
+                        sf.get(),
+                        cf.get(),
                         self.results_offset,
                     ),
-                    update_page_controls(),
+                    self._update_page_controls(),
                 ),
             )
             classification_filter.bind(
                 "<<ComboboxSelected>>",
-                lambda e: (
+                lambda e, tr=tree, sf=status_filter, cf=classification_filter: (
                     setattr(self, "results_offset", 0),
                     self.refresh_results_table(
-                        tree,
-                        status_filter.get(),
-                        classification_filter.get(),
+                        tr,
+                        sf.get(),
+                        cf.get(),
                         self.results_offset,
                     ),
-                    update_page_controls(),
+                    self._update_page_controls(),
                 ),
             )
 
-            tree.bind("<Double-1>", lambda e: self.show_file_details(tree, results_window))
+            tree.bind(
+                "<Double-1>", lambda e: self.show_file_details(tree, results_window)
+            )
 
             # Navigation controls
             nav_frame = ttk.Frame(results_window)
@@ -1744,24 +1810,6 @@ No need to run analysis to see your files.
             page_label = ttk.Label(nav_frame, text="")
             page_label.pack(side="right", padx=5)
             self.results_page_label = page_label
-
-            def update_page_controls() -> None:
-                if self.results_page_label:
-                    start = self.results_offset + 1
-                    end = min(self.results_offset + self.results_limit, self.results_total)
-                    self.results_page_label.config(
-                        text=f"Showing {start}-{end} of {self.results_total}"
-                    )
-                if self.prev_page_btn:
-                    state = "normal" if self.results_offset > 0 else "disabled"
-                    self.prev_page_btn.config(state=state)
-                if self.next_page_btn:
-                    state = (
-                        "normal"
-                        if self.results_offset + self.results_limit < self.results_total
-                        else "disabled"
-                    )
-                    self.next_page_btn.config(state=state)
 
             def goto_first():
                 items = tree.get_children()
@@ -1798,14 +1846,16 @@ No need to run analysis to see your files.
                 if self.results_offset < 0:
                     self.results_offset = 0
                 if self.results_offset >= self.results_total:
-                    self.results_offset = max(0, self.results_total - self.results_limit)
+                    self.results_offset = max(
+                        0, self.results_total - self.results_limit
+                    )
                 self.refresh_results_table(
                     tree,
                     status_filter.get(),
                     classification_filter.get(),
                     self.results_offset,
                 )
-                update_page_controls()
+                self._update_page_controls()
 
             ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(
                 side="left", padx=2
@@ -1883,7 +1933,9 @@ No need to run analysis to see your files.
                             f"File ID {target_id} not found with current filters.",
                             parent=tree.winfo_toplevel(),
                         )
-                        self.log_action(f"Jump failed: ID {target_id} not found", "WARN")
+                        self.log_action(
+                            f"Jump failed: ID {target_id} not found", "WARN"
+                        )
                         return
 
                     # Count rows with higher ID (ORDER BY id DESC)
@@ -1905,7 +1957,7 @@ No need to run analysis to see your files.
                         classification_filter.get(),
                         self.results_offset,
                     )
-                    update_page_controls()
+                    self._update_page_controls()
 
                     # Highlight the target item
                     for itm in tree.get_children():
@@ -1941,7 +1993,7 @@ No need to run analysis to see your files.
             next_page_btn.pack(side="right", padx=2)
             self.next_page_btn = next_page_btn
 
-            update_page_controls()
+            self._update_page_controls()
 
             self.log_action("Results viewer opened", "INFO")
 
@@ -2135,7 +2187,7 @@ No need to run analysis to see your files.
             cursor = conn.cursor()
 
             cursor.execute(
-            """
+                """
         SELECT f.path, f.file_size, f.owner, f.last_modified, f.status,
                r.security_analysis, r.security_confidence,
                r.rgpd_analysis, r.rgpd_confidence,
@@ -2231,7 +2283,9 @@ RAW RESPONSE:
 
         except Exception as e:
             messagebox.showerror(
-                "Details Error", f"Failed to show file details:\n{str(e)}", parent=parent_window
+                "Details Error",
+                f"Failed to show file details:\n{str(e)}",
+                parent=parent_window,
             )
             self.log_action(f"File details failed: {str(e)}", "ERROR")
 
@@ -2276,7 +2330,9 @@ RAW RESPONSE:
             if domain == "security":
                 classification = section_data.get("classification", "Non classifié")
                 confidence = section_data.get("confidence", 0)
-                justification = section_data.get("justification", "Aucune justification")
+                justification = section_data.get(
+                    "justification", "Aucune justification"
+                )
                 formatted += (
                     f"🛡️ SÉCURITÉ\n   Classification: {classification}\n"
                     f"   Confiance: {confidence}%\n   Justification: {justification}\n\n"
@@ -2312,7 +2368,9 @@ RAW RESPONSE:
             db_path = Path("analysis_results.db")
             if not db_path.exists():
                 messagebox.showwarning(
-                    "No Results", "No analysis results found to export", parent=self.root
+                    "No Results",
+                    "No analysis results found to export",
+                    parent=self.root,
                 )
                 return
 
@@ -2405,7 +2463,9 @@ RAW RESPONSE:
 
         except Exception as e:
             messagebox.showerror(
-                "Export Error", f"Failed to open export dialog:\n{str(e)}", parent=self.root
+                "Export Error",
+                f"Failed to open export dialog:\n{str(e)}",
+                parent=self.root,
             )
             self.log_action(f"Export dialog failed: {str(e)}", "ERROR")
 
@@ -2480,7 +2540,9 @@ RAW RESPONSE:
 
         except Exception as e:
             messagebox.showerror(
-                "Export Error", f"Failed to export results:\n{str(e)}", parent=export_window
+                "Export Error",
+                f"Failed to export results:\n{str(e)}",
+                parent=export_window,
             )
             self.log_action(f"Export failed: {str(e)}", "ERROR")
 
@@ -2890,7 +2952,9 @@ RAW RESPONSE:
 
         except Exception as e:
             messagebox.showerror(
-                "Export Error", f"Failed to export table:\n{str(e)}", parent=tree.winfo_toplevel()
+                "Export Error",
+                f"Failed to export table:\n{str(e)}",
+                parent=tree.winfo_toplevel(),
             )
             self.log_action(f"Table export failed: {str(e)}", "ERROR")
 
