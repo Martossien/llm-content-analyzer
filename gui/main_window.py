@@ -1858,8 +1858,10 @@ No need to run analysis to see your files.
                     status_filter.get(),
                     classification_filter.get(),
                     self.results_offset,
+                    page_label,
+                    prev_page_btn,
+                    next_page_btn,
                 )
-                self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
             def jump() -> None:
                 """Jump to a specific file ID across all pages."""
@@ -1954,8 +1956,10 @@ No need to run analysis to see your files.
                         status_filter.get(),
                         classification_filter.get(),
                         self.results_offset,
+                        page_label,
+                        prev_page_btn,
+                        next_page_btn,
                     )
-                    self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
                     # Highlight the target item
                     for itm in tree.get_children():
@@ -1989,13 +1993,14 @@ No need to run analysis to see your files.
             refresh_btn = ttk.Button(
                 controls_frame,
                 text="Refresh",
-                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
-                    self.refresh_results_table(
-                        tr, sf.get(), cf.get(), self.results_offset
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
-                    ),
+                command=lambda tr=tree, sf=status_filter, cf=classification_filter: self.refresh_results_table(
+                    tr,
+                    sf.get(),
+                    cf.get(),
+                    self.results_offset,
+                    page_label,
+                    prev_page_btn,
+                    next_page_btn,
                 ),
             )
             refresh_btn.pack(side="right", padx=5)
@@ -2008,8 +2013,15 @@ No need to run analysis to see your files.
             export_btn.pack(side="right", padx=5)
 
             self.results_offset = 0
-            self.refresh_results_table(tree, "All", "All", self.results_offset)
-            self._update_page_controls(page_label, prev_page_btn, next_page_btn)
+            self.refresh_results_table(
+                tree,
+                "All",
+                "All",
+                self.results_offset,
+                page_label,
+                prev_page_btn,
+                next_page_btn,
+            )
 
             status_filter.bind(
                 "<<ComboboxSelected>>",
@@ -2020,9 +2032,9 @@ No need to run analysis to see your files.
                         sf.get(),
                         cf.get(),
                         self.results_offset,
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
+                        page_label,
+                        prev_page_btn,
+                        next_page_btn,
                     ),
                 ),
             )
@@ -2035,9 +2047,9 @@ No need to run analysis to see your files.
                         sf.get(),
                         cf.get(),
                         self.results_offset,
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
+                        page_label,
+                        prev_page_btn,
+                        next_page_btn,
                     ),
                 ),
             )
@@ -2050,9 +2062,9 @@ No need to run analysis to see your files.
                         sf.get(),
                         cf.get(),
                         0,
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
+                        page_label,
+                        prev_page_btn,
+                        next_page_btn,
                     ),
                 )
             )
@@ -2081,6 +2093,9 @@ No need to run analysis to see your files.
         status_filter,
         classification_filter,
         offset: int = 0,
+        page_label: ttk.Label | None = None,
+        prev_btn: ttk.Button | None = None,
+        next_btn: ttk.Button | None = None,
     ):
         """Schedule a debounced refresh of the results table."""
         self.results_refresh_debouncer.schedule_calculation(
@@ -2089,6 +2104,9 @@ No need to run analysis to see your files.
             status_filter,
             classification_filter,
             offset,
+            page_label,
+            prev_btn,
+            next_btn,
         )
 
     def _perform_refresh_results_table(
@@ -2097,6 +2115,9 @@ No need to run analysis to see your files.
         status_filter,
         classification_filter,
         offset: int = 0,
+        page_label: ttk.Label | None = None,
+        prev_btn: ttk.Button | None = None,
+        next_btn: ttk.Button | None = None,
     ) -> None:
         """Refresh the results table with filters and pagination."""
         try:
@@ -2258,6 +2279,9 @@ No need to run analysis to see your files.
                 )
 
             self.log_action(f"Results table refreshed: {len(rows)} entries", "INFO")
+
+            # Update pagination controls now that results_total is known
+            self._update_page_controls(page_label, prev_btn, next_btn)
 
         except Exception as e:
             messagebox.showerror(
