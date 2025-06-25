@@ -1657,28 +1657,6 @@ No need to run analysis to see your files.
             classification_filter.set("All")
             classification_filter.pack(side="left", padx=5)
 
-            refresh_btn = ttk.Button(
-                controls_frame,
-                text="Refresh",
-                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
-                    self.refresh_results_table(
-                        tr,
-                        sf.get(),
-                        cf.get(),
-                        self.results_offset,
-                    ),
-                    self._update_page_controls(),
-                ),
-            )
-            refresh_btn.pack(side="right", padx=5)
-
-            export_btn = ttk.Button(
-                controls_frame,
-                text="Export to CSV",
-                command=lambda: self.export_results_to_csv(tree),
-            )
-            export_btn.pack(side="right", padx=5)
-
             tree_frame = ttk.Frame(results_window)
             tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -1767,6 +1745,25 @@ No need to run analysis to see your files.
             tree.pack(side="left", fill="both", expand=True)
             v_scrollbar.pack(side="right", fill="y")
             h_scrollbar.pack(side="bottom", fill="x")
+
+            refresh_btn = ttk.Button(
+                controls_frame,
+                text="Refresh",
+                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
+                    self.refresh_results_table(
+                        tr, sf.get(), cf.get(), self.results_offset
+                    ),
+                    self._update_page_controls(),
+                ),
+            )
+            refresh_btn.pack(side="right", padx=5)
+
+            export_btn = ttk.Button(
+                controls_frame,
+                text="Export to CSV",
+                command=lambda tr=tree: self.export_results_to_csv(tr),
+            )
+            export_btn.pack(side="right", padx=5)
 
             self.results_offset = 0
             self.refresh_results_table(tree, "All", "All", self.results_offset)
