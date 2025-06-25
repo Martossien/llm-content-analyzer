@@ -1825,15 +1825,107 @@ No need to run analysis to see your files.
             ttk.Entry(nav_frame, textvariable=goto_var, width=6).pack(side="left")
 
             def jump():
+                """Jump to a specific file ID across all pages."""
                 val = goto_var.get().strip()
                 if not val.isdigit():
+                    messagebox.showwarning(
+                        "Invalid ID",
+                        "Please enter a numeric file ID",
+                        parent=tree.winfo_toplevel(),
+                    )
                     return
-                items = tree.get_children()
-                for itm in items:
-                    if tree.item(itm)["values"][0] == int(val):
-                        tree.selection_set(itm)
-                        tree.see(itm)
-                        break
+
+                target_id = int(val)
+
+                db_path = Path("analysis_results.db")
+                if not db_path.exists():
+                    messagebox.showerror(
+                        "Database Missing",
+                        "No analysis database found.",
+                        parent=tree.winfo_toplevel(),
+                    )
+                    self.log_action("Jump failed: no database", "ERROR")
+                    return
+
+                try:
+                    self.root.config(cursor="wait")
+
+                    conn = sqlite3.connect(db_path)
+                    cursor = conn.cursor()
+
+                    base_query = """
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE 1=1
+                    """
+                    params: list[Any] = []
+
+                    if status_filter.get() != "All":
+                        base_query += " AND f.status = ?"
+                        params.append(status_filter.get())
+
+                    if classification_filter.get() != "All":
+                        base_query += " AND r.security_analysis LIKE ?"
+                        params.append(
+                            f'%"classification": "{classification_filter.get()}"%'
+                        )
+
+                    # Verify file existence with current filters
+                    cursor.execute(
+                        "SELECT COUNT(*) " + base_query + " AND f.id = ?",
+                        params + [target_id],
+                    )
+                    if cursor.fetchone()[0] == 0:
+                        conn.close()
+                        self.root.config(cursor="")
+                        messagebox.showwarning(
+                            "File Not Found",
+                            f"File ID {target_id} not found with current filters.",
+                            parent=tree.winfo_toplevel(),
+                        )
+                        self.log_action(f"Jump failed: ID {target_id} not found", "WARN")
+                        return
+
+                    # Count rows with higher ID (ORDER BY id DESC)
+                    cursor.execute(
+                        "SELECT COUNT(*) " + base_query + " AND f.id > ?",
+                        params + [target_id],
+                    )
+                    position = cursor.fetchone()[0]
+                    conn.close()
+
+                    # Determine page offset
+                    page_index = position // self.results_limit
+                    self.results_offset = page_index * self.results_limit
+
+                    # Refresh table at new page
+                    self.refresh_results_table(
+                        tree,
+                        status_filter.get(),
+                        classification_filter.get(),
+                        self.results_offset,
+                    )
+                    update_page_controls()
+
+                    # Highlight the target item
+                    for itm in tree.get_children():
+                        if tree.item(itm)["values"][0] == target_id:
+                            tree.selection_set(itm)
+                            tree.see(itm)
+                            tree.focus(itm)
+                            break
+
+                    self.log_action(f"Jumped to file ID {target_id}")
+
+                except Exception as e:
+                    messagebox.showerror(
+                        "Jump Error",
+                        f"Failed to jump to file ID {target_id}:\n{str(e)}",
+                        parent=tree.winfo_toplevel(),
+                    )
+                    self.log_action(f"Jump error: {str(e)}", "ERROR")
+                finally:
+                    self.root.config(cursor="")
 
             ttk.Button(nav_frame, text="JUMP", command=jump).pack(side="left", padx=2)
 
