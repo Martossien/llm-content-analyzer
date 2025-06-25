@@ -1780,95 +1780,48 @@ No need to run analysis to see your files.
             v_scrollbar.pack(side="right", fill="y")
             h_scrollbar.pack(side="bottom", fill="x")
 
-            refresh_btn = ttk.Button(
-                controls_frame,
-                text="Refresh",
-                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
-                    self.refresh_results_table(
-                        tr, sf.get(), cf.get(), self.results_offset
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
-                    ),
-                ),
-            )
-            refresh_btn.pack(side="right", padx=5)
-
-            export_btn = ttk.Button(
-                controls_frame,
-                text="Export to CSV",
-                command=lambda tr=tree: self.export_results_to_csv(tr),
-            )
-            export_btn.pack(side="right", padx=5)
-
-            self.results_offset = 0
-            self.refresh_results_table(tree, "All", "All", self.results_offset)
-            self._update_page_controls(page_label, prev_page_btn, next_page_btn)
-
-            status_filter.bind(
-                "<<ComboboxSelected>>",
-                lambda e, tr=tree, sf=status_filter, cf=classification_filter: (
-                    setattr(self, "results_offset", 0),
-                    self.refresh_results_table(
-                        tr,
-                        sf.get(),
-                        cf.get(),
-                        self.results_offset,
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
-                    ),
-                ),
-            )
-            classification_filter.bind(
-                "<<ComboboxSelected>>",
-                lambda e, tr=tree, sf=status_filter, cf=classification_filter: (
-                    setattr(self, "results_offset", 0),
-                    self.refresh_results_table(
-                        tr,
-                        sf.get(),
-                        cf.get(),
-                        self.results_offset,
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
-                    ),
-                ),
-            )
-
-            duplicates_check.config(
-                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
-                    setattr(self, "results_offset", 0),
-                    self.refresh_results_table(
-                        tr,
-                        sf.get(),
-                        cf.get(),
-                        0,
-                    ),
-                    self._update_page_controls(
-                        page_label, prev_page_btn, next_page_btn
-                    ),
-                )
-            )
-
-            tree.bind(
-                "<Double-1>", lambda e: self.show_file_details(tree, results_window)
-            )
-
-            # Navigation controls
+            # Navigation controls must be created before callbacks referencing
+            # them to avoid late-binding issues.
             nav_frame = ttk.Frame(results_window)
             nav_frame.pack(fill="x", padx=10, pady=5)
 
             page_label = ttk.Label(nav_frame, text="")
             page_label.pack(side="right", padx=5)
 
-            def goto_first():
+            prev_page_btn = ttk.Button(nav_frame, text="◀ PREV 1000")
+            prev_page_btn.pack(side="right", padx=2)
+
+            next_page_btn = ttk.Button(nav_frame, text="NEXT 1000 ▶")
+            next_page_btn.pack(side="right", padx=2)
+
+            first_file_btn = ttk.Button(nav_frame, text="FIRST FILE")
+            first_file_btn.pack(side="left", padx=2)
+
+            prev_file_btn = ttk.Button(nav_frame, text="◀ PREV FILE")
+            prev_file_btn.pack(side="left", padx=2)
+
+            next_file_btn = ttk.Button(nav_frame, text="NEXT FILE ▶")
+            next_file_btn.pack(side="left", padx=2)
+
+            last_file_btn = ttk.Button(nav_frame, text="LAST FILE")
+            last_file_btn.pack(side="left", padx=2)
+
+            ttk.Label(nav_frame, text="GO TO FILE:").pack(side="left", padx=5)
+            goto_var = tk.StringVar()
+            goto_entry = ttk.Entry(nav_frame, textvariable=goto_var, width=6)
+            goto_entry.pack(side="left")
+
+            jump_btn = ttk.Button(nav_frame, text="JUMP")
+            jump_btn.pack(side="left", padx=2)
+
+            # ---- Callback definitions ----
+            def goto_first() -> None:
                 items = tree.get_children()
                 if items:
                     tree.selection_set(items[0])
                     tree.see(items[0])
 
-            def goto_prev():
+            def goto_prev() -> None:
                 sel = tree.selection()
                 items = tree.get_children()
                 if sel:
@@ -1877,7 +1830,7 @@ No need to run analysis to see your files.
                         tree.selection_set(items[idx - 1])
                         tree.see(items[idx - 1])
 
-            def goto_next():
+            def goto_next() -> None:
                 sel = tree.selection()
                 items = tree.get_children()
                 if sel:
@@ -1886,7 +1839,7 @@ No need to run analysis to see your files.
                         tree.selection_set(items[idx + 1])
                         tree.see(items[idx + 1])
 
-            def goto_last():
+            def goto_last() -> None:
                 items = tree.get_children()
                 if items:
                     tree.selection_set(items[-1])
@@ -1908,24 +1861,7 @@ No need to run analysis to see your files.
                 )
                 self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
-            ttk.Button(nav_frame, text="FIRST FILE", command=goto_first).pack(
-                side="left", padx=2
-            )
-            ttk.Button(nav_frame, text="◀ PREV FILE", command=goto_prev).pack(
-                side="left", padx=2
-            )
-            ttk.Button(nav_frame, text="NEXT FILE ▶", command=goto_next).pack(
-                side="left", padx=2
-            )
-            ttk.Button(nav_frame, text="LAST FILE", command=goto_last).pack(
-                side="left", padx=2
-            )
-
-            ttk.Label(nav_frame, text="GO TO FILE:").pack(side="left", padx=5)
-            goto_var = tk.StringVar()
-            ttk.Entry(nav_frame, textvariable=goto_var, width=6).pack(side="left")
-
-            def jump():
+            def jump() -> None:
                 """Jump to a specific file ID across all pages."""
                 val = goto_var.get().strip()
                 if not val.isdigit():
@@ -2041,21 +1977,90 @@ No need to run analysis to see your files.
                 finally:
                     self.root.config(cursor="")
 
-            ttk.Button(nav_frame, text="JUMP", command=jump).pack(side="left", padx=2)
+            # ---- Command configuration ----
+            first_file_btn.configure(command=goto_first)
+            prev_file_btn.configure(command=goto_prev)
+            next_file_btn.configure(command=goto_next)
+            last_file_btn.configure(command=goto_last)
+            jump_btn.configure(command=jump)
+            prev_page_btn.configure(command=lambda: change_page(-1))
+            next_page_btn.configure(command=lambda: change_page(1))
 
-            prev_page_btn = ttk.Button(
-                nav_frame, text="◀ PREV 1000", command=lambda: change_page(-1)
+            refresh_btn = ttk.Button(
+                controls_frame,
+                text="Refresh",
+                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
+                    self.refresh_results_table(
+                        tr, sf.get(), cf.get(), self.results_offset
+                    ),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
+                ),
             )
-            prev_page_btn.pack(side="right", padx=2)
+            refresh_btn.pack(side="right", padx=5)
 
-            next_page_btn = ttk.Button(
-                nav_frame, text="NEXT 1000 ▶", command=lambda: change_page(1)
+            export_btn = ttk.Button(
+                controls_frame,
+                text="Export to CSV",
+                command=lambda tr=tree: self.export_results_to_csv(tr),
             )
-            next_page_btn.pack(side="right", padx=2)
+            export_btn.pack(side="right", padx=5)
 
+            self.results_offset = 0
+            self.refresh_results_table(tree, "All", "All", self.results_offset)
             self._update_page_controls(page_label, prev_page_btn, next_page_btn)
 
-            self.log_action("Results viewer opened", "INFO")
+            status_filter.bind(
+                "<<ComboboxSelected>>",
+                lambda e, tr=tree, sf=status_filter, cf=classification_filter: (
+                    setattr(self, "results_offset", 0),
+                    self.refresh_results_table(
+                        tr,
+                        sf.get(),
+                        cf.get(),
+                        self.results_offset,
+                    ),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
+                ),
+            )
+            classification_filter.bind(
+                "<<ComboboxSelected>>",
+                lambda e, tr=tree, sf=status_filter, cf=classification_filter: (
+                    setattr(self, "results_offset", 0),
+                    self.refresh_results_table(
+                        tr,
+                        sf.get(),
+                        cf.get(),
+                        self.results_offset,
+                    ),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
+                ),
+            )
+
+            duplicates_check.config(
+                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
+                    setattr(self, "results_offset", 0),
+                    self.refresh_results_table(
+                        tr,
+                        sf.get(),
+                        cf.get(),
+                        0,
+                    ),
+                    self._update_page_controls(
+                        page_label, prev_page_btn, next_page_btn
+                    ),
+                )
+            )
+
+            tree.bind(
+                "<Double-1>", lambda e: self.show_file_details(tree, results_window)
+            )
+
 
         except Exception as e:
             messagebox.showerror(
