@@ -2,7 +2,7 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Iterator
+from typing import Any, Dict, List, Iterator, Optional
 import re
 import yaml
 import pandas as pd
@@ -428,6 +428,152 @@ class CSVParser:
         """Compatibilité ancienne API utilisant pandas."""
         return self.transform_metadata_from_dict(row.to_dict())
 
+    # ------------------------------------------------------------------
+    # Optimisations SQLite et Pandas
+    # ------------------------------------------------------------------
+    def _optimize_sqlite_for_bulk_insert(self, conn: sqlite3.Connection) -> None:
+        """Configure des PRAGMA SQLite pour accélérer les inserts."""
+        pragmas = [
+            "PRAGMA synchronous = OFF",
+            "PRAGMA journal_mode = MEMORY",
+            "PRAGMA temp_store = MEMORY",
+            "PRAGMA cache_size = 150000",
+            "PRAGMA locking_mode = EXCLUSIVE",
+        ]
+        for pragma in pragmas:
+            try:
+                conn.execute(pragma)
+            except sqlite3.OperationalError:
+                # Certains PRAGMA peuvent ne pas être supportés
+                pass
+
+    def _batch_insert_files(self, conn: sqlite3.Connection, batch_data: List[Dict[str, Any]]) -> int:
+        """Insère un batch de fichiers en une seule transaction."""
+        if not batch_data:
+            return 0
+
+        insert_data: List[tuple] = []
+        for row_dict in batch_data:
+            try:
+                data = self.transform_metadata_from_dict(row_dict)
+            except Exception as exc:  # pragma: no cover - transformation edge cases
+                logger.debug("Erreur transformation: %s", exc)
+                continue
+
+            insert_data.append(
+                (
+                    data["name"],
+                    data["host"],
+                    data["extension"],
+                    data["username"],
+                    data["hostname"],
+                    data["unc_directory"],
+                    data["creation_time"],
+                    data["last_write_time"],
+                    data["readable"],
+                    data["writeable"],
+                    data["deletable"],
+                    data["directory_type"],
+                    data["base"],
+                    data["path"],
+                    data["file_size"],
+                    data["owner"],
+                    data["fast_hash"],
+                    data["access_time"],
+                    data["file_attributes"],
+                    data["file_signature"],
+                    data["last_modified"],
+                )
+            )
+
+        if not insert_data:
+            return 0
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO fichiers (
+                    name, host, extension, username, hostname,
+                    unc_directory, creation_time, last_write_time,
+                    readable, writeable, deletable, directory_type,
+                    base, path, file_size, owner, fast_hash,
+                    access_time, file_attributes, file_signature,
+                    last_modified
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_data,
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+        return len(insert_data)
+
+    def _get_optimal_dtypes(self) -> Dict[str, str]:
+        """Retourne les dtypes pandas optimaux pour les CSV SMBeagle."""
+        return {
+            "Name": "string",
+            "Host": "string",
+            "Extension": "string",
+            "Username": "string",
+            "Hostname": "string",
+            "UNCDirectory": "string",
+            "FileSize": "int64",
+            "Readable": "bool",
+            "Writeable": "bool",
+            "Deletable": "bool",
+            "Owner": "string",
+            "FastHash": "string",
+            "FileSignature": "string",
+        }
+
+    def _calculate_optimal_chunk_size(self, csv_file: Path) -> int:
+        """Calcule la taille de chunk idéale selon la RAM disponible."""
+        try:
+            import psutil
+
+            with open(csv_file, "r", encoding=self.encoding) as f:
+                sample_lines = [f.readline() for _ in range(10)]
+            valid_lines = [l for l in sample_lines if l.strip()]
+            avg_line_size = (
+                sum(len(line) for line in valid_lines) / len(valid_lines)
+                if valid_lines
+                else 100
+            )
+            available_ram = psutil.virtual_memory().available * 0.25
+            optimal_chunk = int(available_ram / (avg_line_size * 8))
+            return max(1000, min(optimal_chunk, 50000))
+        except Exception:
+            return self.chunk_size
+
+    def _quick_validate_format(self, csv_file: Path, sample_size: int = 100) -> List[str]:
+        """Valide rapidement l'en-tête et quelques lignes."""
+        errors: List[str] = []
+        try:
+            with open(csv_file, "r", encoding=self.encoding) as f:
+                header_line = f.readline().strip()
+                actual_headers = [c.strip().strip('"') for c in header_line.split(",")]
+                if len(actual_headers) != len(self.required_columns):
+                    errors.append(
+                        f"Expected {len(self.required_columns)} columns, found {len(actual_headers)}"
+                    )
+                missing = set(self.required_columns) - set(actual_headers)
+                if missing:
+                    errors.append(f"Missing columns: {missing}")
+
+                for i, line in enumerate(f):
+                    if i >= sample_size:
+                        break
+                    if not line.strip():
+                        continue
+                    line_errors = SMBeagleCSVParser.validate_csv_line_format(line.strip(), i + 2)
+                    errors.extend(line_errors)
+        except Exception as exc:
+            errors.append(f"File reading error: {exc}")
+        return errors
+
     def parse_csv(
         self,
         csv_file: Path,
@@ -515,6 +661,105 @@ class CSVParser:
 
         processing_time = time.perf_counter() - start
 
+        return {
+            "total_files": total_files,
+            "imported_files": imported_files,
+            "errors": errors,
+            "processing_time": processing_time,
+            "validation_stats": validation_stats,
+        }
+
+    def parse_csv_optimized(
+        self,
+        csv_file: Path,
+        db_file: Path,
+        chunk_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Version optimisée pour l'import massif de CSV."""
+        start = time.perf_counter()
+        chunk = chunk_size or self._calculate_optimal_chunk_size(csv_file)
+        total_files = 0
+        imported_files = 0
+        errors: List[str] = []
+        validation_stats = {"invalid_rows": 0}
+
+        conn = sqlite3.connect(db_file)
+        self._ensure_schema(conn)
+        self._optimize_sqlite_for_bulk_insert(conn)
+
+        try:
+            if self.validation_strict:
+                validation_errors = self._quick_validate_format(csv_file, sample_size=100)
+                if validation_errors:
+                    conn.close()
+                    return {
+                        "total_files": 0,
+                        "imported_files": 0,
+                        "errors": validation_errors,
+                        "processing_time": time.perf_counter() - start,
+                        "validation_stats": validation_stats,
+                    }
+
+            for batch in parse_csv_with_smbeagle_format(csv_file, chunk):
+                total_files += len(batch)
+                try:
+                    imported = self._batch_insert_files(conn, batch)
+                    imported_files += imported
+                except Exception as exc:
+                    logger.error("Erreur batch import: %s", exc)
+                    errors.append(f"Batch error: {exc}")
+                    for row_dict in batch:
+                        try:
+                            data = self.transform_metadata_from_dict(row_dict)
+                            conn.execute("BEGIN")
+                            conn.execute(
+                                """
+                                INSERT OR IGNORE INTO fichiers (
+                                    name, host, extension, username, hostname,
+                                    unc_directory, creation_time, last_write_time,
+                                    readable, writeable, deletable, directory_type,
+                                    base, path, file_size, owner, fast_hash,
+                                    access_time, file_attributes, file_signature,
+                                    last_modified
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    data["name"],
+                                    data["host"],
+                                    data["extension"],
+                                    data["username"],
+                                    data["hostname"],
+                                    data["unc_directory"],
+                                    data["creation_time"],
+                                    data["last_write_time"],
+                                    data["readable"],
+                                    data["writeable"],
+                                    data["deletable"],
+                                    data["directory_type"],
+                                    data["base"],
+                                    data["path"],
+                                    data["file_size"],
+                                    data["owner"],
+                                    data["fast_hash"],
+                                    data["access_time"],
+                                    data["file_attributes"],
+                                    data["file_signature"],
+                                    data["last_modified"],
+                                ),
+                            )
+                            conn.execute("COMMIT")
+                            imported_files += 1
+                        except Exception:
+                            conn.execute("ROLLBACK")
+                            validation_stats["invalid_rows"] += 1
+
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA optimize")
+
+        finally:
+            conn.close()
+
+        processing_time = time.perf_counter() - start
         return {
             "total_files": total_files,
             "imported_files": imported_files,

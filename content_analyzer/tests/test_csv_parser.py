@@ -46,7 +46,7 @@ def test_parse_valid_csv(tmp_path):
     db_file = tmp_path / "out.db"
     parser = CSVParser(CONFIG_PATH)
     parser.validation_strict = False
-    result = parser.parse_csv(csv_file, db_file, chunk_size=2)
+    result = parser.parse_csv_optimized(csv_file, db_file, chunk_size=2)
     assert result["total_files"] == 5
     assert result["imported_files"] == 5
     assert result["errors"] == []
@@ -61,7 +61,7 @@ def test_parse_invalid_format(tmp_path):
     db_file = tmp_path / "out.db"
     parser = CSVParser(CONFIG_PATH)
     parser.validation_strict = True
-    result = parser.parse_csv(csv_file, db_file, chunk_size=2)
+    result = parser.parse_csv_optimized(csv_file, db_file, chunk_size=2)
     assert result["imported_files"] == 0
     assert result["errors"]
 
@@ -71,7 +71,7 @@ def test_chunked_processing(tmp_path):
     db_file = tmp_path / "out.db"
     parser = CSVParser(CONFIG_PATH)
     parser.validation_strict = False
-    result = parser.parse_csv(csv_file, db_file, chunk_size=10)
+    result = parser.parse_csv_optimized(csv_file, db_file, chunk_size=10)
     assert result["imported_files"] == 25
     conn = sqlite3.connect(db_file)
     count = conn.execute("SELECT COUNT(*) FROM fichiers").fetchone()[0]
@@ -107,7 +107,7 @@ def test_parse_scan_local_mini(tmp_path):
     db_file = tmp_path / "out.db"
     parser = CSVParser(CONFIG_PATH)
     parser.validation_strict = False
-    result = parser.parse_csv(csv_file, db_file, chunk_size=20)
+    result = parser.parse_csv_optimized(csv_file, db_file, chunk_size=20)
     assert result["total_files"] == 63
     assert result["imported_files"] == 63
     assert result["errors"] == []

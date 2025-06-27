@@ -566,10 +566,10 @@ No need to run analysis to see your files.
                 self.root.update()
 
                 output_db = Path("analysis_results.db")
-                import_result = parser.parse_csv(
+                import_result = parser.parse_csv_optimized(
                     csv_file=Path(file_path),
                     db_file=output_db,
-                    chunk_size=10000,
+                    chunk_size=None,
                 )
 
                 if import_result["errors"]:
