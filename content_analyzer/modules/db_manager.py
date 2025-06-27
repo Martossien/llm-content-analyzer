@@ -2,6 +2,10 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import threading
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class DBManager:
@@ -10,9 +14,16 @@ class DBManager:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._ensure_schema()
+        # Schedule periodic maintenance without blocking
+        try:
+            self.schedule_maintenance()
+        except Exception as exc:  # pragma: no cover - maintenance issues
+            logger.warning("Failed to schedule DB maintenance: %s", exc)
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        self._optimize_connection(conn)
+        return conn
 
     def _ensure_schema(self) -> None:
         conn = self._connect()
@@ -57,6 +68,10 @@ class DBManager:
             "created_at": "TIMESTAMP",
             "document_resume": "TEXT",
             "llm_response_complete": "TEXT",
+            "security_classification_cached": "TEXT",
+            "rgpd_risk_cached": "TEXT",
+            "finance_type_cached": "TEXT",
+            "legal_type_cached": "TEXT",
         }
         for col, col_type in expected.items():
             if col not in existing_cols:
@@ -64,6 +79,48 @@ class DBManager:
 
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_confidence ON reponses_llm(confidence_global DESC)"
+        )
+
+        # Specialized indexes for GUI filtering performance
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gui_status_priority ON fichiers(status, priority_score DESC, id DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gui_classification_filter ON reponses_llm(security_classification_cached, confidence_global DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gui_composite_main ON fichiers(status, last_modified DESC, id DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fast_hash_duplicates ON fichiers(fast_hash) WHERE fast_hash IS NOT NULL AND fast_hash != ''"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_covering_results ON fichiers(id, name, status, file_size, last_modified, path) WHERE status IN ('completed', 'error')"
+            )
+        except sqlite3.OperationalError:
+            # Table may not have all columns in minimal test schema
+            pass
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_security_class_cached ON reponses_llm(security_classification_cached)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rgpd_risk_cached ON reponses_llm(rgpd_risk_cached)"
+        )
+
+        cursor.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trigger_denormalize_security
+                AFTER INSERT ON reponses_llm
+                BEGIN
+                    UPDATE reponses_llm
+                    SET security_classification_cached = json_extract(security_analysis, '$.classification'),
+                        rgpd_risk_cached = json_extract(rgpd_analysis, '$.risk_level'),
+                        finance_type_cached = json_extract(finance_analysis, '$.document_type'),
+                        legal_type_cached = json_extract(legal_analysis, '$.contract_type')
+                    WHERE id = NEW.id;
+                END;
+            """
         )
         cursor.execute(
             """
@@ -207,3 +264,57 @@ class DBManager:
             "errors": errors,
             "avg_processing_time": float(avg_time_row or 0.0),
         }
+
+    # ------------------------------------------------------------------
+    # Performance optimization helpers
+    # ------------------------------------------------------------------
+
+    def _optimize_connection(self, conn: sqlite3.Connection) -> None:
+        """Configure SQLite pragmas for large databases."""
+        optimizations = [
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA cache_size = 150000",
+            "PRAGMA mmap_size = 629145600",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA temp_store = MEMORY",
+            "PRAGMA optimize",
+        ]
+        for pragma in optimizations:
+            try:
+                conn.execute(pragma)
+            except sqlite3.OperationalError:
+                # pragma may not be supported; continue
+                pass
+        conn.execute("PRAGMA wal_autocheckpoint = 32000")
+
+    def optimize_database_performance(self) -> Dict[str, Any]:
+        """Run periodic maintenance and return basic stats."""
+        conn = self._connect()
+        conn.execute("ANALYZE")
+        conn.execute("PRAGMA optimize")
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        stats = {
+            "cache_hit_rate": conn.execute("PRAGMA cache_spill").fetchone()[0],
+            "wal_size_mb": Path(f"{self.db_path}-wal").stat().st_size / 1024 / 1024
+            if Path(f"{self.db_path}-wal").exists()
+            else 0,
+        }
+        conn.close()
+        return stats
+
+    def schedule_maintenance(self) -> None:
+        """Schedule hourly optimization in a background thread."""
+
+        def _task() -> None:
+            try:
+                self.optimize_database_performance()
+            except Exception as exc:  # pragma: no cover - runtime issues
+                logger.warning("Maintenance failed: %s", exc)
+            finally:
+                timer = threading.Timer(3600, _task)
+                timer.daemon = True
+                timer.start()
+
+        timer = threading.Timer(3600, _task)
+        timer.daemon = True
+        timer.start()
