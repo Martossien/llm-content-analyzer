@@ -16,6 +16,33 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+
+class ResultsCache:
+    """Simple LRU cache for GUI result pages."""
+
+    def __init__(self, max_size: int = 50) -> None:
+        self.cache: Dict[str, list] = {}
+        self.access_order: list[str] = []
+        self.max_size = max_size
+
+    def get(self, key: str) -> Optional[list]:
+        if key in self.cache:
+            self.access_order.remove(key)
+            self.access_order.append(key)
+            return self.cache[key]
+        return None
+
+    def put(self, key: str, data: list) -> None:
+        if len(self.cache) >= self.max_size:
+            oldest = self.access_order.pop(0)
+            self.cache.pop(oldest, None)
+        self.cache[key] = data
+        self.access_order.append(key)
+
+    def invalidate(self) -> None:
+        self.cache.clear()
+        self.access_order.clear()
+
 from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
 from content_analyzer.modules.csv_parser import CSVParser
@@ -102,6 +129,9 @@ class MainWindow:
         self.results_offset = 0
         self.results_limit = 1000
         self.results_total = 0
+
+        # Cache for paginated results
+        self.results_cache = ResultsCache(max_size=50)
 
         # IDs for periodic callbacks
         self._logs_update_id: str | None = None
@@ -2087,6 +2117,75 @@ No need to run analysis to see your files.
         self.results_total = 0
         window.destroy()
 
+    # ------------------------------------------------------------------
+    # Optimized DB queries
+    # ------------------------------------------------------------------
+
+    def _get_optimized_results(
+        self,
+        status_filter: str,
+        classification_filter: str,
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> list[tuple]:
+        db_path = Path("analysis_results.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        base_query = """
+        SELECT f.id, f.name, f.host, f.extension, f.username, f.path,
+               f.file_size, f.owner, f.creation_time, f.last_modified, f.status,
+               r.security_classification_cached,
+               r.rgpd_risk_cached,
+               r.finance_type_cached,
+               r.legal_type_cached,
+               r.confidence_global, r.processing_time_ms,
+               r.document_resume
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE 1=1
+        """
+
+        params: list[Any] = []
+
+
+
+        if status_filter != "All":
+            base_query += " AND f.status = ?"
+            params.append(status_filter)
+
+        if classification_filter != "All":
+            base_query += " AND r.security_classification_cached = ?"
+            params.append(classification_filter)
+
+        if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+            base_query += " AND f.fast_hash IN (SELECT fast_hash FROM fichiers WHERE fast_hash IS NOT NULL GROUP BY fast_hash HAVING COUNT(*) > 1)"
+
+        base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _get_results_count(self, status_filter: str, classification_filter: str) -> int:
+        db_path = Path("analysis_results.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        query = "SELECT COUNT(*) FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
+        params: list[Any] = []
+        if status_filter != "All":
+            query += " AND f.status = ?"
+            params.append(status_filter)
+        if classification_filter != "All":
+            query += " AND r.security_classification_cached = ?"
+            params.append(classification_filter)
+        cursor.execute(query, params)
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+
     def refresh_results_table(
         self,
         tree,
@@ -2124,80 +2223,19 @@ No need to run analysis to see your files.
             tree.delete(*tree.get_children())
             tree.update_idletasks()
 
-            db_path = Path("analysis_results.db")
-
-            # Nouveau : vérifier la présence de la base de données
-            if not db_path.exists():
-                messagebox.showinfo(
-                    "No Database",
-                    "No analysis database found.\n\n"
-                    "Please:\n"
-                    "1. Click 'Browse CSV...' to select and import a CSV file\n"
-                    "2. The import will happen automatically after validation",
-                    parent=tree.winfo_toplevel(),
+            cache_key = f"{status_filter}_{classification_filter}_{self.results_offset}"
+            cached = self.results_cache.get(cache_key)
+            if cached is not None:
+                rows = cached
+            else:
+                rows = self._get_optimized_results(
+                    status_filter,
+                    classification_filter,
+                    offset=offset,
+                    limit=self.results_limit,
                 )
-                self.log_action("Results refresh: no database file", "WARN")
-                return
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='fichiers'"
-            )
-            if not cursor.fetchone():
-                conn.close()
-                messagebox.showinfo(
-                    "No Data",
-                    "Database exists but contains no imported files.\n\n"
-                    "Please:\n"
-                    "1. Click 'Browse CSV...' to select a CSV file\n"
-                    "2. The import will happen automatically",
-                    parent=tree.winfo_toplevel(),
-                )
-                self.log_action("Results refresh: table 'fichiers' missing", "WARN")
-                return
-
-            base_query = """
-        FROM fichiers f
-        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-        WHERE 1=1
-        """
-            params: list[Any] = []
-
-            if status_filter != "All":
-                base_query += " AND f.status = ?"
-                params.append(status_filter)
-
-            if classification_filter != "All":
-                base_query += " AND r.security_analysis LIKE ?"
-                params.append(f'%"classification": "{classification_filter}"%')
-
-            if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
-                base_query += (
-                    " AND f.fast_hash IN ("
-                    "SELECT fast_hash FROM fichiers "
-                    "WHERE fast_hash IS NOT NULL AND fast_hash != '' "
-                    "GROUP BY fast_hash HAVING COUNT(*) > 1)"
-                )
-
-            count_query = "SELECT COUNT(*) " + base_query
-            cursor.execute(count_query, params)
-            self.results_total = cursor.fetchone()[0]
-
-            data_query = (
-                "SELECT f.id, f.name, f.host, f.extension, f.username, f.path, f.file_size,"
-                " f.owner, f.creation_time, f.last_modified, f.status,"
-                " r.security_analysis, r.security_confidence,"
-                " r.rgpd_analysis, r.rgpd_confidence,"
-                " r.finance_analysis, r.finance_confidence,"
-                " r.legal_analysis, r.legal_confidence,"
-                " r.document_resume, r.confidence_global, r.processing_time_ms "
-                + base_query
-                + " ORDER BY f.id DESC LIMIT ? OFFSET ?"
-            )
-            cursor.execute(data_query, params + [self.results_limit, offset])
-            rows = cursor.fetchall()
-            conn.close()
+                self.results_cache.put(cache_key, rows)
+            self.results_total = self._get_results_count(status_filter, classification_filter)
 
             for row in rows:
                 (
@@ -2212,42 +2250,14 @@ No need to run analysis to see your files.
                     creation_time,
                     last_modified,
                     status,
-                    security,
-                    sec_conf,
-                    rgpd,
-                    rgpd_conf,
-                    finance,
-                    fin_conf,
-                    legal,
-                    legal_conf,
-                    resume,
+                    security_class,
+                    rgpd_risk,
+                    finance_type,
+                    legal_type,
                     confidence,
                     proc_time,
+                    resume,
                 ) = row
-
-                try:
-                    security_data = json.loads(security) if security else {}
-                    security_class = security_data.get("classification", "N/A")
-                except Exception:
-                    security_class = "N/A"
-
-                try:
-                    rgpd_data = json.loads(rgpd) if rgpd else {}
-                    rgpd_risk = rgpd_data.get("risk_level", "N/A")
-                except Exception:
-                    rgpd_risk = "N/A"
-
-                try:
-                    finance_data = json.loads(finance) if finance else {}
-                    finance_type = finance_data.get("document_type", "N/A")
-                except Exception:
-                    finance_type = "N/A"
-
-                try:
-                    legal_data = json.loads(legal) if legal else {}
-                    legal_type = legal_data.get("contract_type", "N/A")
-                except Exception:
-                    legal_type = "N/A"
 
                 tree.insert(
                     "",
@@ -2265,16 +2275,12 @@ No need to run analysis to see your files.
                         last_modified,
                         status,
                         security_class,
-                        sec_conf or 0,
                         rgpd_risk,
-                        rgpd_conf or 0,
                         finance_type,
-                        fin_conf or 0,
                         legal_type,
-                        legal_conf or 0,
-                        resume or "",
                         confidence or 0,
                         proc_time or 0,
+                        resume or "",
                     ),
                 )
 
