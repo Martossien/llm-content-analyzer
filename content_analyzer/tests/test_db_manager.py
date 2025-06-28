@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+import logging
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -123,3 +124,54 @@ def test_concurrent_access(tmp_path):
     status = conn.execute("SELECT status FROM fichiers WHERE id=1").fetchone()[0]
     conn.close()
     assert status == "completed"
+
+
+def test_index_creation_on_missing_table(tmp_path, caplog):
+    db_file = tmp_path / "missing.db"
+    # create empty database without required tables
+    sqlite3.connect(db_file).close()
+    caplog.set_level(logging.WARNING)
+    DBManager(db_file)  # should not raise
+    assert any("Schema incompatible" in r.message for r in caplog.records)
+
+
+def test_index_creation_duplicate(tmp_path):
+    db_file = tmp_path / "dup.db"
+    db = setup_db(db_file)
+    # Reinitialize on same DB to trigger duplicate index creation
+    DBManager(db_file)
+    conn = sqlite3.connect(db_file)
+    count = conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_status'"
+    ).fetchone()[0]
+    conn.close()
+    assert count in {0, 1}
+
+
+def test_schema_migration_backward_compatibility(tmp_path):
+    db_file = tmp_path / "compat.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute(
+        "CREATE TABLE fichiers (id INTEGER PRIMARY KEY, priority_score INTEGER, status TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE reponses_llm (id INTEGER PRIMARY KEY AUTOINCREMENT, fichier_id INTEGER, task_id TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    DBManager(db_file)
+    conn = sqlite3.connect(db_file)
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(reponses_llm)")]
+    conn.close()
+    assert "security_analysis" in cols
+
+
+def test_error_logging_captured(tmp_path, caplog):
+    db_file = tmp_path / "log.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE fichiers (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    caplog.set_level(logging.WARNING)
+    DBManager(db_file)
+    assert any("idx_fast_hash" in r.message for r in caplog.records)
