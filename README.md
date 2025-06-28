@@ -19,7 +19,7 @@ Legal : Analyse de contrats et documents juridiques
 
 Architecture Modulaire
 
-Cache intelligent : SQLite basé sur FastHash pour éviter les analyses redondantes
+Cache intelligent : SQLite basé sur une clé FastHash+Taille pour éviter les analyses redondantes
 Filtrage avancé : Exclusions configurables et scoring de priorité
 Templates de prompts : Configuration flexible via Jinja2 et YAML
 Interface graphique : GUI complète pour la gestion et le monitoring
@@ -95,7 +95,7 @@ Le module génère une base SQLite avec :
 
 Table fichiers : Métadonnées SMBeagle + état traitement
 Table reponses_llm : Analyses structurées par domaine
-Table cache_prompts : Cache basé sur FastHash
+Table cache_prompts : Cache basé sur une clé FastHash+Taille
 Table metriques : Monitoring performance
 
 Stack technique
@@ -178,7 +178,7 @@ Limitations
 Dépend de la disponibilité de l'API-DOC-IA
 Qualité d'analyse liée à la qualité des prompts et du modèle LLM
 Formats de fichiers limités à ceux supportés par l'API
-Cache basé sur FastHash : modifications mineures non détectées
+Cache basé sur FastHash+Taille : moins de faux positifs mais modifications mineures non détectées
 
 Support
 Les logs détaillés facilitent le diagnostic des problèmes. Les erreurs courantes sont documentées dans la configuration et l'interface GUI fournit des messages d'erreur explicites.

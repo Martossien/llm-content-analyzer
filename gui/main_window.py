@@ -44,6 +44,7 @@ class ResultsCache:
         self.cache.clear()
         self.access_order.clear()
 
+
 from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
 from content_analyzer.modules.csv_parser import CSVParser
@@ -143,7 +144,9 @@ class MainWindow:
 
         # Debouncer for heavy refresh operations
         refresh_delay = 800 if self.is_windows else 300
-        self.results_refresh_debouncer = TkinterDebouncer(self.root, delay_ms=refresh_delay)
+        self.results_refresh_debouncer = TkinterDebouncer(
+            self.root, delay_ms=refresh_delay
+        )
 
         self.prompt_validator = PromptSizeValidator(self.config_path)
         prompt_delay = 1000 if self.is_windows else 500
@@ -1240,7 +1243,9 @@ No need to run analysis to see your files.
         if self._service_update_id:
             self.root.after_cancel(self._service_update_id)
         service_delay = 15000 if self.is_windows else 5000
-        self._service_update_id = self.root.after(service_delay, self.update_service_status)
+        self._service_update_id = self.root.after(
+            service_delay, self.update_service_status
+        )
 
     def get_cache_hit_rate(self) -> float:
         stats = self.service_monitor.check_cache_status()
@@ -1724,7 +1729,7 @@ No need to run analysis to see your files.
             self.show_duplicates_var = tk.BooleanVar(value=False)
             duplicates_check = ttk.Checkbutton(
                 controls_frame,
-                text="Doublons FastHash uniquement",
+                text="Doublons FastHash+Taille",
                 variable=self.show_duplicates_var,
             )
             duplicates_check.pack(side="left", padx=5)
@@ -1952,10 +1957,12 @@ No need to run analysis to see your files.
                         and self.show_duplicates_var.get()
                     ):
                         base_query += (
-                            " AND f.fast_hash IN ("
-                            "SELECT fast_hash FROM fichiers "
-                            "WHERE fast_hash IS NOT NULL AND fast_hash != '' "
-                            "GROUP BY fast_hash HAVING COUNT(*) > 1)"
+                            " AND EXISTS ("
+                            "SELECT 1 FROM fichiers f2 "
+                            "WHERE f2.fast_hash = f.fast_hash "
+                            "AND f2.file_size = f.file_size "
+                            "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
+                            "AND f2.id != f.id)"
                         )
 
                     # Verify file existence with current filters
@@ -2111,7 +2118,6 @@ No need to run analysis to see your files.
                 "<Double-1>", lambda e: self.show_file_details(tree, results_window)
             )
 
-
         except Exception as e:
             messagebox.showerror(
                 "Results Error", f"Failed to open results viewer:\n{str(e)}"
@@ -2158,8 +2164,6 @@ No need to run analysis to see your files.
 
         params: list[Any] = []
 
-
-
         if status_filter != "All":
             base_query += " AND f.status = ?"
             params.append(status_filter)
@@ -2169,7 +2173,14 @@ No need to run analysis to see your files.
             params.append(classification_filter)
 
         if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
-            base_query += " AND f.fast_hash IN (SELECT fast_hash FROM fichiers WHERE fast_hash IS NOT NULL GROUP BY fast_hash HAVING COUNT(*) > 1)"
+            base_query += (
+                " AND EXISTS ("
+                "SELECT 1 FROM fichiers f2 "
+                "WHERE f2.fast_hash = f.fast_hash "
+                "AND f2.file_size = f.file_size "
+                "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
+                "AND f2.id != f.id)"
+            )
 
         base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -2245,7 +2256,9 @@ No need to run analysis to see your files.
                     limit=self.results_limit,
                 )
                 self.results_cache.put(cache_key, rows)
-            self.results_total = self._get_results_count(status_filter, classification_filter)
+            self.results_total = self._get_results_count(
+                status_filter, classification_filter
+            )
 
             self._insert_rows_batch(tree, rows)
 
@@ -2647,7 +2660,7 @@ RAW RESPONSE:
             self.export_duplicates_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(
                 options_frame,
-                text="Doublons FastHash uniquement",
+                text="Doublons FastHash+Taille",
                 variable=self.export_duplicates_var,
             ).pack(anchor="w", padx=5, pady=2)
 
@@ -2722,10 +2735,12 @@ RAW RESPONSE:
 
             if self.export_duplicates_var.get():
                 query += (
-                    " AND f.fast_hash IN ("
-                    "SELECT fast_hash FROM fichiers "
-                    "WHERE fast_hash IS NOT NULL AND fast_hash != '' "
-                    "GROUP BY fast_hash HAVING COUNT(*) > 1)"
+                    " AND EXISTS ("
+                    "SELECT 1 FROM fichiers f2 "
+                    "WHERE f2.fast_hash = f.fast_hash "
+                    "AND f2.file_size = f.file_size "
+                    "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
+                    "AND f2.id != f.id)"
                 )
 
             cursor.execute(query, params)
