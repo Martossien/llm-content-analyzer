@@ -96,6 +96,9 @@ class DBManager:
                 "CREATE INDEX IF NOT EXISTS idx_fast_hash_duplicates ON fichiers(fast_hash) WHERE fast_hash IS NOT NULL AND fast_hash != ''"
             )
             cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_duplicate_detection ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL AND fast_hash != ''"
+            )
+            cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_covering_results ON fichiers(id, name, status, file_size, last_modified, path) WHERE status IN ('completed', 'error')"
             )
         except sqlite3.OperationalError:
