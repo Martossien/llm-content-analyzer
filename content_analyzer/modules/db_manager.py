@@ -42,119 +42,193 @@ class DBManager:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
+    def _validate_table_existence(
+        self, conn: sqlite3.Connection, required_tables: List[str]
+    ) -> Dict[str, bool]:
+        """Check that required tables exist and log warnings if not."""
+        cursor = conn.cursor()
+        existing: Dict[str, bool] = {}
+        for table in required_tables:
+            try:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                )
+                exists = cursor.fetchone() is not None
+                existing[table] = exists
+                if not exists:
+                    logger.warning("Table manquante: %s", table)
+            except sqlite3.Error as exc:
+                logger.error("Erreur validation table %s: %s", table, exc)
+                existing[table] = False
+        return existing
+
+    def _create_index_safely(
+        self, conn: sqlite3.Connection, index_sql: str, index_name: str
+    ) -> bool:
+        """Create an index and log issues without raising by default."""
+        try:
+            conn.execute(index_sql)
+            logger.debug("Index créé avec succès: %s", index_name)
+            return True
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "already exists" in msg:
+                logger.debug("Index déjà existant (ignoré): %s", index_name)
+                return True
+            if "no such table" in msg or "no such column" in msg:
+                logger.warning("Schema incompatible pour index %s: %s", index_name, exc)
+                return False
+            logger.error(
+                "Erreur inattendue lors création index %s: %s", index_name, exc
+            )
+            return False
+
+    def _ensure_indexes_with_validation(self, conn: sqlite3.Connection) -> None:
+        """Create indexes with validation of schema compatibility."""
+
+        # Validate existence of base tables
+        self._validate_table_existence(conn, ["fichiers", "reponses_llm"])
+
+        # Basic indexes expected to succeed on minimal schema
+        critical_indexes = [
+            (
+                "CREATE INDEX IF NOT EXISTS idx_status ON fichiers(status)",
+                "idx_status",
+            ),
+        ]
+
+        performance_indexes = [
+            (
+                "CREATE INDEX IF NOT EXISTS idx_gui_status_priority ON fichiers(status, priority_score DESC, id DESC)",
+                "idx_gui_status_priority",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_gui_classification_filter ON reponses_llm(security_classification_cached, confidence_global DESC)",
+                "idx_gui_classification_filter",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_gui_composite_main ON fichiers(status, last_modified DESC, id DESC)",
+                "idx_gui_composite_main",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_fast_hash_duplicates ON fichiers(fast_hash) WHERE fast_hash IS NOT NULL AND fast_hash != ''",
+                "idx_fast_hash_duplicates",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_duplicate_detection ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL AND fast_hash != ''",
+                "idx_duplicate_detection",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_covering_results ON fichiers(id, name, status, file_size, last_modified, path) WHERE status IN ('completed', 'error')",
+                "idx_covering_results",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_security_class_cached ON reponses_llm(security_classification_cached)",
+                "idx_security_class_cached",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_rgpd_risk_cached ON reponses_llm(rgpd_risk_cached)",
+                "idx_rgpd_risk_cached",
+            ),
+        ]
+
+        for sql, name in critical_indexes:
+            self._create_index_safely(conn, sql, name)
+
+        for sql, name in performance_indexes:
+            self._create_index_safely(conn, sql, name)
+
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reponses_llm (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fichier_id INTEGER REFERENCES fichiers(id),
-                task_id TEXT NOT NULL,
-                security_analysis TEXT,
-                rgpd_analysis TEXT,
-                finance_analysis TEXT,
-                legal_analysis TEXT,
-                confidence_global INTEGER,
-                processing_time_ms INTEGER,
-                api_tokens_used INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_fichier_id ON reponses_llm(fichier_id)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_task_id ON reponses_llm(task_id)"
-        )
-        cursor.execute("PRAGMA table_info(reponses_llm)")
-        existing_cols = [row[1] for row in cursor.fetchall()]
-        expected = {
-            "security_analysis": "TEXT",
-            "rgpd_analysis": "TEXT",
-            "finance_analysis": "TEXT",
-            "legal_analysis": "TEXT",
-            "confidence_global": "INTEGER",
-            "security_confidence": "INTEGER DEFAULT 0",
-            "rgpd_confidence": "INTEGER DEFAULT 0",
-            "finance_confidence": "INTEGER DEFAULT 0",
-            "legal_confidence": "INTEGER DEFAULT 0",
-            "processing_time_ms": "INTEGER",
-            "api_tokens_used": "INTEGER",
-            "created_at": "TIMESTAMP",
-            "document_resume": "TEXT",
-            "llm_response_complete": "TEXT",
-            "security_classification_cached": "TEXT",
-            "rgpd_risk_cached": "TEXT",
-            "finance_type_cached": "TEXT",
-            "legal_type_cached": "TEXT",
-        }
-        for col, col_type in expected.items():
-            if col not in existing_cols:
-                cursor.execute(f"ALTER TABLE reponses_llm ADD COLUMN {col} {col_type}")
 
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_confidence ON reponses_llm(confidence_global DESC)"
-        )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reponses_llm (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fichier_id INTEGER REFERENCES fichiers(id),
+                    task_id TEXT NOT NULL,
+                    security_analysis TEXT,
+                    rgpd_analysis TEXT,
+                    finance_analysis TEXT,
+                    legal_analysis TEXT,
+                    confidence_global INTEGER,
+                    processing_time_ms INTEGER,
+                    api_tokens_used INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fichier_id ON reponses_llm(fichier_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_id ON reponses_llm(task_id)"
+            )
+            cursor.execute("PRAGMA table_info(reponses_llm)")
+            existing_cols = [row[1] for row in cursor.fetchall()]
+            expected = {
+                "security_analysis": "TEXT",
+                "rgpd_analysis": "TEXT",
+                "finance_analysis": "TEXT",
+                "legal_analysis": "TEXT",
+                "confidence_global": "INTEGER",
+                "security_confidence": "INTEGER DEFAULT 0",
+                "rgpd_confidence": "INTEGER DEFAULT 0",
+                "finance_confidence": "INTEGER DEFAULT 0",
+                "legal_confidence": "INTEGER DEFAULT 0",
+                "processing_time_ms": "INTEGER",
+                "api_tokens_used": "INTEGER",
+                "created_at": "TIMESTAMP",
+                "document_resume": "TEXT",
+                "llm_response_complete": "TEXT",
+                "security_classification_cached": "TEXT",
+                "rgpd_risk_cached": "TEXT",
+                "finance_type_cached": "TEXT",
+                "legal_type_cached": "TEXT",
+            }
+            for col, col_type in expected.items():
+                if col not in existing_cols:
+                    cursor.execute(
+                        f"ALTER TABLE reponses_llm ADD COLUMN {col} {col_type}"
+                    )
 
-        # Specialized indexes for GUI filtering performance
-        try:
             cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gui_status_priority ON fichiers(status, priority_score DESC, id DESC)"
+                "CREATE INDEX IF NOT EXISTS idx_confidence ON reponses_llm(confidence_global DESC)"
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gui_classification_filter ON reponses_llm(security_classification_cached, confidence_global DESC)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_gui_composite_main ON fichiers(status, last_modified DESC, id DESC)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_fast_hash_duplicates ON fichiers(fast_hash) WHERE fast_hash IS NOT NULL AND fast_hash != ''"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_duplicate_detection ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL AND fast_hash != ''"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_covering_results ON fichiers(id, name, status, file_size, last_modified, path) WHERE status IN ('completed', 'error')"
-            )
-        except sqlite3.OperationalError:
-            # Table may not have all columns in minimal test schema
-            pass
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_security_class_cached ON reponses_llm(security_classification_cached)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_rgpd_risk_cached ON reponses_llm(rgpd_risk_cached)"
-        )
 
-        cursor.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trigger_denormalize_security
-                AFTER INSERT ON reponses_llm
-                BEGIN
-                    UPDATE reponses_llm
-                    SET security_classification_cached = json_extract(security_analysis, '$.classification'),
-                        rgpd_risk_cached = json_extract(rgpd_analysis, '$.risk_level'),
-                        finance_type_cached = json_extract(finance_analysis, '$.document_type'),
-                        legal_type_cached = json_extract(legal_analysis, '$.contract_type')
-                    WHERE id = NEW.id;
-                END;
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metriques_performance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                files_processed INTEGER,
-                avg_processing_time REAL,
-                cache_hit_rate REAL,
-                api_success_rate REAL,
-                memory_usage_mb INTEGER
+            # Create remaining indexes with validation helpers
+            self._ensure_indexes_with_validation(conn)
+
+            cursor.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trigger_denormalize_security
+                    AFTER INSERT ON reponses_llm
+                    BEGIN
+                        UPDATE reponses_llm
+                        SET security_classification_cached = json_extract(security_analysis, '$.classification'),
+                            rgpd_risk_cached = json_extract(rgpd_analysis, '$.risk_level'),
+                            finance_type_cached = json_extract(finance_analysis, '$.document_type'),
+                            legal_type_cached = json_extract(legal_analysis, '$.contract_type')
+                        WHERE id = NEW.id;
+                    END;
+                """
             )
-            """
-        )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metriques_performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    files_processed INTEGER,
+                    avg_processing_time REAL,
+                    cache_hit_rate REAL,
+                    api_success_rate REAL,
+                    memory_usage_mb INTEGER
+                )
+                """
+            )
+
             conn.commit()
 
     def store_analysis_result(
