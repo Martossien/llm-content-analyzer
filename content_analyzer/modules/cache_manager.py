@@ -5,27 +5,42 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import threading
 
-from content_analyzer.utils import create_enhanced_duplicate_key
+from content_analyzer.utils import (
+    create_enhanced_duplicate_key,
+    SQLiteConnectionPool,
+)
 
 
 class CacheManager:
     """Cache SQLite intelligent basé sur FastHash."""
 
     def __init__(
-        self, db_path: Path, ttl_hours: int = 168, max_size_mb: int = 1024
+        self,
+        db_path: Path,
+        ttl_hours: int = 168,
+        max_size_mb: int = 1024,
+        pool_size: int = 5,
     ) -> None:
         self.db_path = db_path
         self.ttl_hours = ttl_hours
         self.max_size_mb = max_size_mb
         self._lock = threading.RLock()
+        self._pool = SQLiteConnectionPool(db_path, pool_size)
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+    def __del__(self) -> None:
+        if hasattr(self, "_pool"):
+            self._pool.close()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _connection(self) -> "sqlite3.Connection":
+        with self._pool.get() as conn:
+            yield conn
 
     def _ensure_schema(self) -> None:
-        with self._lock:
-            conn = self._connect()
+        with self._lock, self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -56,15 +71,13 @@ class CacheManager:
                     )
 
             conn.commit()
-            conn.close()
 
     def get_cached_result(
         self, fast_hash: str, prompt_hash: str, file_size: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
-        with self._lock:
+        with self._lock, self._connection() as conn:
             enhanced = create_enhanced_duplicate_key(fast_hash, file_size)
             key = f"{enhanced}_{prompt_hash}"
-            conn = self._connect()
             cursor = conn.cursor()
             row = cursor.execute(
                 "SELECT response_content, document_resume, raw_llm_response, hits_count, ttl_expiry FROM cache_prompts WHERE cache_key = ?",
@@ -108,7 +121,6 @@ class CacheManager:
                             "raw_response": row[2] or "",
                         }
 
-            conn.close()
             return result
 
     def store_result(
@@ -120,11 +132,10 @@ class CacheManager:
         raw_llm_response: str = "",
         file_size: Optional[int] = None,
     ) -> None:
-        with self._lock:
+        with self._lock, self._connection() as conn:
             enhanced = create_enhanced_duplicate_key(fast_hash, file_size)
             key = f"{enhanced}_{prompt_hash}"
             expiry = time.time() + self.ttl_hours * 3600
-            conn = self._connect()
             conn.execute(
                 """
                 INSERT OR REPLACE INTO cache_prompts (
@@ -148,12 +159,10 @@ class CacheManager:
                 ),
             )
             conn.commit()
-            conn.close()
 
     def cleanup_expired(self) -> int:
-        with self._lock:
+        with self._lock, self._connection() as conn:
             now = time.time()
-            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute(
                 "DELETE FROM cache_prompts WHERE ttl_expiry IS NOT NULL AND ttl_expiry <= ?",
@@ -161,12 +170,11 @@ class CacheManager:
             )
             deleted = cursor.rowcount
             conn.commit()
-            conn.close()
             return deleted
 
     def cleanup_expired_and_oversized(self) -> Dict[str, int]:
         """Nettoie les entrées expirées et si la taille dépasse la limite."""
-        with self._lock:
+        with self._lock, self._connection() as conn:
             stats = {"expired_deleted": 0, "oversized_deleted": 0}
             stats["expired_deleted"] = self.cleanup_expired()
 
@@ -174,7 +182,6 @@ class CacheManager:
             if size_mb <= self.max_size_mb:
                 return stats
 
-            conn = self._connect()
             cursor = conn.cursor()
             to_remove = size_mb - self.max_size_mb
             cursor.execute(
@@ -191,7 +198,6 @@ class CacheManager:
                 cursor.execute("DELETE FROM cache_prompts WHERE cache_key = ?", (key,))
             stats["oversized_deleted"] = len(keys_to_delete)
             conn.commit()
-            conn.close()
             return stats
 
     def schedule_automatic_cleanup(self) -> None:
@@ -207,8 +213,7 @@ class CacheManager:
         Timer(24 * 3600, _cleanup).start()
 
     def get_stats(self) -> Dict[str, Any]:
-        with self._lock:
-            conn = self._connect()
+        with self._lock, self._connection() as conn:
             cursor = conn.cursor()
             total = cursor.execute("SELECT COUNT(*) FROM cache_prompts").fetchone()[0]
             hits = (
@@ -219,7 +224,6 @@ class CacheManager:
                 "SELECT MIN(created_at) FROM cache_prompts"
             ).fetchone()[0]
             size_bytes = Path(self.db_path).stat().st_size
-            conn.close()
             hit_rate = 0.0
             if hits and total:
                 hit_rate = (hits - total) / hits * 100

@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 import threading
 import logging
 
+from content_analyzer.utils import SQLiteConnectionManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,14 +22,12 @@ class DBManager:
         except Exception as exc:  # pragma: no cover - maintenance issues
             logger.warning("Failed to schedule DB maintenance: %s", exc)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        self._optimize_connection(conn)
-        return conn
+    def _connect(self) -> SQLiteConnectionManager:
+        return SQLiteConnectionManager(self.db_path, check_same_thread=False)
 
     def _ensure_schema(self) -> None:
-        conn = self._connect()
-        cursor = conn.cursor()
+        with self._connect() as conn:
+            cursor = conn.cursor()
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS reponses_llm (
@@ -138,8 +138,7 @@ class DBManager:
             )
             """
         )
-        conn.commit()
-        conn.close()
+            conn.commit()
 
     def store_analysis_result(
         self,
@@ -149,21 +148,19 @@ class DBManager:
         document_resume: str,
         llm_response_complete: str,
     ) -> None:
-        conn = self._connect()
-
-        if "confidence_global" not in llm_response:
-            confs = [
-                llm_response.get("security_confidence", 0),
-                llm_response.get("rgpd_confidence", 0),
-                llm_response.get("finance_confidence", 0),
-                llm_response.get("legal_confidence", 0),
-            ]
-            valid = [c for c in confs if c]
-            llm_response["confidence_global"] = int(sum(valid) / len(valid)) if valid else 0
-
-        conn.execute(
-            """
-            INSERT INTO reponses_llm (
+        with self._connect() as conn:
+            if "confidence_global" not in llm_response:
+                confs = [
+                    llm_response.get("security_confidence", 0),
+                    llm_response.get("rgpd_confidence", 0),
+                    llm_response.get("finance_confidence", 0),
+                    llm_response.get("legal_confidence", 0),
+                ]
+                valid = [c for c in confs if c]
+                llm_response["confidence_global"] = int(sum(valid) / len(valid)) if valid else 0
+            conn.execute(
+                """
+                INSERT INTO reponses_llm (
                 fichier_id, task_id, security_analysis, rgpd_analysis,
                 finance_analysis, legal_analysis,
                 confidence_global, security_confidence, rgpd_confidence,
@@ -190,8 +187,7 @@ class DBManager:
                 llm_response_complete,
             ),
         )
-        conn.commit()
-        conn.close()
+            conn.commit()
 
     def get_pending_files(
         self,
@@ -206,43 +202,41 @@ class DBManager:
             priority_threshold: Minimum priority score required.
             offset: Row offset for pagination.
         """
-        conn = self._connect()
-        cursor = conn.cursor()
-        query = (
-            "SELECT * FROM fichiers\n"
-            "WHERE status = 'pending' AND priority_score >= ?\n"
-            "ORDER BY priority_score DESC"
-        )
-        params = [priority_threshold]
-        if limit is not None and limit > 0:
-            query += " LIMIT ?"
-            params.append(limit)
-        if offset > 0:
-            if "LIMIT" not in query:
-                query += " LIMIT -1"
-            query += " OFFSET ?"
-            params.append(offset)
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            query = (
+                "SELECT * FROM fichiers\n"
+                "WHERE status = 'pending' AND priority_score >= ?\n"
+                "ORDER BY priority_score DESC"
+            )
+            params = [priority_threshold]
+            if limit is not None and limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
+            if offset > 0:
+                if "LIMIT" not in query:
+                    query += " LIMIT -1"
+                query += " OFFSET ?"
+                params.append(offset)
 
-        rows = cursor.execute(query, params).fetchall()
-        columns = [desc[0] for desc in cursor.description]
-        conn.close()
-        return [dict(zip(columns, row)) for row in rows]
+            rows = cursor.execute(query, params).fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
 
     def update_file_status(
         self, file_id: int, status: str, error_message: Optional[str] = None
     ) -> None:
-        conn = self._connect()
-        conn.execute(
-            "UPDATE fichiers SET status = ?, exclusion_reason = ? WHERE id = ?",
-            (status, error_message, file_id),
-        )
-        conn.commit()
-        conn.close()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE fichiers SET status = ?, exclusion_reason = ? WHERE id = ?",
+                (status, error_message, file_id),
+            )
+            conn.commit()
 
     def get_processing_stats(self) -> Dict[str, Any]:
-        conn = self._connect()
-        cursor = conn.cursor()
-        total = cursor.execute("SELECT COUNT(*) FROM fichiers").fetchone()[0]
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            total = cursor.execute("SELECT COUNT(*) FROM fichiers").fetchone()[0]
         pending = cursor.execute(
             "SELECT COUNT(*) FROM fichiers WHERE status = 'pending'"
         ).fetchone()[0]
@@ -255,18 +249,17 @@ class DBManager:
         errors = cursor.execute(
             "SELECT COUNT(*) FROM fichiers WHERE status = 'error'"
         ).fetchone()[0]
-        avg_time_row = cursor.execute(
-            "SELECT AVG(processing_time_ms) FROM reponses_llm"
-        ).fetchone()[0]
-        conn.close()
-        return {
-            "total_files": total,
-            "pending": pending,
-            "processing": processing,
-            "completed": completed,
-            "errors": errors,
-            "avg_processing_time": float(avg_time_row or 0.0),
-        }
+            avg_time_row = cursor.execute(
+                "SELECT AVG(processing_time_ms) FROM reponses_llm"
+            ).fetchone()[0]
+            return {
+                "total_files": total,
+                "pending": pending,
+                "processing": processing,
+                "completed": completed,
+                "errors": errors,
+                "avg_processing_time": float(avg_time_row or 0.0),
+            }
 
     # ------------------------------------------------------------------
     # Performance optimization helpers
@@ -292,18 +285,17 @@ class DBManager:
 
     def optimize_database_performance(self) -> Dict[str, Any]:
         """Run periodic maintenance and return basic stats."""
-        conn = self._connect()
-        conn.execute("ANALYZE")
-        conn.execute("PRAGMA optimize")
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        stats = {
-            "cache_hit_rate": conn.execute("PRAGMA cache_spill").fetchone()[0],
-            "wal_size_mb": Path(f"{self.db_path}-wal").stat().st_size / 1024 / 1024
-            if Path(f"{self.db_path}-wal").exists()
-            else 0,
-        }
-        conn.close()
-        return stats
+        with self._connect() as conn:
+            conn.execute("ANALYZE")
+            conn.execute("PRAGMA optimize")
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            stats = {
+                "cache_hit_rate": conn.execute("PRAGMA cache_spill").fetchone()[0],
+                "wal_size_mb": Path(f"{self.db_path}-wal").stat().st_size / 1024 / 1024
+                if Path(f"{self.db_path}-wal").exists()
+                else 0,
+            }
+            return stats
 
     def schedule_maintenance(self) -> None:
         """Schedule hourly optimization in a background thread."""
