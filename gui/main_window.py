@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import sys
 
 import pandas as pd
 import yaml
@@ -104,6 +105,9 @@ class MainWindow:
         self.root.minsize(1200, 800)
         self._center_window(1200, 800)
 
+        self.is_windows = sys.platform == "win32"
+        self.platform_multiplier = 2.5 if self.is_windows else 1.0
+
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
         self.gui_logger = logging.getLogger("gui")
@@ -138,10 +142,12 @@ class MainWindow:
         self._service_update_id: str | None = None
 
         # Debouncer for heavy refresh operations
-        self.results_refresh_debouncer = TkinterDebouncer(self.root, delay_ms=300)
+        refresh_delay = 800 if self.is_windows else 300
+        self.results_refresh_debouncer = TkinterDebouncer(self.root, delay_ms=refresh_delay)
 
         self.prompt_validator = PromptSizeValidator(self.config_path)
-        self.prompt_debouncer = TkinterDebouncer(self.root, delay_ms=500)
+        prompt_delay = 1000 if self.is_windows else 500
+        self.prompt_debouncer = TkinterDebouncer(self.root, delay_ms=prompt_delay)
 
         self.build_ui()
         self.load_api_configuration()
@@ -563,7 +569,7 @@ No need to run analysis to see your files.
                 self.file_path_label.config(
                     text="Importing CSV...", background="orange"
                 )
-                self.root.update()
+                self.root.update_idletasks()
 
                 output_db = Path("analysis_results.db")
                 import_result = parser.parse_csv_optimized(
@@ -654,7 +660,7 @@ No need to run analysis to see your files.
             messagebox.showerror("Error", "Please enter API URL", parent=self.root)
             return
         self.test_api_button.config(state="disabled", text="Testing...")
-        self.root.update()
+        self.root.update_idletasks()
         try:
             start_time = time.time()
             temp_config = {
@@ -1159,7 +1165,8 @@ No need to run analysis to see your files.
         finally:
             if self._logs_update_id:
                 self.root.after_cancel(self._logs_update_id)
-            self._logs_update_id = self.root.after(3000, self.update_logs_display)
+            logs_delay = 8000 if self.is_windows else 3000
+            self._logs_update_id = self.root.after(logs_delay, self.update_logs_display)
 
     def parse_log_level(self, line: str) -> str:
         if " [INFO] " in line:
@@ -1232,7 +1239,8 @@ No need to run analysis to see your files.
 
         if self._service_update_id:
             self.root.after_cancel(self._service_update_id)
-        self._service_update_id = self.root.after(5000, self.update_service_status)
+        service_delay = 15000 if self.is_windows else 5000
+        self._service_update_id = self.root.after(service_delay, self.update_service_status)
 
     def get_cache_hit_rate(self) -> float:
         stats = self.service_monitor.check_cache_status()
@@ -2128,6 +2136,8 @@ No need to run analysis to see your files.
         offset: int = 0,
         limit: int = 1000,
     ) -> list[tuple]:
+        if self.is_windows and limit > 500:
+            limit = 500
         db_path = Path("analysis_results.db")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -2237,6 +2247,22 @@ No need to run analysis to see your files.
                 self.results_cache.put(cache_key, rows)
             self.results_total = self._get_results_count(status_filter, classification_filter)
 
+            self._insert_rows_batch(tree, rows)
+
+            self.log_action(f"Results table refreshed: {len(rows)} entries", "INFO")
+
+            # Update pagination controls now that results_total is known
+            self._update_page_controls(page_label, prev_btn, next_btn)
+
+        except Exception as e:
+            messagebox.showerror(
+                "Refresh Error", f"Failed to refresh results:\n{str(e)}"
+            )
+            self.log_action(f"Results refresh failed: {str(e)}", "ERROR")
+
+    def _insert_rows_batch(self, tree, rows) -> None:
+        """Insert rows into the tree view with optional batching on Windows."""
+        if not self.is_windows:
             for row in rows:
                 (
                     file_id,
@@ -2283,17 +2309,62 @@ No need to run analysis to see your files.
                         resume or "",
                     ),
                 )
+            return
 
-            self.log_action(f"Results table refreshed: {len(rows)} entries", "INFO")
+        batch_size = 25
 
-            # Update pagination controls now that results_total is known
-            self._update_page_controls(page_label, prev_btn, next_btn)
+        def insert_batch(start: int = 0) -> None:
+            end = min(start + batch_size, len(rows))
+            for i in range(start, end):
+                (
+                    file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    path,
+                    size,
+                    owner,
+                    creation_time,
+                    last_modified,
+                    status,
+                    security_class,
+                    rgpd_risk,
+                    finance_type,
+                    legal_type,
+                    confidence,
+                    proc_time,
+                    resume,
+                ) = rows[i]
 
-        except Exception as e:
-            messagebox.showerror(
-                "Refresh Error", f"Failed to refresh results:\n{str(e)}"
-            )
-            self.log_action(f"Results refresh failed: {str(e)}", "ERROR")
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        file_id,
+                        name,
+                        host,
+                        extension,
+                        username,
+                        path[-50:] + "..." if len(path) > 50 else path,
+                        size,
+                        owner,
+                        creation_time,
+                        last_modified,
+                        status,
+                        security_class,
+                        rgpd_risk,
+                        finance_type,
+                        legal_type,
+                        confidence or 0,
+                        proc_time or 0,
+                        resume or "",
+                    ),
+                )
+            if end < len(rows):
+                self.root.after(5, lambda: insert_batch(end))
+
+        insert_batch()
 
     def show_file_details(self, tree, parent_window: tk.Toplevel | tk.Tk | None = None):
         """Affiche les détails complets d'un fichier sélectionné."""
