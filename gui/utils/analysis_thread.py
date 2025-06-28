@@ -40,47 +40,46 @@ class AnalysisThread(threading.Thread):
 
     def run(self) -> None:
         try:
-            analyzer = ContentAnalyzer(self.config_path)
-            parse_res = analyzer.csv_parser.parse_csv(self.csv_file, self.output_db)
-            db_mgr = DBManager(self.output_db)
-            files = db_mgr.get_pending_files(limit=None)
-            total = len(files)
-            processed = 0
-            for row in files:
-                if self.should_stop:
-                    break
-                while self.is_paused and not self.should_stop:
-                    time.sleep(0.5)
-                self.current_file = row.get("path")
-                single_res = analyzer.analyze_single_file(row)
-                if single_res.get("status") in {"completed", "cached"}:
-                    llm_data = single_res.get("result", {})
-                    llm_data["processing_time_ms"] = single_res.get(
-                        "processing_time_ms", 0
-                    )
-                    db_mgr.store_analysis_result(
-                        row["id"],
-                        single_res.get("task_id", ""),
-                        llm_data,
-                        single_res.get("resume", ""),
-                        single_res.get("raw_response", ""),
-                    )
-                    db_mgr.update_file_status(row["id"], "completed")
-                else:
-                    db_mgr.update_file_status(
-                        row["id"], "error", single_res.get("error")
-                    )
-                processed += 1
-                if self.progress_callback:
-                    self.progress_callback(
-                        {
-                            "current_file": self.current_file,
-                            "processed": processed,
-                            "total": total,
-                        }
-                    )
-                if self.should_stop:
-                    break
+            with ContentAnalyzer(self.config_path) as analyzer, DBManager(self.output_db) as db_mgr:
+                parse_res = analyzer.csv_parser.parse_csv(self.csv_file, self.output_db)
+                files = db_mgr.get_pending_files(limit=None)
+                total = len(files)
+                processed = 0
+                for row in files:
+                    if self.should_stop:
+                        break
+                    while self.is_paused and not self.should_stop:
+                        time.sleep(0.5)
+                    self.current_file = row.get("path")
+                    single_res = analyzer.analyze_single_file(row)
+                    if single_res.get("status") in {"completed", "cached"}:
+                        llm_data = single_res.get("result", {})
+                        llm_data["processing_time_ms"] = single_res.get(
+                            "processing_time_ms", 0
+                        )
+                        db_mgr.store_analysis_result(
+                            row["id"],
+                            single_res.get("task_id", ""),
+                            llm_data,
+                            single_res.get("resume", ""),
+                            single_res.get("raw_response", ""),
+                        )
+                        db_mgr.update_file_status(row["id"], "completed")
+                    else:
+                        db_mgr.update_file_status(
+                            row["id"], "error", single_res.get("error")
+                        )
+                    processed += 1
+                    if self.progress_callback:
+                        self.progress_callback(
+                            {
+                                "current_file": self.current_file,
+                                "processed": processed,
+                                "total": total,
+                            }
+                        )
+                    if self.should_stop:
+                        break
             result = {
                 "status": "completed" if not self.should_stop else "stopped",
                 "files_processed": processed,

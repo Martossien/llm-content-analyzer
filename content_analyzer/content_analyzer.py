@@ -58,6 +58,25 @@ class ContentAnalyzer:
         self.api_client = APIClient(self.config)
         self.db_manager = DBManager(Path("analysis_results.db"))
         self.prompt_manager = PromptManager(self.config_path)
+        self._closed = False
+
+    def close(self) -> None:
+        """Close underlying managers."""
+        if self._closed:
+            return
+        self.cache_manager.close()
+        self.api_client.close()
+        self.db_manager.close()
+        self._closed = True
+
+    def __enter__(self) -> "ContentAnalyzer":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
 
     def _format_file_size(self, size: int) -> str:
         units = ["B", "KB", "MB", "GB", "TB"]

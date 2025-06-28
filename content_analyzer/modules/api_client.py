@@ -17,6 +17,10 @@ class APIClient:
         self.token = config["api_config"].get("token")
         self.timeout = config["api_config"].get("timeout_seconds", 300)
         self.session = requests.Session()
+        self._closed = False
+
+    def __del__(self) -> None:
+        self.close()
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
@@ -71,3 +75,15 @@ class APIClient:
         except requests.RequestException as exc:
             logger.warning("Health check failed: %s", exc)
             return False
+
+    def close(self) -> None:
+        """Close underlying HTTP session."""
+        if not self._closed:
+            self.session.close()
+            self._closed = True
+
+    def __enter__(self) -> "APIClient":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
