@@ -1959,10 +1959,11 @@ No need to run analysis to see your files.
                         base_query += (
                             " AND EXISTS ("
                             "SELECT 1 FROM fichiers f2 "
-                            "WHERE f2.fast_hash = f.fast_hash "
-                            "AND f2.file_size = f.file_size "
+                            "WHERE f.fast_hash = f2.fast_hash "
+                            "AND f.file_size = f2.file_size "
+                            "AND f.fast_hash IS NOT NULL AND f.fast_hash != '' "
                             "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
-                            "AND f2.id != f.id)"
+                            "AND f.id != f2.id)"
                         )
 
                     # Verify file existence with current filters
@@ -2176,10 +2177,11 @@ No need to run analysis to see your files.
             base_query += (
                 " AND EXISTS ("
                 "SELECT 1 FROM fichiers f2 "
-                "WHERE f2.fast_hash = f.fast_hash "
-                "AND f2.file_size = f.file_size "
+                "WHERE f.fast_hash = f2.fast_hash "
+                "AND f.file_size = f2.file_size "
+                "AND f.fast_hash IS NOT NULL AND f.fast_hash != '' "
                 "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
-                "AND f2.id != f.id)"
+                "AND f.id != f2.id)"
             )
 
         base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
@@ -2737,10 +2739,11 @@ RAW RESPONSE:
                 query += (
                     " AND EXISTS ("
                     "SELECT 1 FROM fichiers f2 "
-                    "WHERE f2.fast_hash = f.fast_hash "
-                    "AND f2.file_size = f.file_size "
+                    "WHERE f.fast_hash = f2.fast_hash "
+                    "AND f.file_size = f2.file_size "
+                    "AND f.fast_hash IS NOT NULL AND f.fast_hash != '' "
                     "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
-                    "AND f2.id != f.id)"
+                    "AND f.id != f2.id)"
                 )
 
             cursor.execute(query, params)
