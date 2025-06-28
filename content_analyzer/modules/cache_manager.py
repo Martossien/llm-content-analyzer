@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from content_analyzer.utils import create_enhanced_duplicate_key
+
 
 class CacheManager:
     """Cache SQLite intelligent basé sur FastHash."""
@@ -52,9 +54,10 @@ class CacheManager:
         conn.close()
 
     def get_cached_result(
-        self, fast_hash: str, prompt_hash: str
+        self, fast_hash: str, prompt_hash: str, file_size: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
-        key = f"{fast_hash}_{prompt_hash}"
+        enhanced = create_enhanced_duplicate_key(fast_hash, file_size)
+        key = f"{enhanced}_{prompt_hash}"
         conn = self._connect()
         cursor = conn.cursor()
         row = cursor.execute(
@@ -78,6 +81,27 @@ class CacheManager:
                     "resume": row[1] or "",
                     "raw_response": row[2] or "",
                 }
+        if row is None and file_size is not None:
+            legacy_key = f"{fast_hash}_{prompt_hash}"
+            row = cursor.execute(
+                "SELECT response_content, document_resume, raw_llm_response, hits_count, ttl_expiry FROM cache_prompts WHERE cache_key = ?",
+                (legacy_key,),
+            ).fetchone()
+            key = legacy_key if row else key
+            if row:
+                expiry = row[4]
+                if not (expiry and time.time() > float(expiry)):
+                    conn.execute(
+                        "UPDATE cache_prompts SET hits_count = hits_count + 1 WHERE cache_key = ?",
+                        (legacy_key,),
+                    )
+                    conn.commit()
+                    result = {
+                        "analysis_data": json.loads(row[0]),
+                        "resume": row[1] or "",
+                        "raw_response": row[2] or "",
+                    }
+
         conn.close()
         return result
 
@@ -88,8 +112,10 @@ class CacheManager:
         result: Dict[str, Any],
         document_resume: str = "",
         raw_llm_response: str = "",
+        file_size: Optional[int] = None,
     ) -> None:
-        key = f"{fast_hash}_{prompt_hash}"
+        enhanced = create_enhanced_duplicate_key(fast_hash, file_size)
+        key = f"{enhanced}_{prompt_hash}"
         expiry = time.time() + self.ttl_hours * 3600
         conn = self._connect()
         conn.execute(
@@ -109,7 +135,7 @@ class CacheManager:
                 prompt_hash,
                 json.dumps(result),
                 expiry,
-                result.get("file_size"),
+                file_size if file_size is not None else result.get("file_size"),
                 document_resume,
                 raw_llm_response,
             ),

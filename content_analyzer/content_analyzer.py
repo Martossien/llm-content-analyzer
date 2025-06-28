@@ -68,7 +68,9 @@ class ContentAnalyzer:
             value /= 1024
         return f"{value:.1f}PB"
 
-    def _extract_domain_confidences(self, llm_response: Dict[str, Any]) -> Dict[str, int]:
+    def _extract_domain_confidences(
+        self, llm_response: Dict[str, Any]
+    ) -> Dict[str, int]:
         """Return confidence per domain from LLM response."""
         confidences: Dict[str, int] = {}
         for domain in ["security", "rgpd", "finance", "legal"]:
@@ -239,6 +241,7 @@ class ContentAnalyzer:
                 cached = self.cache_manager.get_cached_result(
                     file_row.get("fast_hash", ""),
                     "default_prompt_hash",
+                    file_row.get("file_size"),
                 )
             if cached:
                 return {
@@ -278,6 +281,7 @@ class ContentAnalyzer:
                     parsed_result.get("result", {}),
                     parsed_result.get("resume", ""),
                     parsed_result.get("raw_response", ""),
+                    file_row.get("file_size"),
                 )
 
             return {
