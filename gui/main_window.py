@@ -156,10 +156,9 @@ class MainWindow:
         self.load_api_configuration()
         self.load_exclusions()
         self.load_templates()
-        self.template_combobox.bind(
-            "<<ComboboxSelected>>", lambda e: self.update_prompt_info()
-        )
+        self.template_combobox.bind("<<ComboboxSelected>>", self._on_template_selected)
         self.update_prompt_info()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.setup_log_viewer()
 
         self.update_service_status()
@@ -1049,6 +1048,9 @@ No need to run analysis to see your files.
 
     def save_template(self) -> None:
         messagebox.showinfo("Save Template", "Template saved.")
+
+    def _on_template_selected(self, _event: tk.Event) -> None:
+        self.update_prompt_info()
 
     def update_prompt_info(self) -> None:
         """Update prompt size info with debouncing in the main thread."""
@@ -3615,5 +3617,27 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
     def __del__(self) -> None:
         """Cleanup scheduled callbacks on destruction."""
+        try:
+            self.on_close()
+        except Exception:
+            pass
+
+    def on_close(self) -> None:
+        """Handle window close and cancel callbacks."""
+        if self._logs_update_id:
+            try:
+                self.root.after_cancel(self._logs_update_id)
+            except Exception:
+                pass
+            self._logs_update_id = None
+        if self._service_update_id:
+            try:
+                self.root.after_cancel(self._service_update_id)
+            except Exception:
+                pass
+            self._service_update_id = None
         if hasattr(self, "prompt_debouncer"):
             self.prompt_debouncer.cancel()
+        if hasattr(self, "results_refresh_debouncer"):
+            self.results_refresh_debouncer.cancel()
+        self.root.destroy()
