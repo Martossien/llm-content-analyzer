@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 import threading
+from threading import Timer
 
 from content_analyzer.utils import (
     create_enhanced_duplicate_key,
@@ -27,10 +28,26 @@ class CacheManager:
         self._lock = threading.RLock()
         self._pool = SQLiteConnectionPool(db_path, pool_size)
         self._ensure_schema()
+        self._cleanup_timer: Optional[Timer] = None
 
     def __del__(self) -> None:
         if hasattr(self, "_pool"):
             self._pool.close()
+        if self._cleanup_timer:
+            self._cleanup_timer.cancel()
+
+    def close(self) -> None:
+        """Cancel scheduled cleanup and close connections."""
+        if self._cleanup_timer:
+            self._cleanup_timer.cancel()
+            self._cleanup_timer = None
+        self._pool.close()
+
+    def __enter__(self) -> "CacheManager":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     from contextlib import contextmanager
 
@@ -202,15 +219,18 @@ class CacheManager:
 
     def schedule_automatic_cleanup(self) -> None:
         """Planifie un nettoyage automatique quotidien."""
-        from threading import Timer
 
         def _cleanup() -> None:
             try:
                 self.cleanup_expired_and_oversized()
             finally:
-                Timer(24 * 3600, _cleanup).start()
+                self._cleanup_timer = Timer(24 * 3600, _cleanup)
+                self._cleanup_timer.daemon = True
+                self._cleanup_timer.start()
 
-        Timer(24 * 3600, _cleanup).start()
+        self._cleanup_timer = Timer(24 * 3600, _cleanup)
+        self._cleanup_timer.daemon = True
+        self._cleanup_timer.start()
 
     def get_stats(self) -> Dict[str, Any]:
         with self._lock, self._connection() as conn:

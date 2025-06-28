@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import threading
+from threading import Timer
 import logging
 
 from content_analyzer.utils import SQLiteConnectionManager
@@ -16,14 +17,30 @@ class DBManager:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._ensure_schema()
+        self._maintenance_timer: Optional[Timer] = None
         # Schedule periodic maintenance without blocking
         try:
             self.schedule_maintenance()
         except Exception as exc:  # pragma: no cover - maintenance issues
             logger.warning("Failed to schedule DB maintenance: %s", exc)
 
+    def __del__(self) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Cancel scheduled maintenance timer."""
+        if self._maintenance_timer:
+            self._maintenance_timer.cancel()
+            self._maintenance_timer = None
+
     def _connect(self) -> SQLiteConnectionManager:
         return SQLiteConnectionManager(self.db_path, check_same_thread=False)
+
+    def __enter__(self) -> "DBManager":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
@@ -237,18 +254,18 @@ class DBManager:
         with self._connect() as conn:
             cursor = conn.cursor()
             total = cursor.execute("SELECT COUNT(*) FROM fichiers").fetchone()[0]
-        pending = cursor.execute(
-            "SELECT COUNT(*) FROM fichiers WHERE status = 'pending'"
-        ).fetchone()[0]
-        processing = cursor.execute(
-            "SELECT COUNT(*) FROM fichiers WHERE status = 'processing'"
-        ).fetchone()[0]
-        completed = cursor.execute(
-            "SELECT COUNT(*) FROM fichiers WHERE status = 'completed'"
-        ).fetchone()[0]
-        errors = cursor.execute(
-            "SELECT COUNT(*) FROM fichiers WHERE status = 'error'"
-        ).fetchone()[0]
+            pending = cursor.execute(
+                "SELECT COUNT(*) FROM fichiers WHERE status = 'pending'"
+            ).fetchone()[0]
+            processing = cursor.execute(
+                "SELECT COUNT(*) FROM fichiers WHERE status = 'processing'"
+            ).fetchone()[0]
+            completed = cursor.execute(
+                "SELECT COUNT(*) FROM fichiers WHERE status = 'completed'"
+            ).fetchone()[0]
+            errors = cursor.execute(
+                "SELECT COUNT(*) FROM fichiers WHERE status = 'error'"
+            ).fetchone()[0]
             avg_time_row = cursor.execute(
                 "SELECT AVG(processing_time_ms) FROM reponses_llm"
             ).fetchone()[0]
@@ -306,10 +323,10 @@ class DBManager:
             except Exception as exc:  # pragma: no cover - runtime issues
                 logger.warning("Maintenance failed: %s", exc)
             finally:
-                timer = threading.Timer(3600, _task)
-                timer.daemon = True
-                timer.start()
+                self._maintenance_timer = Timer(3600, _task)
+                self._maintenance_timer.daemon = True
+                self._maintenance_timer.start()
 
-        timer = threading.Timer(3600, _task)
-        timer.daemon = True
-        timer.start()
+        self._maintenance_timer = Timer(3600, _task)
+        self._maintenance_timer.daemon = True
+        self._maintenance_timer.start()

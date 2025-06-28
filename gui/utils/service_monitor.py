@@ -21,15 +21,15 @@ class ServiceMonitor:
 
     def check_api_status(self) -> bool:
         cfg = self._load_config()
-        client = APIClient(cfg)
-        return client.health_check()
+        with APIClient(cfg) as client:
+            return client.health_check()
 
     def check_cache_status(self) -> Dict[str, float]:
         cache_db = Path("analysis_results_cache.db")
         if not cache_db.exists():
             return {"hit_rate": 0.0}
-        cache = CacheManager(cache_db)
-        return cache.get_stats()
+        with CacheManager(cache_db) as cache:
+            return cache.get_stats()
 
     def check_database_status(self) -> Dict[str, float]:
         db_path = Path("analysis_results.db")
@@ -52,9 +52,9 @@ class ServiceMonitor:
     def _measure_api_response_time(self) -> float:
         try:
             cfg = self._load_config()
-            client = APIClient(cfg)
-            start = time.time()
-            ok = client.health_check()
+            with APIClient(cfg) as client:
+                start = time.time()
+                ok = client.health_check()
             if not ok:
                 return -1.0
             return (time.time() - start) * 1000
