@@ -7,17 +7,20 @@ from typing import Any, Dict, List
 from content_analyzer.modules.age_analyzer import AgeAnalyzer
 from content_analyzer.modules.size_analyzer import SizeAnalyzer
 from content_analyzer.modules.duplicate_detector import DuplicateDetector, FileInfo
+from content_analyzer.modules.db_manager import DBManager
+from datetime import datetime
 
 
 class AnalyticsPanel:
     """Panel d'analytics avec onglets et visualisations intégrées"""
 
-    def __init__(self, parent_frame: tk.Widget) -> None:
+    def __init__(self, parent_frame: tk.Widget, db_manager: DBManager | None = None) -> None:
         self.parent = parent_frame
         self.notebook = ttk.Notebook(parent_frame)
         self.age_analyzer = AgeAnalyzer()
         self.size_analyzer = SizeAnalyzer()
         self.duplicate_detector = DuplicateDetector()
+        self.db_manager = db_manager
 
         self.tabs = {
             'duplicates': self.create_duplicates_tab(),
@@ -28,12 +31,25 @@ class AnalyticsPanel:
 
         self.notebook.pack(fill='both', expand=True)
 
+    def set_db_manager(self, db_manager: DBManager | None) -> None:
+        """Attach a DB manager after initialization."""
+        self.db_manager = db_manager
+
+    def _get_all_files(self) -> List[FileInfo]:
+        if self.db_manager is None:
+            return []
+        try:
+            return self.db_manager.get_all_files_basic()
+        except Exception:
+            return []
+
     # ------------------------------------------------------------------
     def create_duplicates_tab(self) -> ttk.Frame:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text='🔁 Doublons')
-        info = ttk.Label(frame, text='Fonctionnalité à venir')
-        info.pack()
+        self.dup_info_label = ttk.Label(frame, text='No data')
+        self.dup_info_label.pack(pady=5)
+        ttk.Button(frame, text='Analyser', command=self.refresh_duplicates).pack(pady=5)
         return frame
 
     # ------------------------------------------------------------------
@@ -121,13 +137,16 @@ class AnalyticsPanel:
 
     # ------------------------------------------------------------------
     def refresh_age_analysis(self) -> None:
+        files = self._get_all_files()
         threshold_days = int(self.age_threshold_var.get())
-        files = []
         distribution = self.age_analyzer.analyze_age_distribution(files)
         stale_files = self.age_analyzer.identify_stale_files(files, threshold_days)
         archival_stats = self.age_analyzer.calculate_archival_candidates(files, threshold_days)
+        stats = self.age_analyzer.get_age_statistics(files)
         self.card_age_stale_count.config(text=f"{len(stale_files):,}")
+        self.card_age_average_days.config(text=f"{stats['average_days']:.1f}")
         self.card_archival_space_mb.config(text=f"{archival_stats['total_size_mb']:.1f} MB")
+        self.card_age_distribution_info.config(text=f"{distribution['total_files']:,} fichiers")
         self._update_age_chart(distribution)
 
     # ------------------------------------------------------------------
@@ -141,6 +160,74 @@ class AnalyticsPanel:
         ax.set_xlabel('Année')
         ax.set_ylabel('Pourcentage (%)')
         self.age_chart.draw()
+
+    # ------------------------------------------------------------------
+    def refresh_size_analysis(self) -> None:
+        files = self._get_all_files()
+        distribution = self.size_analyzer.analyze_size_distribution(files)
+        large_files = self.size_analyzer.identify_large_files(files, 100)
+        optimization = self.size_analyzer.calculate_space_optimization(files, 100)
+        stats = self.size_analyzer.get_size_statistics(files)
+        self.card_large_files_count.config(text=f"{len(large_files):,}")
+        self.card_size_average_mb.config(text=f"{stats['average_mb']:.1f} MB")
+        self.card_optimization_space_mb.config(text=f"{optimization['size_mb']:.1f} MB")
+        self.card_size_distribution_info.config(text=f"{distribution['total_files']:,} fichiers")
+        self._update_size_chart(distribution['distribution'])
+
+    def _update_size_chart(self, distribution: Dict[str, float]) -> None:
+        ax = self.size_chart.figure.axes[0]
+        ax.clear()
+        labels = list(distribution.keys())
+        sizes = list(distribution.values())
+        if sizes:
+            ax.pie(sizes, labels=labels, autopct='%1.1f%%')
+        ax.set_title('Répartition par Taille')
+        self.size_chart.draw()
+
+    # ------------------------------------------------------------------
+    def refresh_cross_analysis(self) -> None:
+        files = self._get_all_files()
+        data = []
+        now = datetime.now()
+        for f in files:
+            dt = self.age_analyzer._get_reliable_time(f)
+            if dt == datetime.max:
+                continue
+            age_days = (now - dt).days
+            size_mb = f.file_size / (1024 * 1024)
+            data.append((age_days, size_mb))
+        self._update_cross_chart(data)
+        recommendations = self.generate_cross_analysis_recommendations(files)
+        self.recommendations_text.delete('1.0', tk.END)
+        self.recommendations_text.insert('1.0', recommendations)
+
+    def _update_cross_chart(self, data: List[tuple]) -> None:
+        ax = self.cross_chart.figure.axes[0]
+        ax.clear()
+        if data:
+            ages, sizes = zip(*data)
+            ax.scatter(ages, sizes, alpha=0.6)
+        ax.set_title('Âge vs Taille')
+        ax.set_xlabel('Âge (jours)')
+        ax.set_ylabel('Taille (MB)')
+        self.cross_chart.draw()
+
+    # ------------------------------------------------------------------
+    def refresh_duplicates(self) -> None:
+        files = self._get_all_files()
+        families = self.duplicate_detector.detect_duplicate_family(files)
+        stats = self.duplicate_detector.get_duplicate_statistics(families)
+        text = (
+            f"Familles: {stats['total_families']} | Copies: {stats['total_copies']} | "
+            f"Espace gaspillé: {stats['space_wasted_mb']:.1f} MB"
+        )
+        self.dup_info_label.config(text=text)
+
+    def refresh_all(self) -> None:
+        self.refresh_age_analysis()
+        self.refresh_size_analysis()
+        self.refresh_cross_analysis()
+        self.refresh_duplicates()
 
     # ------------------------------------------------------------------
     def generate_cross_analysis_recommendations(self, files: List[FileInfo]) -> str:

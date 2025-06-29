@@ -7,6 +7,7 @@ from threading import Timer
 import logging
 
 from content_analyzer.utils import SQLiteConnectionManager
+from .duplicate_detector import FileInfo
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +352,26 @@ class DBManager:
                 "errors": errors,
                 "avg_processing_time": float(avg_time_row or 0.0),
             }
+
+    def get_all_files_basic(self) -> List[FileInfo]:
+        """Return basic file information for analytics."""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, path, fast_hash, file_size, creation_time, last_modified FROM fichiers"
+            )
+            rows = cursor.fetchall()
+        return [
+            FileInfo(
+                id=row[0],
+                path=row[1],
+                fast_hash=row[2],
+                file_size=row[3] or 0,
+                creation_time=row[4],
+                last_modified=row[5],
+            )
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
     # Performance optimization helpers

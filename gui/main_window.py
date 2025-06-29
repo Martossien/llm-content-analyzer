@@ -596,11 +596,10 @@ No need to run analysis to see your files.
                     return
 
                 self.db_manager = DBManager(output_db)
-
-                db_size_kb = output_db.stat().st_size / 1024
-                self.status_db_label.config(
-                    text=f"DB: {output_db.name} ({db_size_kb:.1f}KB)"
-                )
+                db_size_mb = output_db.stat().st_size / (1024 * 1024)
+                self._update_db_status_labels(db_size_mb)
+                if hasattr(self, "analytics_panel"):
+                    self.analytics_panel.set_db_manager(self.db_manager)
 
                 self.csv_file_path = file_path
                 self.file_path_label.config(text=file_path, background="lightgreen")
@@ -1219,6 +1218,14 @@ No need to run analysis to see your files.
     # ------------------------------------------------------------------
     # SERVICE STATUS AND PROGRESS
     # ------------------------------------------------------------------
+    def _update_db_status_labels(self, size_mb: float | None) -> None:
+        if size_mb is None:
+            self.db_status_label.config(text="● DB", foreground="red")
+            self.status_db_label.config(text="DB: No database loaded")
+        else:
+            self.db_status_label.config(text=f"● DB {size_mb:.1f}MB", foreground="green")
+            self.status_db_label.config(text=f"DB: {size_mb:.1f}MB loaded")
+
     def update_service_status(self) -> None:
         if not (
             self.api_status_label.winfo_exists()
@@ -1240,13 +1247,9 @@ No need to run analysis to see your files.
         )
         db_status = self.service_monitor.check_database_status()
         if db_status["accessible"]:
-            db_text = f"● DB {db_status['size_mb']:.1f}MB"
+            self._update_db_status_labels(db_status["size_mb"])
         else:
-            db_text = "● DB"
-        self.db_status_label.config(
-            text=db_text,
-            foreground="green" if db_status["accessible"] else "red",
-        )
+            self._update_db_status_labels(None)
 
         if self._service_update_id:
             self.root.after_cancel(self._service_update_id)
@@ -1367,9 +1370,10 @@ No need to run analysis to see your files.
                 error_callback=self.on_analysis_error,
             )
             self.db_manager = DBManager(output_db)
-            self.status_db_label.config(
-                text=f"DB: {output_db.name} ({output_db.stat().st_size/1024:.1f}KB)"
-            )
+            db_size_mb = output_db.stat().st_size / (1024 * 1024)
+            self._update_db_status_labels(db_size_mb)
+            if hasattr(self, "analytics_panel"):
+                self.analytics_panel.set_db_manager(self.db_manager)
             self.analysis_running = True
             self.start_button.config(state="disabled")
             self.pause_button.config(state="normal")
@@ -3420,6 +3424,9 @@ RAW RESPONSE:
             if db_path.exists():
                 db_path.unlink()
             self.db_manager = DBManager(db_path)
+            self._update_db_status_labels(0.0)
+            if hasattr(self, "analytics_panel"):
+                self.analytics_panel.set_db_manager(self.db_manager)
             messagebox.showinfo(
                 "Database Reset",
                 "Database has been reset successfully!",
@@ -3779,7 +3786,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
         analytics_frame.pack(fill="both", expand=True, padx=5, pady=5)
         from .analytics_panel import AnalyticsPanel
 
-        self.analytics_panel = AnalyticsPanel(analytics_frame)
+        self.analytics_panel = AnalyticsPanel(analytics_frame, self.db_manager)
 
         controls_frame = ttk.Frame(analytics_frame)
         controls_frame.pack(fill="x", padx=5, pady=5)
@@ -3789,7 +3796,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
     def refresh_all_analytics(self) -> None:
         if hasattr(self, "analytics_panel"):
-            self.analytics_panel.refresh_age_analysis()
+            self.analytics_panel.refresh_all()
 
     def export_analytics_report(self) -> None:
         try:
