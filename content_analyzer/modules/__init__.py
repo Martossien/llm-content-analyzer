@@ -7,6 +7,8 @@ from .file_filter import FileFilter
 from .db_manager import DBManager
 from .prompt_manager import PromptManager
 from .duplicate_detector import DuplicateDetector
+from .age_analyzer import AgeAnalyzer
+from .size_analyzer import SizeAnalyzer
 
 __all__ = [
     "CSVParser",
@@ -16,4 +18,6 @@ __all__ = [
     "DBManager",
     "PromptManager",
     "DuplicateDetector",
+    "AgeAnalyzer",
+    "SizeAnalyzer",
 ]
