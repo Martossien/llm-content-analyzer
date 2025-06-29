@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import threading
 from threading import Timer
+from content_analyzer.modules.duplicate_detector import DuplicateDetector, FileInfo
 
 from content_analyzer.utils import (
     create_enhanced_duplicate_key,
@@ -29,6 +30,7 @@ class CacheManager:
         self._pool = SQLiteConnectionPool(db_path, pool_size)
         self._ensure_schema()
         self._cleanup_timer: Optional[Timer] = None
+        self.detector = DuplicateDetector()
 
     def __del__(self) -> None:
         if hasattr(self, "_pool"):
@@ -92,6 +94,9 @@ class CacheManager:
     def get_cached_result(
         self, fast_hash: str, prompt_hash: str, file_size: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
+        info = FileInfo(0, "", fast_hash, file_size or 0)
+        if self.detector.should_ignore_file(info)[0]:
+            return None
         with self._lock, self._connection() as conn:
             enhanced = create_enhanced_duplicate_key(fast_hash, file_size)
             key = f"{enhanced}_{prompt_hash}"
@@ -149,6 +154,9 @@ class CacheManager:
         raw_llm_response: str = "",
         file_size: Optional[int] = None,
     ) -> None:
+        info = FileInfo(0, "", fast_hash, file_size or result.get("file_size", 0))
+        if self.detector.should_ignore_file(info)[0]:
+            return
         with self._lock, self._connection() as conn:
             enhanced = create_enhanced_duplicate_key(fast_hash, file_size)
             key = f"{enhanced}_{prompt_hash}"

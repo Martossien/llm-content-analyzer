@@ -14,6 +14,7 @@ import json
 import csv
 import threading
 from typing import Any, Dict, Optional
+from content_analyzer.modules.duplicate_detector import DuplicateDetector, FileInfo
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ class MainWindow:
 
         # Cache for paginated results
         self.results_cache = ResultsCache(max_size=50)
+        self.duplicate_detector = DuplicateDetector()
 
         # IDs for periodic callbacks
         self._logs_update_id: str | None = None
@@ -2175,26 +2177,20 @@ No need to run analysis to see your files.
             base_query += " AND r.security_classification_cached = ?"
             params.append(classification_filter)
 
-        if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
-            base_query += (
-                " AND EXISTS ("
-                "SELECT 1 FROM fichiers f2 "
-                "WHERE f.fast_hash = f2.fast_hash "
-                "AND f.file_size = f2.file_size "
-                "AND f.fast_hash IS NOT NULL AND f.fast_hash != '' "
-                "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
-                "AND f.id != f2.id)"
-            )
-
         base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         cursor.execute(base_query, params)
         rows = cursor.fetchall()
         conn.close()
+        if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+            dup_ids = self._get_duplicate_file_ids(status_filter, classification_filter)
+            rows = [r for r in rows if r[0] in dup_ids]
         return rows
 
     def _get_results_count(self, status_filter: str, classification_filter: str) -> int:
+        if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+            return len(self._get_duplicate_file_ids(status_filter, classification_filter))
         db_path = Path("analysis_results.db")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -2210,6 +2206,29 @@ No need to run analysis to see your files.
         count = cursor.fetchone()[0]
         conn.close()
         return count
+
+    def _get_duplicate_file_ids(self, status_filter: str, classification_filter: str) -> set[int]:
+        db_path = Path("analysis_results.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        query = "SELECT f.id, f.path, f.fast_hash, f.file_size, f.creation_time, f.last_modified FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
+        params: list[Any] = []
+        if status_filter != "All":
+            query += " AND f.status = ?"
+            params.append(status_filter)
+        if classification_filter != "All":
+            query += " AND r.security_classification_cached = ?"
+            params.append(classification_filter)
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        files = [FileInfo(id=r[0], path=r[1], fast_hash=r[2], file_size=r[3] or 0, creation_time=r[4], last_modified=r[5]) for r in rows]
+        families = self.duplicate_detector.detect_duplicate_family(files)
+        dup_ids: set[int] = set()
+        for fam in families.values():
+            dup_ids.update(f.id for f in fam)
+        return dup_ids
 
     def refresh_results_table(
         self,
@@ -2737,20 +2756,14 @@ RAW RESPONSE:
                     f'%"classification": "{self.export_classification_filter.get()}"%'
                 )
 
-            if self.export_duplicates_var.get():
-                query += (
-                    " AND EXISTS ("
-                    "SELECT 1 FROM fichiers f2 "
-                    "WHERE f.fast_hash = f2.fast_hash "
-                    "AND f.file_size = f2.file_size "
-                    "AND f.fast_hash IS NOT NULL AND f.fast_hash != '' "
-                    "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
-                    "AND f.id != f2.id)"
-                )
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
             conn.close()
+            if self.export_duplicates_var.get():
+                dup_ids = self._get_duplicate_file_ids(self.export_status_filter.get(), self.export_classification_filter.get())
+                rows = [r for r in rows if r[0] in dup_ids]
+
 
             if self.export_format.get() == "csv":
                 self.export_to_csv(rows, export_path)
