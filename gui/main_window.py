@@ -139,6 +139,7 @@ class MainWindow:
         # Cache for paginated results
         self.results_cache = ResultsCache(max_size=50)
         self.duplicate_detector = DuplicateDetector()
+        self.dup_stats_labels: dict[str, ttk.Label] = {}
 
         # IDs for periodic callbacks
         self._logs_update_id: str | None = None
@@ -1738,6 +1739,9 @@ No need to run analysis to see your files.
             )
             duplicates_check.pack(side="left", padx=5)
 
+            # Panel displaying duplicate statistics
+            self._create_duplicate_stats_panel(results_window)
+
             tree_frame = ttk.Frame(results_window)
             tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -2124,6 +2128,137 @@ No need to run analysis to see your files.
         self.results_total = 0
         window.destroy()
 
+    def _create_duplicate_stats_panel(self, parent_frame: tk.Widget) -> None:
+        """Crée le panneau de statistiques des doublons."""
+        self.dup_stats_labels: dict[str, ttk.Label] = {}
+
+        stats_frame = ttk.LabelFrame(
+            parent_frame, text="\U0001f4ca Statistiques des Doublons"
+        )
+        stats_frame.pack(fill="x", padx=10, pady=5)
+
+        metrics_frame = ttk.Frame(stats_frame)
+        metrics_frame.pack(fill="x", padx=5, pady=5)
+
+        for i in range(4):
+            metrics_frame.columnconfigure(i, weight=1)
+
+        def create_card(column: int, title: str, icon: str) -> ttk.Label:
+            card = ttk.Frame(metrics_frame, padding=5, relief="groove", borderwidth=1)
+            card.grid(row=0, column=column, padx=5, pady=2, sticky="nsew")
+            ttk.Label(card, text=icon, font=("Arial", 14)).pack()
+            value_label = ttk.Label(card, text="0", font=("Arial", 12, "bold"))
+            value_label.pack()
+            ttk.Label(card, text=title).pack()
+            return value_label
+
+        self.dup_stats_labels["families"] = create_card(0, "Familles", "\U0001f465")
+        self.dup_stats_labels["files"] = create_card(1, "Fichiers", "\U0001f4c1")
+        self.dup_stats_labels["space"] = create_card(2, "Espace", "\U0001f4be")
+        self.dup_stats_labels["distribution"] = create_card(
+            3, "Distribution", "\U0001f4c8"
+        )
+
+    def _update_duplicate_stats(
+        self, status_filter: str, classification_filter: str
+    ) -> None:
+        """Met à jour les statistiques selon les filtres actifs."""
+        try:
+            db_path = Path("analysis_results.db")
+            if not db_path.exists():
+                stats = {
+                    "total_families": 0,
+                    "total_duplicates": 0,
+                    "total_sources": 0,
+                    "total_copies": 0,
+                    "space_wasted_bytes": 0,
+                    "largest_family_size": 0,
+                    "average_family_size": 0,
+                }
+            else:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                query = (
+                    "SELECT f.id, f.path, f.fast_hash, f.file_size, f.creation_time, "
+                    "f.last_modified FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
+                )
+                params: list[Any] = []
+                if status_filter != "All":
+                    query += " AND f.status = ?"
+                    params.append(status_filter)
+                if classification_filter != "All":
+                    query += " AND r.security_classification_cached = ?"
+                    params.append(classification_filter)
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                conn.close()
+
+                files = [
+                    FileInfo(
+                        id=r[0],
+                        path=r[1],
+                        fast_hash=r[2],
+                        file_size=r[3] or 0,
+                        creation_time=r[4],
+                        last_modified=r[5],
+                    )
+                    for r in rows
+                ]
+                families = self.duplicate_detector.detect_duplicate_family(files)
+                stats = self.duplicate_detector.get_duplicate_statistics(families)
+
+            fam_label = self.dup_stats_labels.get("families")
+            if fam_label is not None:
+                color = "orange" if stats["total_families"] > 0 else "green"
+                fam_label.config(text=str(stats["total_families"]), foreground=color)
+
+            files_label = self.dup_stats_labels.get("files")
+            if files_label is not None:
+                color = (
+                    "red"
+                    if stats["total_copies"] > stats["total_sources"]
+                    else ("orange" if stats["total_copies"] > 0 else "green")
+                )
+                files_label.config(
+                    text=f"{stats['total_duplicates']} ({stats['total_copies']} copies)",
+                    foreground=color,
+                )
+
+            space_label = self.dup_stats_labels.get("space")
+            if space_label is not None:
+                wasted = stats["space_wasted_bytes"]
+                color = (
+                    "red"
+                    if wasted > 1024 * 1024 * 1024
+                    else ("orange" if wasted > 100 * 1024 * 1024 else "green")
+                )
+                space_label.config(
+                    text=self._format_file_size(wasted),
+                    foreground=color,
+                )
+
+            dist_label = self.dup_stats_labels.get("distribution")
+            if dist_label is not None:
+                dist_label.config(
+                    text=f"Max: {stats['largest_family_size']} | Moy: {stats['average_family_size']}",
+                )
+        except Exception as e:
+            logger.error("Error updating duplicate stats: %s", e)
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        """Format size with intelligent units."""
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} PB"
+
+    def _format_percentage(self, part: int, total: int) -> str:
+        """Format percentage safely."""
+        if total == 0:
+            return "0%"
+        return f"{(part / total * 100):.1f}%"
+
     # ------------------------------------------------------------------
     # Optimized DB queries
     # ------------------------------------------------------------------
@@ -2291,6 +2426,7 @@ No need to run analysis to see your files.
 
             # Update pagination controls now that results_total is known
             self._update_page_controls(page_label, prev_btn, next_btn)
+            self._update_duplicate_stats(status_filter, classification_filter)
 
         except Exception as e:
             messagebox.showerror(
