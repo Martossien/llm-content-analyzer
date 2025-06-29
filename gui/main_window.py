@@ -524,6 +524,16 @@ No need to run analysis to see your files.
         )
         self.cancel_batch_button.pack(side="left", padx=5)
 
+        # SECTION 5C ----------------------------------------------------
+        analytics_frame = ttk.LabelFrame(self.root, text="Analytics")
+        analytics_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        try:
+            from .analytics_panel import AnalyticsPanel
+
+            self.analytics_panel = AnalyticsPanel(analytics_frame)
+        except Exception:
+            ttk.Label(analytics_frame, text="Analytics unavailable").pack()
+
         # SECTION 6 ------------------------------------------------------
         status_bar = ttk.Frame(self.root)
         status_bar.pack(side="bottom", fill="x")

@@ -6,9 +6,11 @@ from .cache_manager import CacheManager
 from .file_filter import FileFilter
 from .db_manager import DBManager
 from .prompt_manager import PromptManager
-from .duplicate_detector import DuplicateDetector
+from .duplicate_detector import DuplicateDetector, FileInfo
 from .age_analyzer import AgeAnalyzer
 from .size_analyzer import SizeAnalyzer
+from .sql_optimizer import SQLQueryOptimizer
+from .enhanced_cache import EnhancedResultsCache
 
 __all__ = [
     "CSVParser",
@@ -18,6 +20,9 @@ __all__ = [
     "DBManager",
     "PromptManager",
     "DuplicateDetector",
+    "FileInfo",
     "AgeAnalyzer",
     "SizeAnalyzer",
+    "SQLQueryOptimizer",
+    "EnhancedResultsCache",
 ]
