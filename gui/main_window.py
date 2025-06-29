@@ -524,6 +524,9 @@ No need to run analysis to see your files.
         )
         self.cancel_batch_button.pack(side="left", padx=5)
 
+        # SECTION 5C ----------------------------------------------------
+        self.build_analytics_section()
+
         # SECTION 6 ------------------------------------------------------
         status_bar = ttk.Frame(self.root)
         status_bar.pack(side="bottom", fill="x")
@@ -3766,6 +3769,43 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
                 parent=parent_window,
             )
             self.log_action(f"Configuration reset failed: {str(e)}", "ERROR")
+
+    # ------------------------------------------------------------------
+    # ANALYTICS PANEL
+    # ------------------------------------------------------------------
+    def build_analytics_section(self) -> None:
+        """Section analytics avec onglets complets"""
+        analytics_frame = ttk.LabelFrame(self.root, text="📊 Analytics Dashboard")
+        analytics_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        from .analytics_panel import AnalyticsPanel
+
+        self.analytics_panel = AnalyticsPanel(analytics_frame)
+
+        controls_frame = ttk.Frame(analytics_frame)
+        controls_frame.pack(fill="x", padx=5, pady=5)
+
+        ttk.Button(controls_frame, text="🔄 Actualiser Tout", command=self.refresh_all_analytics).pack(side="left", padx=5)
+        ttk.Button(controls_frame, text="📊 Export Analytics", command=self.export_analytics_report).pack(side="left", padx=5)
+
+    def refresh_all_analytics(self) -> None:
+        if hasattr(self, "analytics_panel"):
+            self.analytics_panel.refresh_age_analysis()
+
+    def export_analytics_report(self) -> None:
+        try:
+            export_path = filedialog.asksaveasfilename(
+                title="Export Analytics Report",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+            if not export_path:
+                return
+            data = {"analytics": "none"}
+            with open(export_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Export", f"Analytics exported to {export_path}")
+        except Exception as exc:  # pragma: no cover
+            messagebox.showerror("Export Error", str(exc))
 
     def __del__(self) -> None:
         """Cleanup scheduled callbacks on destruction."""

@@ -9,6 +9,8 @@ from .prompt_manager import PromptManager
 from .duplicate_detector import DuplicateDetector
 from .age_analyzer import AgeAnalyzer
 from .size_analyzer import SizeAnalyzer
+from .sql_optimizer import SQLQueryOptimizer
+from .enhanced_cache import EnhancedResultsCache
 
 __all__ = [
     "CSVParser",
@@ -20,4 +22,6 @@ __all__ = [
     "DuplicateDetector",
     "AgeAnalyzer",
     "SizeAnalyzer",
+    "SQLQueryOptimizer",
+    "EnhancedResultsCache",
 ]
