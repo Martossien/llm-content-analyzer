@@ -83,7 +83,7 @@ class DuplicateDetector:
         )
 
     # ------------------------------------------------------------------
-    def identify_source_file(self, duplicate_group: List[FileInfo]) -> FileInfo:
+    def identify_source(self, duplicate_group: List[FileInfo]) -> FileInfo:
         """Identify the original source file within a duplicate group."""
         if not duplicate_group:
             raise ValueError("Empty duplicate group")
@@ -99,6 +99,38 @@ class DuplicateDetector:
             source_file.creation_time,
         )
         return source_file
+
+    # ------------------------------------------------------------------
+    def get_copy_statistics(self, duplicate_group: List[FileInfo]) -> Dict[str, Any]:
+        """Return metrics about copies within a duplicate family."""
+        if not duplicate_group:
+            raise ValueError("Empty duplicate group")
+
+        source = self.identify_source(duplicate_group)
+        copies = [f for f in duplicate_group if f.id != source.id]
+
+        family_id = create_enhanced_duplicate_key(
+            source.fast_hash or "", source.file_size
+        )
+
+        return {
+            "family_id": family_id,
+            "total_files": len(duplicate_group),
+            "source_file": {
+                "path": source.path,
+                "creation_date": self._parse_creation_time(source.creation_time),
+                "is_original": True,
+            },
+            "copies": [
+                {
+                    "path": c.path,
+                    "creation_date": self._parse_creation_time(c.creation_time),
+                    "is_original": False,
+                }
+                for c in copies
+            ],
+            "copies_count": len(copies),
+        }
 
     # ------------------------------------------------------------------
     def get_duplicate_statistics(
@@ -138,9 +170,9 @@ class DuplicateDetector:
             "space_wasted_mb": round(space_wasted / (1024 * 1024), 2),
             "largest_family_size": largest_family,
             "families_by_size": families_by_size,
-            "average_family_size": round(total_files / total_families, 2)
-            if total_families
-            else 0,
+            "average_family_size": (
+                round(total_files / total_families, 2) if total_families else 0
+            ),
         }
 
     # ------------------------------------------------------------------

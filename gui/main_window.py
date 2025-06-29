@@ -1956,19 +1956,7 @@ No need to run analysis to see your files.
                             f'%"classification": "{classification_filter.get()}"%'
                         )
 
-                    if (
-                        hasattr(self, "show_duplicates_var")
-                        and self.show_duplicates_var.get()
-                    ):
-                        base_query += (
-                            " AND EXISTS ("
-                            "SELECT 1 FROM fichiers f2 "
-                            "WHERE f.fast_hash = f2.fast_hash "
-                            "AND f.file_size = f2.file_size "
-                            "AND f.fast_hash IS NOT NULL AND f.fast_hash != '' "
-                            "AND f2.fast_hash IS NOT NULL AND f2.fast_hash != '' "
-                            "AND f.id != f2.id)"
-                        )
+                    # Duplicate filtering handled via DuplicateDetector
 
                     # Verify file existence with current filters
                     cursor.execute(
@@ -2190,7 +2178,9 @@ No need to run analysis to see your files.
 
     def _get_results_count(self, status_filter: str, classification_filter: str) -> int:
         if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
-            return len(self._get_duplicate_file_ids(status_filter, classification_filter))
+            return len(
+                self._get_duplicate_file_ids(status_filter, classification_filter)
+            )
         db_path = Path("analysis_results.db")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -2207,7 +2197,9 @@ No need to run analysis to see your files.
         conn.close()
         return count
 
-    def _get_duplicate_file_ids(self, status_filter: str, classification_filter: str) -> set[int]:
+    def _get_duplicate_file_ids(
+        self, status_filter: str, classification_filter: str
+    ) -> set[int]:
         db_path = Path("analysis_results.db")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -2223,7 +2215,17 @@ No need to run analysis to see your files.
         rows = cursor.fetchall()
         conn.close()
 
-        files = [FileInfo(id=r[0], path=r[1], fast_hash=r[2], file_size=r[3] or 0, creation_time=r[4], last_modified=r[5]) for r in rows]
+        files = [
+            FileInfo(
+                id=r[0],
+                path=r[1],
+                fast_hash=r[2],
+                file_size=r[3] or 0,
+                creation_time=r[4],
+                last_modified=r[5],
+            )
+            for r in rows
+        ]
         families = self.duplicate_detector.detect_duplicate_family(files)
         dup_ids: set[int] = set()
         for fam in families.values():
@@ -2756,14 +2758,15 @@ RAW RESPONSE:
                     f'%"classification": "{self.export_classification_filter.get()}"%'
                 )
 
-
             cursor.execute(query, params)
             rows = cursor.fetchall()
             conn.close()
             if self.export_duplicates_var.get():
-                dup_ids = self._get_duplicate_file_ids(self.export_status_filter.get(), self.export_classification_filter.get())
+                dup_ids = self._get_duplicate_file_ids(
+                    self.export_status_filter.get(),
+                    self.export_classification_filter.get(),
+                )
                 rows = [r for r in rows if r[0] in dup_ids]
-
 
             if self.export_format.get() == "csv":
                 self.export_to_csv(rows, export_path)
