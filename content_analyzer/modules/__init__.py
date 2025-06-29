@@ -6,6 +6,7 @@ from .cache_manager import CacheManager
 from .file_filter import FileFilter
 from .db_manager import DBManager
 from .prompt_manager import PromptManager
+from .duplicate_detector import DuplicateDetector
 
 __all__ = [
     "CSVParser",
@@ -14,4 +15,5 @@ __all__ = [
     "FileFilter",
     "DBManager",
     "PromptManager",
+    "DuplicateDetector",
 ]

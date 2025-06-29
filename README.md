@@ -173,6 +173,32 @@ python content_analyzer/content_analyzer.py scan_results.csv analysis.db
 
 Vers reports-generator (Brique 3)
 La base SQLite générée (analysis_results.db) contient les données structurées pour la génération de rapports Excel/PDF par la brique 3.
+
+## Gestion des Doublons
+
+### Architecture Centralisée
+- Module unique : `duplicate_detector.py`
+- Détection basée sur FastHash + Taille fichier
+- Identification automatique source vs copies
+
+### Utilisation
+```python
+from content_analyzer.modules import DuplicateDetector
+
+detector = DuplicateDetector()
+# Détecter famille doublons
+family = detector.detect_duplicate_family(files)
+# Identifier source original
+source = detector.identify_source(family)
+# Statistiques copies
+stats = detector.get_copy_statistics(family)
+```
+
+### Règles de Gestion
+- Fichiers 0 octet : Exclus automatiquement
+- Source = Fichier le plus ancien par date création
+- Limite taille : 281_474_976_710_656 octets
+
 Limitations
 
 Dépend de la disponibilité de l'API-DOC-IA

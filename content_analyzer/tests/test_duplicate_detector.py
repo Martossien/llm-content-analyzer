@@ -16,7 +16,7 @@ def test_identify_source_by_creation_date():
     det = DuplicateDetector()
     f1 = FileInfo(1, "a", "h", 1, "01/01/2020 10:00:00", None)
     f2 = FileInfo(2, "b", "h", 1, "02/01/2020 10:00:00", None)
-    src = det.identify_source_file([f2, f1])
+    src = det.identify_source([f2, f1])
     assert src.id == 1
 
 
@@ -47,3 +47,22 @@ def test_edge_cases_hash_errors():
     ignore, reason = det.should_ignore_file(info)
     assert ignore is True
     assert reason == "hash_error"
+
+
+def test_get_copy_statistics():
+    det = DuplicateDetector()
+    f1 = FileInfo(1, "a", "h", 1, "2020-01-01 00:00:00", None)
+    f2 = FileInfo(2, "b", "h", 1, "2020-01-02 00:00:00", None)
+    f3 = FileInfo(3, "c", "h", 1, "2020-01-03 00:00:00", None)
+    stats = det.get_copy_statistics([f1, f2, f3])
+    assert stats["copies_count"] == 2
+    assert stats["source_file"]["path"] == "a"
+    assert len(stats["copies"]) == 2
+
+
+def test_identify_source_rename():
+    det = DuplicateDetector()
+    f1 = FileInfo(1, "a", "h", 1, "2020-01-01 00:00:00", None)
+    f2 = FileInfo(2, "b", "h", 1, "2020-01-02 00:00:00", None)
+    src = det.identify_source([f1, f2])
+    assert src.path == "a"
