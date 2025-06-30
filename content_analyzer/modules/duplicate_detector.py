@@ -144,8 +144,10 @@ class DuplicateDetector:
                 "total_sources": 0,
                 "total_copies": 0,
                 "space_wasted_bytes": 0,
+                "space_wasted_mb": 0,
                 "largest_family_size": 0,
                 "families_by_size": {},
+                "average_family_size": 0,
             }
         total_families = len(duplicate_families)
         total_files = sum(len(f) for f in duplicate_families.values())
