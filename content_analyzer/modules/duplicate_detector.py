@@ -17,7 +17,7 @@ from content_analyzer.utils.duplicate_utils import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(eq=True, frozen=True)
 class FileInfo:
     """Standardized structure for file metadata."""
 
