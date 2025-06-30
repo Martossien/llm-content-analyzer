@@ -486,6 +486,12 @@ No need to run analysis to see your files.
         ttk.Button(
             action_frame, text="EXPORT", width=15, command=self.export_results
         ).pack(side="left", padx=5, pady=5)
+        ttk.Button(
+            action_frame,
+            text="\U0001F4CA ANALYTICS",
+            width=15,
+            command=self.open_analytics_dashboard,
+        ).pack(side="left", padx=5, pady=5)
 
         # SECTION 5B ----------------------------------------------------
         batch_frame = ttk.LabelFrame(self.root, text="Batch Operations")
@@ -523,9 +529,6 @@ No need to run analysis to see your files.
             state="disabled",
         )
         self.cancel_batch_button.pack(side="left", padx=5)
-
-        # SECTION 5C ----------------------------------------------------
-        self.build_analytics_section()
 
         # SECTION 6 ------------------------------------------------------
         status_bar = ttk.Frame(self.root)
@@ -597,6 +600,7 @@ No need to run analysis to see your files.
 
                 self.db_manager = DBManager(output_db)
                 db_size_mb = output_db.stat().st_size / (1024 * 1024)
+                db_size_kb = db_size_mb * 1024
                 self._update_db_status_labels(db_size_mb)
                 if hasattr(self, "analytics_panel"):
                     self.analytics_panel.set_db_manager(self.db_manager)
@@ -3793,6 +3797,29 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
         ttk.Button(controls_frame, text="🔄 Actualiser Tout", command=self.refresh_all_analytics).pack(side="left", padx=5)
         ttk.Button(controls_frame, text="📊 Export Analytics", command=self.export_analytics_report).pack(side="left", padx=5)
+
+    def open_analytics_dashboard(self) -> None:
+        """Open analytics dashboard in a modal window."""
+        if hasattr(self, "analytics_window") and self.analytics_window.winfo_exists():
+            self.analytics_window.focus_set()
+            return
+
+        self.analytics_window = self.create_dialog_window(
+            self.root,
+            "📊 Analytics Dashboard",
+            "1200x800",
+        )
+        analytics_frame = ttk.Frame(self.analytics_window)
+        analytics_frame.pack(fill="both", expand=True)
+        from .analytics_panel import AnalyticsPanel
+
+        self.analytics_panel = AnalyticsPanel(analytics_frame, self.db_manager)
+
+        controls = ttk.Frame(self.analytics_window)
+        controls.pack(fill="x", padx=5, pady=5)
+        ttk.Button(controls, text="🔄 Actualiser Tout", command=self.refresh_all_analytics).pack(side="left", padx=5)
+        ttk.Button(controls, text="📊 Export Analytics", command=self.export_analytics_report).pack(side="left", padx=5)
+        ttk.Button(controls, text="Fermer", command=self.analytics_window.destroy).pack(side="right", padx=5)
 
     def refresh_all_analytics(self) -> None:
         if hasattr(self, "analytics_panel"):

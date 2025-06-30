@@ -66,3 +66,20 @@ def test_identify_source_rename():
     f2 = FileInfo(2, "b", "h", 1, "2020-01-02 00:00:00", None)
     src = det.identify_source([f1, f2])
     assert src.path == "a"
+
+
+def test_stats_keys_present_when_no_duplicates():
+    det = DuplicateDetector()
+    stats = det.get_duplicate_statistics({})
+    expected_keys = {
+        "total_families",
+        "total_duplicates",
+        "total_sources",
+        "total_copies",
+        "space_wasted_bytes",
+        "space_wasted_mb",
+        "largest_family_size",
+        "families_by_size",
+        "average_family_size",
+    }
+    assert set(stats.keys()) == expected_keys
