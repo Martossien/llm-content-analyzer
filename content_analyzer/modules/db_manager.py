@@ -132,6 +132,26 @@ class DBManager:
                 "CREATE INDEX IF NOT EXISTS idx_rgpd_risk_cached ON reponses_llm(rgpd_risk_cached)",
                 "idx_rgpd_risk_cached",
             ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_analytics_composite ON fichiers(status, file_size, last_modified)",
+                "idx_analytics_composite",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_classification_rgpd ON reponses_llm(security_classification_cached, rgpd_risk_cached)",
+                "idx_classification_rgpd",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_finance_legal ON reponses_llm(finance_type_cached, legal_type_cached)",
+                "idx_finance_legal",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_classification_all ON reponses_llm(security_classification_cached, rgpd_risk_cached, finance_type_cached, legal_type_cached)",
+                "idx_classification_all",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_file_analysis ON fichiers(id, fast_hash, file_size) WHERE fast_hash IS NOT NULL",
+                "idx_file_analysis",
+            ),
         ]
 
         for sql, name in critical_indexes:
