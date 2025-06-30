@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 import tkinter as tk
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 from content_analyzer.modules.age_analyzer import AgeAnalyzer
 from content_analyzer.modules.size_analyzer import SizeAnalyzer
@@ -28,6 +32,11 @@ class AnalyticsPanel:
         self.classification_filter = tk.StringVar(value="Tous")
         self.use_last_modified = tk.BooleanVar(value=False)
         self.years_modified = tk.StringVar(value="1")
+
+        # caching for performance
+        self._metrics_cache: Dict[str, Any] = {}
+        self._cache_timestamp = 0.0
+        self.CACHE_DURATION = 30
 
         self._build_ui()
         self.tabs: Dict[str, ttk.Frame] = {"age": self.security_tab}
@@ -203,20 +212,40 @@ class AnalyticsPanel:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT 
+                SELECT
                     COALESCE(r.security_classification_cached, 'none') as security,
                     COALESCE(r.rgpd_risk_cached, 'none') as rgpd,
                     COALESCE(r.finance_type_cached, 'none') as finance,
                     COALESCE(r.legal_type_cached, 'none') as legal,
                     COUNT(*) as count,
                     SUM(f.file_size) as total_size
-                FROM fichiers f 
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id 
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE f.status = 'completed'
-                GROUP BY r.security_classification_cached, r.rgpd_risk_cached, r.finance_type_cached, r.legal_type_cached
+                GROUP BY r.security_classification_cached, r.rgpd_risk_cached,
+                         r.finance_type_cached, r.legal_type_cached
+                ORDER BY count DESC
                 """
             )
             return cursor.fetchall()
+
+    def _get_super_critical_files_optimized(self) -> List[int]:
+        if self.db_manager is None:
+            return []
+        with self.db_manager._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT f.id
+                FROM fichiers f
+                JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE r.security_classification_cached = 'C3'
+                  AND r.rgpd_risk_cached = 'critical'
+                  AND r.legal_type_cached IN ('nda', 'litigation')
+                  AND f.status = 'completed'
+                """
+            )
+            return [row[0] for row in cursor.fetchall()]
 
     def _get_classification_map(self) -> Dict[int, str]:
         mapping: Dict[int, str] = {}
@@ -266,7 +295,45 @@ class AnalyticsPanel:
             pass
         return mapping
 
-    def calculate_business_metrics(self) -> Dict[str, Any]:
+    # ------------------------------------------------------------------
+    # Metrics caching helpers
+    # ------------------------------------------------------------------
+
+    def _invalidate_cache(self) -> None:
+        self._metrics_cache.clear()
+        self._cache_timestamp = 0.0
+
+    def _save_metrics_to_disk(self, metrics: Dict[str, Any]) -> None:
+        try:
+            cache_file = Path("analytics_cache.json")
+            cache_data = {
+                "timestamp": time.time(),
+                "metrics": metrics,
+                "parameters": {
+                    "age_years": self.threshold_age_years.get(),
+                    "size_mb": self.threshold_size_mb.get(),
+                    "filter": self.classification_filter.get(),
+                },
+            }
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, indent=2)
+        except Exception as exc:  # pragma: no cover - disk issues
+            logger.warning("Impossible de sauvegarder le cache: %s", exc)
+
+    def _load_metrics_from_disk(self) -> Dict[str, Any] | None:
+        try:
+            cache_file = Path("analytics_cache.json")
+            if not cache_file.exists():
+                return None
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+            if time.time() - cache_data.get("timestamp", 0) > 300:
+                return None
+            return cache_data.get("metrics")
+        except Exception:  # pragma: no cover - disk issues
+            return None
+
+    def _calculate_metrics_core(self) -> Dict[str, Any]:
         if self.db_manager is None:
             return {}
         files = self._connect_files()
@@ -299,6 +366,10 @@ class AnalyticsPanel:
         dormant_files = self.age_analyzer.identify_stale_files(files, age_threshold_days)
         total_files = len(files)
         total_size = sum(f.file_size for f in files)
+        large_file_ids = {f.id for f in large_files}
+        dormant_file_ids = {f.id for f in dormant_files}
+        total_affected_count = len(large_file_ids.union(dormant_file_ids))
+
         metrics = {
             'super_critical': {
                 'count': len(super_critical_files),
@@ -324,13 +395,35 @@ class AnalyticsPanel:
                 'old_files_pct': round(len(old_files) / total_files * 100, 1) if total_files else 0,
                 'dormant_files_pct': round(len(dormant_files) / total_files * 100, 1) if total_files else 0,
                 'archival_size_gb': age_stats.get('total_size_bytes', 0) / (1024**3),
-                'total_affected': len(set(large_files + dormant_files)),
+                'total_affected': total_affected_count,
             },
             'global': {
                 'total_files': total_files,
                 'total_size_gb': total_size / (1024**3),
             }
         }
+        return metrics
+
+    def calculate_business_metrics(self) -> Dict[str, Any]:
+        cache_key = f"{self.threshold_age_years.get()}_{self.threshold_size_mb.get()}_{self.classification_filter.get()}"
+        current_time = time.time()
+
+        if not self._metrics_cache:
+            disk_metrics = self._load_metrics_from_disk()
+            if disk_metrics:
+                self._metrics_cache[cache_key] = disk_metrics
+                self._cache_timestamp = current_time
+
+        if (
+            cache_key in self._metrics_cache
+            and current_time - self._cache_timestamp < self.CACHE_DURATION
+        ):
+            return self._metrics_cache[cache_key]
+
+        metrics = self._calculate_metrics_core()
+        self._metrics_cache = {cache_key: metrics}
+        self._cache_timestamp = current_time
+        self._save_metrics_to_disk(metrics)
         return metrics
 
     def update_alert_cards(self) -> None:
@@ -375,6 +468,10 @@ class AnalyticsPanel:
         self.size_age_line2.config(text=f"{affected} fichiers | {archival_gb:.1f}GB archivage")
         self.size_age_line3.config(text="Seuils utilisateur")
         self.size_age_line1.config(foreground="blue" if affected > 0 else "green")
+        try:
+            self.update_thematic_tabs()
+        except Exception as e:  # pragma: no cover - UI issues
+            logger.error("Erreur mise à jour onglets: %s", e)
         self.progress_label.config(text="✅ Métriques à jour")
 
     def _build_security_tab(self, parent_frame: ttk.Frame) -> None:
@@ -450,8 +547,8 @@ class AnalyticsPanel:
                 return
             self.progress_label.config(text="⏳ Recalcul en cours...")
             self.parent.update_idletasks()
+            self._invalidate_cache()
             self.update_alert_cards()
-            self.update_thematic_tabs()
             self.progress_label.config(text="✅ Terminé")
             success_window = tk.Toplevel(self.parent)
             success_window.title("Succès")
@@ -465,6 +562,8 @@ class AnalyticsPanel:
         except ValueError:
             messagebox.showerror("Erreur", "Paramètres invalides", parent=self.parent)
             self.progress_label.config(text="❌ Erreur")
+        except Exception as e:
+            self._handle_analytics_error("recalcul métriques", e)
 
     def save_user_preferences(self) -> None:
         prefs = {
@@ -532,7 +631,7 @@ class AnalyticsPanel:
                 self._populate_files_list(dup_frame, 'duplicates')
             ttk.Button(results_window, text="Fermer", command=results_window.destroy).pack(pady=5)
         except Exception as exc:
-            messagebox.showerror("Erreur", f"Impossible d'afficher les fichiers: {str(exc)}", parent=self.parent)
+            self._handle_analytics_error("affichage des fichiers", exc)
 
     def _populate_files_list(self, frame: ttk.Frame, category: str) -> None:
         files = self._connect_files()
@@ -629,7 +728,7 @@ class AnalyticsPanel:
                     json.dump(report, f, indent=2, ensure_ascii=False)
                 messagebox.showinfo('Succès', f'Rapport exporté : {filename}')
         except Exception as e:
-            messagebox.showerror('Erreur', f'Échec export : {str(e)}')
+            self._handle_analytics_error("export du rapport", e)
 
     def generate_recommendations(self, metrics: Dict[str, Any]) -> str:
         recs: List[str] = []
@@ -642,3 +741,17 @@ class AnalyticsPanel:
         if not recs:
             return "✅ Aucune recommandation particulière"
         return "\n".join(recs)
+
+    def _handle_analytics_error(self, operation: str, error: Exception) -> None:
+        error_msg = f"Analytics {operation}: {str(error)}"
+        self.progress_label.config(text=f"❌ {operation} échoué")
+        logging.error("Analytics Dashboard - %s", error_msg, exc_info=True)
+        messagebox.showerror(
+            f"Erreur Analytics - {operation}",
+            (
+                f"Une erreur est survenue lors de {operation}.\n\n"
+                f"Détails: {str(error)}\n\n"
+                "Le dashboard continue de fonctionner avec les données en cache."
+            ),
+            parent=self.parent,
+        )
