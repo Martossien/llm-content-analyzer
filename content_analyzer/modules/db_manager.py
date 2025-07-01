@@ -390,7 +390,7 @@ class DBManager:
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, path, fast_hash, file_size, creation_time, last_modified FROM fichiers"
+                "SELECT id, path, fast_hash, file_size, creation_time, last_modified, owner FROM fichiers"
             )
             rows = cursor.fetchall()
         return [
@@ -401,6 +401,7 @@ class DBManager:
                 file_size=row[3] or 0,
                 creation_time=row[4],
                 last_modified=row[5],
+                owner=row[6],
             )
             for row in rows
         ]
