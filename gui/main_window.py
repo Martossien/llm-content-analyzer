@@ -1739,19 +1739,21 @@ No need to run analysis to see your files.
             classification_filter.set("All")
             classification_filter.pack(side="left", padx=5)
 
-            ttk.Label(controls_frame, text="Advanced Filters:").pack(
-                side="left", padx=10
-            )
             self.show_duplicates_var = tk.BooleanVar(value=False)
             duplicates_check = ttk.Checkbutton(
                 controls_frame,
-                text="Doublons FastHash+Taille",
+                text="\U0001f501 Afficher uniquement les doublons FastHash+Taille",
                 variable=self.show_duplicates_var,
+                command=lambda: self._on_duplicates_filter_changed(
+                    tree,
+                    status_filter,
+                    classification_filter,
+                    page_label,
+                    prev_page_btn,
+                    next_page_btn,
+                ),
             )
-            duplicates_check.pack(side="left", padx=5)
-
-            # Panel displaying duplicate statistics
-            self._create_duplicate_stats_panel(results_window)
+            duplicates_check.pack(side="left", padx=10)
 
             tree_frame = ttk.Frame(results_window)
             tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -1768,6 +1770,7 @@ No need to run analysis to see your files.
                 "Creation Time",
                 "Last Modified",
                 "Status",
+                "Type",
                 "Security",
                 "Sec_Conf",
                 "RGPD",
@@ -1793,6 +1796,7 @@ No need to run analysis to see your files.
             tree.heading("Creation Time", text="Created")
             tree.heading("Last Modified", text="Last Modified")
             tree.heading("Status", text="Status")
+            tree.heading("Type", text="Type")
             tree.heading("Security", text="Security")
             tree.heading("Sec_Conf", text="Sec%")
             tree.heading("RGPD", text="RGPD")
@@ -1816,6 +1820,7 @@ No need to run analysis to see your files.
             tree.column("Creation Time", width=120)
             tree.column("Last Modified", width=120)
             tree.column("Status", width=80)
+            tree.column("Type", width=150)
             tree.column("Security", width=80)
             tree.column("Sec_Conf", width=70)
             tree.column("RGPD", width=80)
@@ -2107,20 +2112,7 @@ No need to run analysis to see your files.
                 ),
             )
 
-            duplicates_check.config(
-                command=lambda tr=tree, sf=status_filter, cf=classification_filter: (
-                    setattr(self, "results_offset", 0),
-                    self.refresh_results_table(
-                        tr,
-                        sf.get(),
-                        cf.get(),
-                        0,
-                        page_label,
-                        prev_page_btn,
-                        next_page_btn,
-                    ),
-                )
-            )
+
 
             tree.bind(
                 "<Double-1>", lambda e: self.show_file_details(tree, results_window)
@@ -2378,6 +2370,95 @@ No need to run analysis to see your files.
             dup_ids.update(f.id for f in fam)
         return dup_ids
 
+    def _get_optimized_results_with_duplicates_info(
+        self,
+        status_filter: str,
+        classification_filter: str,
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> list[tuple]:
+        """Return paginated results enriched with duplicate type info."""
+        base_results = self._get_optimized_results(
+            status_filter, classification_filter, offset=offset, limit=limit
+        )
+
+        # When duplicate filter is inactive simply return rows with empty Type
+        if not (
+            hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get()
+        ):
+            return [row + ("",) for row in base_results]
+
+        ids = [r[0] for r in base_results]
+        if not ids:
+            return [row + ("",) for row in base_results]
+
+        db_path = Path("analysis_results.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(ids))
+        cursor.execute(
+            f"SELECT id, fast_hash FROM fichiers WHERE id IN ({placeholders})",
+            ids,
+        )
+        hash_map = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+
+        files = [
+            FileInfo(
+                id=r[0],
+                path=r[5],
+                fast_hash=hash_map.get(r[0]),
+                file_size=r[6] or 0,
+                creation_time=r[8],
+                last_modified=r[9],
+            )
+            for r in base_results
+        ]
+
+        families = self.duplicate_detector.detect_duplicate_family(files)
+
+        file_type_map: dict[int, str] = {}
+        for fam_files in families.values():
+            if len(fam_files) > 1:
+                source = self.duplicate_detector.identify_source(fam_files)
+                file_type_map[source.id] = "SOURCE"
+                for f in fam_files:
+                    if f.id != source.id:
+                        file_type_map[f.id] = f"COPIE ID_{source.id}"
+
+        enriched: list[tuple] = []
+        for r in base_results:
+            enriched.append(r + (file_type_map.get(r[0], ""),))
+
+        if self.show_duplicates_var.get():
+            enriched = self._sort_by_duplicate_families(enriched)
+
+        return enriched
+
+    def _sort_by_duplicate_families(self, results: list[tuple]) -> list[tuple]:
+        """Group results so that each duplicate family is contiguous."""
+        families: dict[str, list[tuple]] = {}
+        non_duplicates: list[tuple] = []
+
+        for row in results:
+            file_type = row[-1]
+            if file_type == "SOURCE":
+                key = f"family_{row[0]}"
+                families.setdefault(key, []).append(row)
+            elif file_type.startswith("COPIE ID_"):
+                source_id = file_type.split("ID_")[1]
+                key = f"family_{source_id}"
+                families.setdefault(key, []).append(row)
+            else:
+                non_duplicates.append(row)
+
+        sorted_results: list[tuple] = []
+        for fam_rows in families.values():
+            fam_rows.sort(key=lambda x: (0 if x[-1] == "SOURCE" else 1, x[8]))
+            sorted_results.extend(fam_rows)
+        sorted_results.extend(non_duplicates)
+        return sorted_results
+
     def refresh_results_table(
         self,
         tree,
@@ -2420,24 +2501,26 @@ No need to run analysis to see your files.
             if cached is not None:
                 rows = cached
             else:
-                rows = self._get_optimized_results(
+                rows = self._get_optimized_results_with_duplicates_info(
                     status_filter,
                     classification_filter,
                     offset=offset,
                     limit=self.results_limit,
                 )
                 self.results_cache.put(cache_key, rows)
-            self.results_total = self._get_results_count(
-                status_filter, classification_filter
-            )
 
-            self._insert_rows_batch(tree, rows)
+            if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+                self.results_total = len([r for r in rows if r[-1]])
+            else:
+                self.results_total = self._get_results_count(status_filter, classification_filter)
 
-            self.log_action(f"Results table refreshed: {len(rows)} entries", "INFO")
+            self._insert_rows_batch_with_type(tree, rows)
 
-            # Update pagination controls now that results_total is known
             self._update_page_controls(page_label, prev_btn, next_btn)
-            self._update_duplicate_stats(status_filter, classification_filter)
+            self.log_action(
+                f"Results table refreshed with duplicates info: {len(rows)} entries",
+                "INFO",
+            )
 
         except Exception as e:
             messagebox.showerror(
@@ -2550,6 +2633,152 @@ No need to run analysis to see your files.
                 self.root.after(5, lambda: insert_batch(end))
 
         insert_batch()
+
+    def _insert_rows_batch_with_type(self, tree, rows) -> None:
+        """Insert rows including the duplicate Type column."""
+        if not self.is_windows:
+            for row in rows:
+                (
+                    file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    path,
+                    size,
+                    owner,
+                    creation_time,
+                    last_modified,
+                    status,
+                    file_type,
+                    security_class,
+                    rgpd_risk,
+                    finance_type,
+                    legal_type,
+                    confidence,
+                    proc_time,
+                    resume,
+                ) = row
+
+                display_type = file_type
+                if file_type == "SOURCE":
+                    display_type = "\U0001F4C4 SOURCE"
+                elif file_type.startswith("COPIE"):
+                    display_type = f"\U0001F4CB {file_type}"
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        file_id,
+                        name,
+                        host,
+                        extension,
+                        username,
+                        path[-50:] + "..." if len(path) > 50 else path,
+                        size,
+                        owner,
+                        creation_time,
+                        last_modified,
+                        status,
+                        display_type,
+                        security_class,
+                        rgpd_risk,
+                        finance_type,
+                        legal_type,
+                        confidence or 0,
+                        proc_time or 0,
+                        resume or "",
+                    ),
+                )
+            return
+
+        batch_size = 25
+
+        def insert_batch(start: int = 0) -> None:
+            end = min(start + batch_size, len(rows))
+            for i in range(start, end):
+                (
+                    file_id,
+                    name,
+                    host,
+                    extension,
+                    username,
+                    path,
+                    size,
+                    owner,
+                    creation_time,
+                    last_modified,
+                    status,
+                    file_type,
+                    security_class,
+                    rgpd_risk,
+                    finance_type,
+                    legal_type,
+                    confidence,
+                    proc_time,
+                    resume,
+                ) = rows[i]
+
+                display_type = file_type
+                if file_type == "SOURCE":
+                    display_type = "\U0001F4C4 SOURCE"
+                elif file_type.startswith("COPIE"):
+                    display_type = f"\U0001F4CB {file_type}"
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        file_id,
+                        name,
+                        host,
+                        extension,
+                        username,
+                        path[-50:] + "..." if len(path) > 50 else path,
+                        size,
+                        owner,
+                        creation_time,
+                        last_modified,
+                        status,
+                        display_type,
+                        security_class,
+                        rgpd_risk,
+                        finance_type,
+                        legal_type,
+                        confidence or 0,
+                        proc_time or 0,
+                        resume or "",
+                    ),
+                )
+            if end < len(rows):
+                self.root.after(5, lambda: insert_batch(end))
+
+        insert_batch()
+
+    def _on_duplicates_filter_changed(
+        self,
+        tree,
+        status_filter,
+        classification_filter,
+        page_label,
+        prev_btn,
+        next_btn,
+    ) -> None:
+        """Callback triggered when duplicate filter checkbox changes."""
+        self.results_offset = 0
+        self.log_action(
+            f"Duplicates filter changed: {self.show_duplicates_var.get()}", "INFO"
+        )
+        self.refresh_results_table(
+            tree,
+            status_filter.get(),
+            classification_filter.get(),
+            0,
+            page_label,
+            prev_btn,
+            next_btn,
+        )
 
     def show_file_details(self, tree, parent_window: tk.Toplevel | tk.Tk | None = None):
         """Affiche les détails complets d'un fichier sélectionné."""
