@@ -27,6 +27,7 @@ class FileInfo:
     file_size: int
     creation_time: Optional[str] = None
     last_modified: Optional[str] = None
+    owner: Optional[str] = None
 
 
 class DuplicateDetector:

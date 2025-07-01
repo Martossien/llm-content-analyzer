@@ -902,7 +902,11 @@ class AnalyticsPanel:
         class_map = self._get_classification_map()
         rgpd_map = self._get_rgpd_map()
 
-        large_files = [f for f in files if f.file_size > 100 * 1024 * 1024 and f.owner]
+        large_files = [
+            f
+            for f in files
+            if f.file_size > 100 * 1024 * 1024 and f.owner and f.owner.strip()
+        ]
         large_files_by_user: Dict[str, Dict[str, Any]] = {}
         for f in large_files:
             owner = f.owner or "Inconnu"
@@ -913,7 +917,11 @@ class AnalyticsPanel:
 
         top_large_files = sorted(large_files_by_user.items(), key=lambda x: x[1]["total_size"], reverse=True)[:3]
 
-        c3_files = [f for f in files if class_map.get(f.id) == "C3" and f.owner]
+        c3_files = [
+            f
+            for f in files
+            if class_map.get(f.id) == "C3" and f.owner and f.owner.strip()
+        ]
         c3_by_user: Dict[str, Dict[str, Any]] = {}
         for f in c3_files:
             owner = f.owner or "Inconnu"
@@ -924,7 +932,11 @@ class AnalyticsPanel:
 
         top_c3_files = sorted(c3_by_user.items(), key=lambda x: x[1]["count"], reverse=True)[:3]
 
-        rgpd_critical_files = [f for f in files if rgpd_map.get(f.id) == "critical" and f.owner]
+        rgpd_critical_files = [
+            f
+            for f in files
+            if rgpd_map.get(f.id) == "critical" and f.owner and f.owner.strip()
+        ]
         rgpd_by_user: Dict[str, Dict[str, Any]] = {}
         for f in rgpd_critical_files:
             owner = f.owner or "Inconnu"
