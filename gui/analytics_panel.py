@@ -39,7 +39,7 @@ class AnalyticsPanel:
         self.CACHE_DURATION = 30
 
         self._build_ui()
-        self.tabs: Dict[str, ttk.Frame] = {"age": self.security_tab}
+        self.tabs: Dict[str, ttk.Frame] = {}
         self.update_alert_cards()
         self.update_thematic_tabs()
 
@@ -112,7 +112,7 @@ class AnalyticsPanel:
         for i in range(4):
             cards_container.columnconfigure(i, weight=1)
 
-        notebook_frame = ttk.LabelFrame(self.parent, text="🔍 ANALYSE DÉTAILLÉE PAR DOMAINE")
+        notebook_frame = ttk.LabelFrame(self.parent, text="🔍 ANALYSE DÉTAILLÉE BUSINESS INTELLIGENCE")
         notebook_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         self.thematic_notebook = ttk.Notebook(notebook_frame)
@@ -133,6 +133,22 @@ class AnalyticsPanel:
         legal_frame = ttk.Frame(self.thematic_notebook)
         self.thematic_notebook.add(legal_frame, text="⚖️ Legal")
         self._build_legal_tab(legal_frame)
+
+        duplicates_detailed_frame = ttk.Frame(self.thematic_notebook)
+        self.thematic_notebook.add(duplicates_detailed_frame, text="🔄 Doublons Détaillés")
+        self._build_duplicates_detailed_tab(duplicates_detailed_frame)
+
+        temporal_frame = ttk.Frame(self.thematic_notebook)
+        self.thematic_notebook.add(temporal_frame, text="📅 Analyse Temporelle")
+        self._build_temporal_analysis_tab(temporal_frame)
+
+        file_size_frame = ttk.Frame(self.thematic_notebook)
+        self.thematic_notebook.add(file_size_frame, text="📏 Tailles Fichiers")
+        self._build_file_size_analysis_tab(file_size_frame)
+
+        top_users_frame = ttk.Frame(self.thematic_notebook)
+        self.thematic_notebook.add(top_users_frame, text="🏆 Top Utilisateurs")
+        self._build_top_users_tab(top_users_frame)
 
         actions_frame = ttk.Frame(self.parent)
         actions_frame.pack(fill="x", padx=5, pady=5)
@@ -405,14 +421,12 @@ class AnalyticsPanel:
         return metrics
 
     def calculate_business_metrics(self) -> Dict[str, Any]:
-        cache_key = f"{self.threshold_age_years.get()}_{self.threshold_size_mb.get()}_{self.classification_filter.get()}"
-        current_time = time.time()
+        """Calcul complet des métriques business avec cache et extensions."""
 
-        if not self._metrics_cache:
-            disk_metrics = self._load_metrics_from_disk()
-            if disk_metrics:
-                self._metrics_cache[cache_key] = disk_metrics
-                self._cache_timestamp = current_time
+        cache_key = (
+            f"{self.threshold_age_years.get()}_{self.threshold_size_mb.get()}_{self.classification_filter.get()}"
+        )
+        current_time = time.time()
 
         if (
             cache_key in self._metrics_cache
@@ -420,7 +434,105 @@ class AnalyticsPanel:
         ):
             return self._metrics_cache[cache_key]
 
-        metrics = self._calculate_metrics_core()
+        if self.db_manager is None:
+            return {}
+
+        files = self._connect_files()
+        if not files:
+            return {}
+
+        age_threshold_days = int(self.threshold_age_years.get()) * 365
+        size_threshold_mb = int(self.threshold_size_mb.get())
+        classification_filter = self.classification_filter.get()
+
+        if classification_filter != "Tous":
+            files = self._filter_files_by_classification(files, classification_filter)
+
+        age_stats = self.age_analyzer.calculate_archival_candidates(files, age_threshold_days)
+        size_stats = self.size_analyzer.calculate_space_optimization(files, size_threshold_mb)
+        dup_families = self.duplicate_detector.detect_duplicate_family(files)
+        dup_stats = self.duplicate_detector.get_duplicate_statistics(dup_families)
+
+        class_map = self._get_classification_map()
+        rgpd_map = self._get_rgpd_map()
+        legal_map = self._get_legal_map()
+
+        super_critical_files = [
+            f
+            for f in files
+            if (
+                class_map.get(f.id) == "C3"
+                and rgpd_map.get(f.id) == "critical"
+                and legal_map.get(f.id) in ["nda", "litigation"]
+            )
+        ]
+
+        critical_files = [
+            f
+            for f in files
+            if (
+                class_map.get(f.id) == "C3"
+                or rgpd_map.get(f.id) == "critical"
+                or legal_map.get(f.id) in ["nda", "litigation"]
+            )
+            and f not in super_critical_files
+        ]
+
+        large_files = self.size_analyzer.identify_large_files(files, size_threshold_mb)
+        old_files = self._get_old_files_creation(files, age_threshold_days)
+        dormant_files = self.age_analyzer.identify_stale_files(files, age_threshold_days)
+
+        large_file_ids = {f.id for f in large_files}
+        dormant_file_ids = {f.id for f in dormant_files}
+        total_affected_count = len(large_file_ids.union(dormant_file_ids))
+
+        duplicates_detailed = self._calculate_duplicates_detailed_metrics(files)
+        temporal_modification = self._calculate_temporal_metrics(files, "modification")
+        temporal_creation = self._calculate_temporal_metrics(files, "creation")
+        file_size_analysis = self._calculate_file_size_metrics(files)
+        top_users = self._calculate_top_users_metrics(files)
+
+        total_files = len(files)
+        total_size = sum(f.file_size for f in files)
+
+        metrics = {
+            "super_critical": {
+                "count": len(super_critical_files),
+                "percentage": round(len(super_critical_files) / total_files * 100, 1) if total_files else 0,
+                "size_gb": sum(f.file_size for f in super_critical_files) / (1024 ** 3),
+            },
+            "critical": {
+                "count": len(critical_files),
+                "percentage": round(len(critical_files) / total_files * 100, 1) if total_files else 0,
+                "size_gb": sum(f.file_size for f in critical_files) / (1024 ** 3),
+            },
+            "duplicates": {
+                "files_2x": self._count_files_duplicated_n_times(dup_families, 2),
+                "files_3x": self._count_files_duplicated_n_times(dup_families, 3),
+                "files_4x": self._count_files_duplicated_n_times(dup_families, 4),
+                "max_copies": max((len(fam) for fam in dup_families.values()), default=0),
+                "total_groups": len(dup_families),
+                "wasted_space_gb": dup_stats.get("space_wasted_bytes", 0) / (1024 ** 3),
+                "percentage": round(dup_stats.get("total_duplicates", 0) / total_files * 100, 1) if total_files else 0,
+                "detailed": duplicates_detailed,
+            },
+            "size_age": {
+                "large_files_pct": round(len(large_files) / total_files * 100, 1) if total_files else 0,
+                "old_files_pct": round(len(old_files) / total_files * 100, 1) if total_files else 0,
+                "dormant_files_pct": round(len(dormant_files) / total_files * 100, 1) if total_files else 0,
+                "archival_size_gb": age_stats.get("total_size_bytes", 0) / (1024 ** 3),
+                "total_affected": total_affected_count,
+            },
+            "global": {
+                "total_files": total_files,
+                "total_size_gb": total_size / (1024 ** 3),
+            },
+            "temporal_modification": temporal_modification,
+            "temporal_creation": temporal_creation,
+            "file_size_analysis": file_size_analysis,
+            "top_users": top_users,
+        }
+
         self._metrics_cache = {cache_key: metrics}
         self._cache_timestamp = current_time
         self._save_metrics_to_disk(metrics)
@@ -433,6 +545,23 @@ class AnalyticsPanel:
         if not metrics:
             self.progress_label.config(text="❌ Erreur calcul")
             return
+        global_metrics = metrics.get('global', {})
+        total_files = global_metrics.get('total_files', 0)
+        total_size_gb = global_metrics.get('total_size_gb', 0)
+        if not hasattr(self, 'totals_label'):
+            totals_frame = ttk.Frame(self.parent)
+            totals_frame.pack(fill="x", padx=5, pady=2)
+            self.totals_label = ttk.Label(
+                totals_frame,
+                text=f"📊 TOTAL: {total_files:,} fichiers | {total_size_gb:.1f}GB",
+                font=("Arial", 12, "bold"),
+                foreground="navy",
+            )
+            self.totals_label.pack()
+        else:
+            self.totals_label.config(
+                text=f"📊 TOTAL: {total_files:,} fichiers | {total_size_gb:.1f}GB"
+            )
         super_crit = metrics.get('super_critical', {})
         count = super_crit.get('count', 0)
         pct = super_crit.get('percentage', 0)
@@ -470,6 +599,7 @@ class AnalyticsPanel:
         self.size_age_line1.config(foreground="blue" if affected > 0 else "green")
         try:
             self.update_thematic_tabs()
+            self.update_extended_tabs(metrics)
         except Exception as e:  # pragma: no cover - UI issues
             logger.error("Erreur mise à jour onglets: %s", e)
         self.progress_label.config(text="✅ Métriques à jour")
@@ -533,7 +663,284 @@ class AnalyticsPanel:
         for doc_type in ["none", "employment", "lease", "sale", "nda", "compliance", "litigation", "Autres"]:
             label = ttk.Label(container, text=f"{doc_type}: 0% | 0 fichiers | 0GB", font=("Arial", 12))
             label.pack(anchor="w", pady=3, padx=10)
-            self.legal_labels[doc_type] = label
+        self.legal_labels[doc_type] = label
+
+    # ------------------------------------------------------------------
+    # Extended analytics tabs
+    # ------------------------------------------------------------------
+
+    def _build_duplicates_detailed_tab(self, parent_frame: ttk.Frame) -> None:
+        """Onglet doublons détaillé."""
+        title_label = ttk.Label(
+            parent_frame,
+            text="🔍 ANALYSE DOUBLONS DÉTAILLÉE",
+            font=("Arial", 14, "bold"),
+        )
+        title_label.pack(pady=10)
+
+        container = ttk.LabelFrame(parent_frame, text="RÉPARTITION PAR NOMBRE DE COPIES")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.duplicates_detailed_labels = {}
+        duplicate_levels = [
+            ("1x", "Fichiers dupliqués exactement 1 fois", "blue"),
+            ("2x", "Fichiers dupliqués exactement 2 fois", "orange"),
+            ("3x", "Fichiers dupliqués exactement 3 fois", "darkorange"),
+            ("4x", "Fichiers dupliqués exactement 4 fois", "red"),
+            ("5x", "Fichiers dupliqués exactement 5 fois", "darkred"),
+            ("6x", "Fichiers dupliqués exactement 6 fois", "purple"),
+            ("7x+", "Fichiers dupliqués 7 fois ou plus", "darkmagenta"),
+        ]
+
+        for level, description, color in duplicate_levels:
+            frame = ttk.Frame(container)
+            frame.pack(fill="x", pady=2, padx=10)
+
+            label = ttk.Label(frame, text=f"{level}: 0% | 0 fichiers | 0GB", font=("Arial", 11))
+            label.pack(side="left")
+
+            desc_label = ttk.Label(frame, text=f"({description})", font=("Arial", 9), foreground=color)
+            desc_label.pack(side="left", padx=10)
+
+            self.duplicates_detailed_labels[level] = label
+
+    def _calculate_duplicates_detailed_metrics(self, files: List[FileInfo]) -> Dict[str, Dict[str, Any]]:
+        dup_families = self.duplicate_detector.detect_duplicate_family(files)
+        total_files = len(files)
+
+        detailed_metrics: Dict[str, Dict[str, Any]] = {}
+        for level in ["1x", "2x", "3x", "4x", "5x", "6x", "7x+"]:
+            if level == "7x+":
+                matching_families = [fam for fam in dup_families.values() if len(fam) >= 7]
+            else:
+                target_count = int(level.replace("x", ""))
+                matching_families = [fam for fam in dup_families.values() if len(fam) == target_count]
+
+            total_files_level = sum(len(fam) for fam in matching_families)
+            total_size_level = sum(sum(f.file_size for f in fam) for fam in matching_families)
+
+            detailed_metrics[level] = {
+                "count": total_files_level,
+                "percentage": round(total_files_level / total_files * 100, 1) if total_files else 0,
+                "size_gb": total_size_level / (1024 ** 3),
+                "families_count": len(matching_families),
+            }
+
+        return detailed_metrics
+
+    def _build_temporal_analysis_tab(self, parent_frame: ttk.Frame) -> None:
+        notebook = ttk.Notebook(parent_frame)
+        notebook.pack(fill="both", expand=True, padx=5, pady=5)
+
+        modification_frame = ttk.Frame(notebook)
+        notebook.add(modification_frame, text="📅 Dates Modification")
+        self._build_temporal_sub_tab(modification_frame, "modification")
+
+        creation_frame = ttk.Frame(notebook)
+        notebook.add(creation_frame, text="🆕 Dates Création")
+        self._build_temporal_sub_tab(creation_frame, "creation")
+
+    def _build_temporal_sub_tab(self, parent_frame: ttk.Frame, mode: str) -> None:
+        title = "MODIFICATION" if mode == "modification" else "CRÉATION"
+        container = ttk.LabelFrame(parent_frame, text=f"FICHIERS PAR ANCIENNETÉ {title}")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        temporal_labels_key = f"{mode}_labels"
+        setattr(self, temporal_labels_key, {})
+        temporal_labels = getattr(self, temporal_labels_key)
+
+        for years in range(1, 8):
+            if years == 7:
+                label_text = f"+{years} ans: 0% | 0 fichiers | 0GB"
+                description = f"Fichiers sans {mode} depuis {years} ans ou plus"
+            else:
+                label_text = f"{years} an{'s' if years > 1 else ''}: 0% | 0 fichiers | 0GB"
+                description = f"Fichiers sans {mode} depuis exactement {years} an{'s' if years > 1 else ''}"
+
+            frame = ttk.Frame(container)
+            frame.pack(fill="x", pady=2, padx=10)
+
+            label = ttk.Label(frame, text=label_text, font=("Arial", 11))
+            label.pack(side="left")
+
+            desc_label = ttk.Label(frame, text=f"({description})", font=("Arial", 9), foreground="gray")
+            desc_label.pack(side="left", padx=10)
+
+            temporal_labels[f"{years}y"] = label
+
+    def _calculate_temporal_metrics(self, files: List[FileInfo], mode: str) -> Dict[str, Dict[str, Any]]:
+        from datetime import datetime, timedelta
+
+        now = datetime.now()
+        total_files = len(files)
+        temporal_metrics: Dict[str, Dict[str, Any]] = {}
+
+        for years in range(1, 8):
+            if years == 7:
+                cutoff = now - timedelta(days=years * 365)
+                if mode == "modification":
+                    matching_files = [f for f in files if self._parse_time(f.last_modified) <= cutoff]
+                else:
+                    matching_files = [f for f in files if self._parse_time(f.creation_time) <= cutoff]
+            else:
+                cutoff_start = now - timedelta(days=(years + 1) * 365)
+                cutoff_end = now - timedelta(days=years * 365)
+                if mode == "modification":
+                    matching_files = [
+                        f for f in files if cutoff_start < self._parse_time(f.last_modified) <= cutoff_end
+                    ]
+                else:
+                    matching_files = [
+                        f for f in files if cutoff_start < self._parse_time(f.creation_time) <= cutoff_end
+                    ]
+
+            total_size = sum(f.file_size for f in matching_files)
+            temporal_metrics[f"{years}y"] = {
+                "count": len(matching_files),
+                "percentage": round(len(matching_files) / total_files * 100, 1) if total_files else 0,
+                "size_gb": total_size / (1024 ** 3),
+            }
+
+        return temporal_metrics
+
+    def _build_file_size_analysis_tab(self, parent_frame: ttk.Frame) -> None:
+        container = ttk.LabelFrame(parent_frame, text="RÉPARTITION PAR TAILLE DE FICHIER")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.file_size_labels = {}
+        size_ranges = [
+            ("<50MB", 0, 50, "green"),
+            ("50-100MB", 50, 100, "blue"),
+            ("100-150MB", 100, 150, "orange"),
+            ("150-200MB", 150, 200, "darkorange"),
+            ("200-300MB", 200, 300, "red"),
+            ("300-500MB", 300, 500, "darkred"),
+            (">500MB", 500, float("inf"), "purple"),
+        ]
+
+        for range_label, min_mb, max_mb, color in size_ranges:
+            frame = ttk.Frame(container)
+            frame.pack(fill="x", pady=2, padx=10)
+
+            label = ttk.Label(frame, text=f"{range_label}: 0% | 0 fichiers | 0GB", font=("Arial", 11))
+            label.pack(side="left")
+
+            desc_label = ttk.Label(
+                frame,
+                text=f"(Fichiers entre {min_mb}MB et {max_mb}MB)",
+                font=("Arial", 9),
+                foreground=color,
+            )
+            if max_mb == float("inf"):
+                desc_label.config(text=f"(Fichiers supérieurs à {min_mb}MB)")
+            desc_label.pack(side="left", padx=10)
+
+            self.file_size_labels[range_label] = label
+
+    def _calculate_file_size_metrics(self, files: List[FileInfo]) -> Dict[str, Dict[str, Any]]:
+        total_files = len(files)
+        size_metrics: Dict[str, Dict[str, Any]] = {}
+
+        size_ranges = [
+            ("<50MB", 0, 50),
+            ("50-100MB", 50, 100),
+            ("100-150MB", 100, 150),
+            ("150-200MB", 150, 200),
+            ("200-300MB", 200, 300),
+            ("300-500MB", 300, 500),
+            (">500MB", 500, float("inf")),
+        ]
+
+        for range_label, min_mb, max_mb in size_ranges:
+            min_bytes = min_mb * 1024 * 1024
+            max_bytes = max_mb * 1024 * 1024 if max_mb != float("inf") else float("inf")
+
+            if max_mb == float("inf"):
+                matching_files = [f for f in files if f.file_size >= min_bytes]
+            else:
+                matching_files = [f for f in files if min_bytes <= f.file_size < max_bytes]
+
+            total_size = sum(f.file_size for f in matching_files)
+            size_metrics[range_label] = {
+                "count": len(matching_files),
+                "percentage": round(len(matching_files) / total_files * 100, 1) if total_files else 0,
+                "size_gb": total_size / (1024 ** 3),
+            }
+
+        return size_metrics
+
+    def _build_top_users_tab(self, parent_frame: ttk.Frame) -> None:
+        container = ttk.LabelFrame(parent_frame, text="🏆 TOP UTILISATEURS - INTELLIGENCE BUSINESS")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        top_categories = [
+            ("🗂️ Top Gros Fichiers", "top_large_files"),
+            ("🔒 Top Fichiers C3", "top_c3_files"),
+            ("⚠️ Top RGPD Critical", "top_rgpd_critical"),
+        ]
+
+        for i, (title, key) in enumerate(top_categories):
+            category_frame = ttk.LabelFrame(container, text=title)
+            category_frame.grid(row=i // 3, column=i % 3, padx=5, pady=5, sticky="nsew")
+
+            top_labels: Dict[str, ttk.Label] = {}
+            for rank in range(1, 4):
+                label = ttk.Label(category_frame, text=f"#{rank}: -- (0 fichiers, 0GB)", font=("Arial", 10))
+                label.pack(anchor="w", pady=2, padx=5)
+                top_labels[f"rank_{rank}"] = label
+
+            setattr(self, f"{key}_labels", top_labels)
+
+        for i in range(3):
+            container.columnconfigure(i, weight=1)
+            container.rowconfigure(i // 3, weight=1)
+
+    def _calculate_top_users_metrics(self, files: List[FileInfo]) -> Dict[str, List[Dict[str, Any]]]:
+        if self.db_manager is None:
+            return {}
+
+        class_map = self._get_classification_map()
+        rgpd_map = self._get_rgpd_map()
+
+        large_files = [f for f in files if f.file_size > 100 * 1024 * 1024 and f.owner]
+        large_files_by_user: Dict[str, Dict[str, Any]] = {}
+        for f in large_files:
+            owner = f.owner or "Inconnu"
+            if owner not in large_files_by_user:
+                large_files_by_user[owner] = {"count": 0, "total_size": 0}
+            large_files_by_user[owner]["count"] += 1
+            large_files_by_user[owner]["total_size"] += f.file_size
+
+        top_large_files = sorted(large_files_by_user.items(), key=lambda x: x[1]["total_size"], reverse=True)[:3]
+
+        c3_files = [f for f in files if class_map.get(f.id) == "C3" and f.owner]
+        c3_by_user: Dict[str, Dict[str, Any]] = {}
+        for f in c3_files:
+            owner = f.owner or "Inconnu"
+            if owner not in c3_by_user:
+                c3_by_user[owner] = {"count": 0, "total_size": 0}
+            c3_by_user[owner]["count"] += 1
+            c3_by_user[owner]["total_size"] += f.file_size
+
+        top_c3_files = sorted(c3_by_user.items(), key=lambda x: x[1]["count"], reverse=True)[:3]
+
+        rgpd_critical_files = [f for f in files if rgpd_map.get(f.id) == "critical" and f.owner]
+        rgpd_by_user: Dict[str, Dict[str, Any]] = {}
+        for f in rgpd_critical_files:
+            owner = f.owner or "Inconnu"
+            if owner not in rgpd_by_user:
+                rgpd_by_user[owner] = {"count": 0, "total_size": 0}
+            rgpd_by_user[owner]["count"] += 1
+            rgpd_by_user[owner]["total_size"] += f.file_size
+
+        top_rgpd_critical = sorted(rgpd_by_user.items(), key=lambda x: x[1]["count"], reverse=True)[:3]
+
+        return {
+            "top_large_files": [{"owner": owner, **data} for owner, data in top_large_files],
+            "top_c3_files": [{"owner": owner, **data} for owner, data in top_c3_files],
+            "top_rgpd_critical": [{"owner": owner, **data} for owner, data in top_rgpd_critical],
+        }
+
 
     def recalculate_all_metrics(self) -> None:
         try:
@@ -708,6 +1115,39 @@ class AnalyticsPanel:
         self.security_focus_labels['C3 + Legal'].config(text=f"C3 + Legal: {metrics.get('critical', {}).get('count', 0)}")
         self.security_focus_labels['Recommandations'].config(text=self.generate_recommendations(metrics))
 
+    def update_extended_tabs(self, metrics: Dict[str, Any]) -> None:
+        dup_details = metrics.get('duplicates', {}).get('detailed', {})
+        for level, label in getattr(self, 'duplicates_detailed_labels', {}).items():
+            info = dup_details.get(level, {'percentage': 0, 'count': 0, 'size_gb': 0})
+            label.config(text=f"{level}: {info['percentage']}% | {info['count']} fichiers | {info['size_gb']:.1f}GB")
+
+        for mode in ['modification', 'creation']:
+            temporal_data = metrics.get(f'temporal_{mode}', {})
+            labels = getattr(self, f'{mode}_labels', {})
+            for years_key, label in labels.items():
+                data = temporal_data.get(years_key, {'percentage': 0, 'count': 0, 'size_gb': 0})
+                prefix = label.cget('text').split(':')[0]
+                label.config(text=f"{prefix}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB")
+
+        size_data = metrics.get('file_size_analysis', {})
+        for range_label, label in getattr(self, 'file_size_labels', {}).items():
+            data = size_data.get(range_label, {'percentage': 0, 'count': 0, 'size_gb': 0})
+            label.config(text=f"{range_label}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB")
+
+        top_users = metrics.get('top_users', {})
+        for key in ['top_large_files', 'top_c3_files', 'top_rgpd_critical']:
+            labels = getattr(self, f'{key}_labels', {})
+            entries = top_users.get(key, [])
+            for rank in range(1, 4):
+                if rank <= len(entries):
+                    item = entries[rank - 1]
+                    size_gb = item['total_size'] / (1024**3)
+                    labels[f'rank_{rank}'].config(
+                        text=f"#{rank}: {item['owner']} ({item['count']} fichiers, {size_gb:.1f}GB)"
+                    )
+                else:
+                    labels[f'rank_{rank}'].config(text=f"#{rank}: -- (0 fichiers, 0GB)")
+
     def export_business_report(self) -> None:
         try:
             metrics = self.calculate_business_metrics()
@@ -726,7 +1166,15 @@ class AnalyticsPanel:
                 }
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(report, f, indent=2, ensure_ascii=False)
-                messagebox.showinfo('Succès', f'Rapport exporté : {filename}')
+                export_window = tk.Toplevel(self.parent)
+                export_window.title("Export Réussi")
+                export_window.geometry("300x120")
+                export_window.transient(self.parent)
+                export_window.lift()
+                export_window.focus_set()
+                export_window.grab_set()
+                ttk.Label(export_window, text=f"Rapport exporté : {filename}").pack(pady=20)
+                ttk.Button(export_window, text="OK", command=export_window.destroy).pack(pady=5)
         except Exception as e:
             self._handle_analytics_error("export du rapport", e)
 
