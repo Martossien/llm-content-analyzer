@@ -156,6 +156,14 @@ class DBManager:
                 "CREATE INDEX IF NOT EXISTS idx_file_analysis_opt ON fichiers(id, fast_hash, file_size) WHERE fast_hash IS NOT NULL",
                 "idx_file_analysis_opt",
             ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_duplicate_enhanced ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL AND fast_hash != ''",
+                "idx_duplicate_enhanced",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_user_analytics ON fichiers(owner, file_size, status) WHERE owner IS NOT NULL",
+                "idx_user_analytics",
+            ),
         ]
 
         for sql, name in critical_indexes:
