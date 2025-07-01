@@ -2189,7 +2189,7 @@ No need to run analysis to see your files.
                 if status_filter != "All":
                     query += " AND f.status = ?"
                     params.append(status_filter)
-                if classification_filter != "All":
+                if classification_filter and classification_filter != "All":
                     query += " AND r.security_classification_cached = ?"
                     params.append(classification_filter)
                 cursor.execute(query, params)
@@ -2299,7 +2299,7 @@ No need to run analysis to see your files.
             base_query += " AND f.status = ?"
             params.append(status_filter)
 
-        if classification_filter != "All":
+        if classification_filter and classification_filter != "All":
             base_query += " AND r.security_classification_cached = ?"
             params.append(classification_filter)
 
@@ -2327,7 +2327,7 @@ No need to run analysis to see your files.
         if status_filter != "All":
             query += " AND f.status = ?"
             params.append(status_filter)
-        if classification_filter != "All":
+        if classification_filter and classification_filter != "All":
             query += " AND r.security_classification_cached = ?"
             params.append(classification_filter)
         cursor.execute(query, params)
@@ -2346,7 +2346,7 @@ No need to run analysis to see your files.
         if status_filter != "All":
             query += " AND f.status = ?"
             params.append(status_filter)
-        if classification_filter != "All":
+        if classification_filter and classification_filter != "All":
             query += " AND r.security_classification_cached = ?"
             params.append(classification_filter)
         cursor.execute(query, params)
@@ -2441,11 +2441,11 @@ No need to run analysis to see your files.
         non_duplicates: list[tuple] = []
 
         for row in results:
-            file_type = row[-1]
+            file_type = row[-1] or ""
             if file_type == "SOURCE":
                 key = f"family_{row[0]}"
                 families.setdefault(key, []).append(row)
-            elif file_type.startswith("COPIE ID_"):
+            elif file_type and file_type.startswith("COPIE ID_"):
                 source_id = file_type.split("ID_")[1]
                 key = f"family_{source_id}"
                 families.setdefault(key, []).append(row)
@@ -2562,7 +2562,7 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        path[-50:] + "..." if len(path) > 50 else path,
+                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
                         size,
                         owner,
                         creation_time,
@@ -2614,7 +2614,7 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        path[-50:] + "..." if len(path) > 50 else path,
+                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
                         size,
                         owner,
                         creation_time,
@@ -2660,10 +2660,11 @@ No need to run analysis to see your files.
                     resume,
                 ) = row
 
+                file_type = file_type or ""
                 display_type = file_type
                 if file_type == "SOURCE":
                     display_type = "\U0001F4C4 SOURCE"
-                elif file_type.startswith("COPIE"):
+                elif file_type and file_type.startswith("COPIE"):
                     display_type = f"\U0001F4CB {file_type}"
 
                 tree.insert(
@@ -2675,7 +2676,7 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        path[-50:] + "..." if len(path) > 50 else path,
+                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
                         size,
                         owner,
                         creation_time,
@@ -2720,10 +2721,11 @@ No need to run analysis to see your files.
                     resume,
                 ) = rows[i]
 
+                file_type = file_type or ""
                 display_type = file_type
                 if file_type == "SOURCE":
                     display_type = "\U0001F4C4 SOURCE"
-                elif file_type.startswith("COPIE"):
+                elif file_type and file_type.startswith("COPIE"):
                     display_type = f"\U0001F4CB {file_type}"
 
                 tree.insert(
@@ -2735,7 +2737,7 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        path[-50:] + "..." if len(path) > 50 else path,
+                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
                         size,
                         owner,
                         creation_time,
