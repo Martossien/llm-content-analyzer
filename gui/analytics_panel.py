@@ -663,7 +663,7 @@ class AnalyticsPanel:
         for doc_type in ["none", "employment", "lease", "sale", "nda", "compliance", "litigation", "Autres"]:
             label = ttk.Label(container, text=f"{doc_type}: 0% | 0 fichiers | 0GB", font=("Arial", 12))
             label.pack(anchor="w", pady=3, padx=10)
-        self.legal_labels[doc_type] = label
+            self.legal_labels[doc_type] = label
 
     # ------------------------------------------------------------------
     # Extended analytics tabs
@@ -1115,38 +1115,70 @@ class AnalyticsPanel:
         self.security_focus_labels['C3 + Legal'].config(text=f"C3 + Legal: {metrics.get('critical', {}).get('count', 0)}")
         self.security_focus_labels['Recommandations'].config(text=self.generate_recommendations(metrics))
 
+    def _safe_get_labels(self, labels_key: str) -> Dict[str, ttk.Label]:
+        """Récupère de manière sécurisée un dictionnaire de labels d'interface."""
+        try:
+            labels = getattr(self, labels_key, None)
+            if not isinstance(labels, dict):
+                logger.warning("Attribut %s n'est pas un dictionnaire valide", labels_key)
+                return {}
+            return labels
+        except AttributeError:
+            logger.debug("Attribut %s non trouvé, retour dictionnaire vide", labels_key)
+            return {}
+
     def update_extended_tabs(self, metrics: Dict[str, Any]) -> None:
-        dup_details = metrics.get('duplicates', {}).get('detailed', {})
-        for level, label in getattr(self, 'duplicates_detailed_labels', {}).items():
-            info = dup_details.get(level, {'percentage': 0, 'count': 0, 'size_gb': 0})
-            label.config(text=f"{level}: {info['percentage']}% | {info['count']} fichiers | {info['size_gb']:.1f}GB")
+        """Met à jour les onglets étendus avec vérifications robustes."""
+        try:
+            dup_details = metrics.get('duplicates', {}).get('detailed', {})
+            duplicates_labels = self._safe_get_labels('duplicates_detailed_labels')
+            for level, label in duplicates_labels.items():
+                try:
+                    info = dup_details.get(level, {'percentage': 0, 'count': 0, 'size_gb': 0})
+                    label.config(text=f"{level}: {info['percentage']}% | {info['count']} fichiers | {info['size_gb']:.1f}GB")
+                except Exception as e:
+                    logger.warning("Erreur mise à jour niveau %s: %s", level, e)
 
-        for mode in ['modification', 'creation']:
-            temporal_data = metrics.get(f'temporal_{mode}', {})
-            labels = getattr(self, f'{mode}_labels', {})
-            for years_key, label in labels.items():
-                data = temporal_data.get(years_key, {'percentage': 0, 'count': 0, 'size_gb': 0})
-                prefix = label.cget('text').split(':')[0]
-                label.config(text=f"{prefix}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB")
+            for mode in ['modification', 'creation']:
+                temporal_data = metrics.get(f'temporal_{mode}', {})
+                labels = self._safe_get_labels(f'{mode}_labels')
+                for years_key, label in labels.items():
+                    try:
+                        data = temporal_data.get(years_key, {'percentage': 0, 'count': 0, 'size_gb': 0})
+                        prefix = label.cget('text').split(':')[0] if hasattr(label, 'cget') else years_key
+                        label.config(text=f"{prefix}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB")
+                    except Exception as e:
+                        logger.warning("Erreur mise à jour temporelle %s/%s: %s", mode, years_key, e)
 
-        size_data = metrics.get('file_size_analysis', {})
-        for range_label, label in getattr(self, 'file_size_labels', {}).items():
-            data = size_data.get(range_label, {'percentage': 0, 'count': 0, 'size_gb': 0})
-            label.config(text=f"{range_label}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB")
+            size_data = metrics.get('file_size_analysis', {})
+            size_labels = self._safe_get_labels('file_size_labels')
+            for range_label, label in size_labels.items():
+                try:
+                    data = size_data.get(range_label, {'percentage': 0, 'count': 0, 'size_gb': 0})
+                    label.config(text=f"{range_label}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB")
+                except Exception as e:
+                    logger.warning("Erreur mise à jour taille %s: %s", range_label, e)
 
-        top_users = metrics.get('top_users', {})
-        for key in ['top_large_files', 'top_c3_files', 'top_rgpd_critical']:
-            labels = getattr(self, f'{key}_labels', {})
-            entries = top_users.get(key, [])
-            for rank in range(1, 4):
-                if rank <= len(entries):
-                    item = entries[rank - 1]
-                    size_gb = item['total_size'] / (1024**3)
-                    labels[f'rank_{rank}'].config(
-                        text=f"#{rank}: {item['owner']} ({item['count']} fichiers, {size_gb:.1f}GB)"
-                    )
-                else:
-                    labels[f'rank_{rank}'].config(text=f"#{rank}: -- (0 fichiers, 0GB)")
+            top_users = metrics.get('top_users', {})
+            for key in ['top_large_files', 'top_c3_files', 'top_rgpd_critical']:
+                labels = self._safe_get_labels(f'{key}_labels')
+                entries = top_users.get(key, [])
+                for rank in range(1, 4):
+                    rank_key = f'rank_{rank}'
+                    if rank_key in labels:
+                        try:
+                            if rank <= len(entries):
+                                item = entries[rank - 1]
+                                size_gb = item.get('total_size', 0) / (1024**3)
+                                labels[rank_key].config(
+                                    text=f"#{rank}: {item.get('owner', 'N/A')} ({item.get('count', 0)} fichiers, {size_gb:.1f}GB)"
+                                )
+                            else:
+                                labels[rank_key].config(text=f"#{rank}: -- (0 fichiers, 0GB)")
+                        except Exception as e:
+                            logger.warning("Erreur mise à jour top users %s rank %d: %s", key, rank, e)
+        except Exception as e:
+            self._handle_analytics_error("mise à jour onglets étendus", e)
 
     def export_business_report(self) -> None:
         try:
@@ -1179,27 +1211,73 @@ class AnalyticsPanel:
             self._handle_analytics_error("export du rapport", e)
 
     def generate_recommendations(self, metrics: Dict[str, Any]) -> str:
-        recs: List[str] = []
-        attention = metrics.get('duplicates', {})
-        if attention.get('wasted_space_gb', 0) > 0.5:
-            recs.append("➡️ Réduire les doublons pour économiser de l'espace")
-        surveillance = metrics.get('size_age', {})
-        if surveillance.get('archival_size_gb', 0) > 1:
-            recs.append("📦 Envisager l'archivage des fichiers anciens volumineux")
-        if not recs:
-            return "✅ Aucune recommandation particulière"
-        return "\n".join(recs)
+        """Génère des recommandations business basées sur les métriques."""
+        recommendations: List[str] = []
+
+        super_critical_count = metrics.get('super_critical', {}).get('count', 0)
+        if super_critical_count > 0:
+            recommendations.append(
+                f"🔴 URGENT: {super_critical_count} fichiers super critiques nécessitent une action immédiate"
+            )
+
+        critical_count = metrics.get('critical', {}).get('count', 0)
+        if critical_count > 10:
+            recommendations.append(
+                f"🟠 PRIORITÉ: {critical_count} fichiers critiques à traiter rapidement"
+            )
+
+        duplicates_info = metrics.get('duplicates', {})
+        wasted_gb = duplicates_info.get('wasted_space_gb', 0)
+        if wasted_gb > 1.0:
+            total_groups = duplicates_info.get('total_groups', 0)
+            recommendations.append(
+                f"🟡 OPTIMISATION: {wasted_gb:.1f}GB gaspillés dans {total_groups} groupes de doublons"
+            )
+
+        size_age_info = metrics.get('size_age', {})
+        archival_gb = size_age_info.get('archival_size_gb', 0)
+        if archival_gb > 5.0:
+            affected_files = size_age_info.get('total_affected', 0)
+            recommendations.append(
+                f"📦 ARCHIVAGE: {archival_gb:.1f}GB dans {affected_files} fichiers anciens/volumineux"
+            )
+
+        global_info = metrics.get('global', {})
+        total_size_gb = global_info.get('total_size_gb', 0)
+        if total_size_gb > 100:
+            recommendations.append("💾 CAPACITÉ: Surveillance de l'espace disque recommandée")
+
+        if super_critical_count > 0 or critical_count > 50:
+            recommendations.append("🛡️ SÉCURITÉ: Audit de sécurité recommandé pour les fichiers sensibles")
+
+        total_files = global_info.get('total_files', 0)
+        if total_files > 100000:
+            recommendations.append("⚡ PERFORMANCE: Considérer l'indexation avancée pour les gros volumes")
+
+        if not recommendations:
+            return "✅ Aucune recommandation particulière - Le système fonctionne correctement"
+
+        return "\n".join(f"  {rec}" for rec in recommendations[:5])
 
     def _handle_analytics_error(self, operation: str, error: Exception) -> None:
+        """Gestion centralisée d'erreurs pour l'Analytics Dashboard."""
         error_msg = f"Analytics {operation}: {str(error)}"
-        self.progress_label.config(text=f"❌ {operation} échoué")
-        logging.error("Analytics Dashboard - %s", error_msg, exc_info=True)
-        messagebox.showerror(
-            f"Erreur Analytics - {operation}",
-            (
-                f"Une erreur est survenue lors de {operation}.\n\n"
-                f"Détails: {str(error)}\n\n"
-                "Le dashboard continue de fonctionner avec les données en cache."
-            ),
-            parent=self.parent,
-        )
+
+        if hasattr(self, 'progress_label'):
+            self.progress_label.config(text=f"❌ {operation} échoué")
+
+        logger.error("Analytics Dashboard - %s", error_msg, exc_info=True)
+
+        try:
+            messagebox.showerror(
+                f"Erreur Analytics - {operation}",
+                (
+                    f"Une erreur est survenue lors de {operation}.\n\n"
+                    f"Détails: {str(error)}\n\n"
+                    "Le dashboard continue de fonctionner avec les données en cache."
+                ),
+                parent=self.parent,
+            )
+        except Exception:
+            logger.critical("Erreur critique: impossible d'afficher la messagebox d'erreur")
+
