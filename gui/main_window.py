@@ -562,7 +562,6 @@ No need to run analysis to see your files.
 
                 # Validation de format sur un échantillon
                 df = pd.read_csv(file_path, nrows=10)
-                # errors = parser.validate_csv_format(df)
                 errors = parser.validate_csv_format(Path(file_path))
                 if errors:
                     messagebox.showerror(
@@ -598,6 +597,14 @@ No need to run analysis to see your files.
                     self.csv_file_path = None
                     return
 
+                if not self._ensure_database_schema():
+                    messagebox.showerror(
+                        "Schema Error",
+                        "CSV imported but database schema verification failed",
+                        parent=self.root,
+                    )
+                    return
+
                 self.db_manager = DBManager(output_db)
                 db_size_mb = output_db.stat().st_size / (1024 * 1024)
                 db_size_kb = db_size_mb * 1024
@@ -613,7 +620,8 @@ No need to run analysis to see your files.
                     f"📁 File: {Path(file_path).name}\n"
                     f"📊 Files imported: {import_result['imported_files']:,}\n"
                     f"⏱️ Processing time: {import_result['processing_time']:.1f}s\n"
-                    f"💾 Database: {output_db.name} ({db_size_kb:.1f}KB)"
+                    f"💾 Database: {output_db.name} ({db_size_mb:.1f}MB)\n"
+                    f"🔍 Ready for 'VIEW RESULTS'"
                 )
                 messagebox.showinfo("Import Complete", success_msg, parent=self.root)
 
@@ -1696,14 +1704,31 @@ No need to run analysis to see your files.
     def view_results(self) -> None:
         """Ouvre une fenêtre pour visualiser les résultats d'analyse."""
         try:
+            if not self._ensure_database_schema():
+                messagebox.showerror(
+                    "Database Error",
+                    "Cannot access database. Please import a CSV file first or check database integrity.",
+                    parent=self.root,
+                )
+                return
+
             db_path = Path("analysis_results.db")
             if not db_path.exists():
                 messagebox.showwarning(
                     "No Results",
-                    "No analysis results database found.\nPlease run an analysis first.",
+                    "No analysis results database found.\nPlease import a CSV file first using 'Browse CSV...'",
                     parent=self.root,
                 )
                 self.log_action("Results viewer: no database found", "WARN")
+                return
+
+            total_count = self._safe_get_results_count("All", "All")
+            if total_count == 0:
+                messagebox.showinfo(
+                    "No Data",
+                    "Database exists but contains no files.\nPlease import a CSV file first.",
+                    parent=self.root,
+                )
                 return
 
             results_window = self.create_dialog_window(
@@ -2263,6 +2288,211 @@ No need to run analysis to see your files.
         return f"{(part / total * 100):.1f}%"
 
     # ------------------------------------------------------------------
+    # Database helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_database_schema(self) -> bool:
+        """Ensure that the analysis database and tables exist."""
+        try:
+            db_path = Path("analysis_results.db")
+
+            # Create new DB if missing
+            if not db_path.exists():
+                self.log_action("Database missing, creating new schema", "INFO")
+                if not getattr(self, "db_manager", None):
+                    self.db_manager = DBManager(db_path)
+                return True
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='fichiers'
+                """
+            )
+            table_exists = cursor.fetchone() is not None
+            if not table_exists:
+                self.log_action("Table 'fichiers' missing, creating schema", "WARN")
+                conn.close()
+                from content_analyzer.modules.csv_parser import CSVParser
+
+                parser = CSVParser(self.config_path)
+                with sqlite3.connect(db_path) as new_conn:
+                    parser._ensure_schema(new_conn)
+                return True
+
+            conn.close()
+            return True
+
+        except Exception as e:  # pragma: no cover - runtime safeguard
+            self.log_action(f"Schema verification failed: {str(e)}", "ERROR")
+            return False
+
+    def _safe_get_results_count(self, status_filter: str, classification_filter: str) -> int:
+        """Count results safely ensuring the schema exists."""
+        if not self._ensure_database_schema():
+            return 0
+
+        try:
+            if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+                return len(
+                    self._get_duplicate_file_ids(status_filter, classification_filter)
+                )
+            db_path = Path("analysis_results.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            query = (
+                "SELECT COUNT(*) FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
+            )
+            params: list[Any] = []
+            if status_filter != "All":
+                query += " AND f.status = ?"
+                params.append(status_filter)
+            if classification_filter and classification_filter != "All":
+                query += " AND r.security_classification_cached = ?"
+                params.append(classification_filter)
+            cursor.execute(query, params)
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        except Exception as e:  # pragma: no cover - runtime safeguard
+            self.log_action(f"Safe count failed: {str(e)}", "ERROR")
+            return 0
+
+    def _safe_get_optimized_results(
+        self,
+        status_filter: str,
+        classification_filter: str,
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> list[tuple]:
+        """Retrieve optimized results ensuring the schema exists."""
+        if not self._ensure_database_schema():
+            self.log_action("Cannot execute query: schema verification failed", "ERROR")
+            return []
+
+        try:
+            if self.is_windows and limit > 500:
+                limit = 500
+            db_path = Path("analysis_results.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            base_query = """
+            SELECT f.id, f.name, f.host, f.extension, f.username, f.path,
+                   f.file_size, f.owner, f.creation_time, f.last_modified, f.status,
+                   r.security_classification_cached,
+                   r.rgpd_risk_cached,
+                   r.finance_type_cached,
+                   r.legal_type_cached,
+                   r.confidence_global, r.processing_time_ms,
+                   r.document_resume
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE 1=1
+            """
+
+            params: list[Any] = []
+
+            if status_filter != "All":
+                base_query += " AND f.status = ?"
+                params.append(status_filter)
+
+            if classification_filter and classification_filter != "All":
+                base_query += " AND r.security_classification_cached = ?"
+                params.append(classification_filter)
+
+            base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            cursor.execute(base_query, params)
+            rows = cursor.fetchall()
+            conn.close()
+            if (
+                hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get()
+            ):
+                dup_ids = self._get_duplicate_file_ids(status_filter, classification_filter)
+                rows = [r for r in rows if r[0] in dup_ids]
+            return rows
+
+        except Exception as e:  # pragma: no cover - runtime safeguard
+            self.log_action(f"Safe query failed: {str(e)}", "ERROR")
+            return []
+
+    def _safe_get_optimized_results_with_duplicates_info(
+        self,
+        status_filter: str,
+        classification_filter: str,
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> list[tuple]:
+        """Wrapper around _get_optimized_results_with_duplicates_info with schema checks."""
+        if not self._ensure_database_schema():
+            return []
+
+        base_results = self._safe_get_optimized_results(
+            status_filter, classification_filter, offset=offset, limit=limit
+        )
+
+        if not (
+            hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get()
+        ):
+            return [row + ("",) for row in base_results]
+
+        ids = [r[0] for r in base_results]
+        if not ids:
+            return [row + ("",) for row in base_results]
+
+        try:
+            db_path = Path("analysis_results.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(ids))
+            cursor.execute(
+                f"SELECT id, fast_hash FROM fichiers WHERE id IN ({placeholders})",
+                ids,
+            )
+            hash_map = {row[0]: row[1] for row in cursor.fetchall()}
+            conn.close()
+
+            files = [
+                FileInfo(
+                    id=r[0],
+                    path=r[5],
+                    fast_hash=hash_map.get(r[0]),
+                    file_size=r[6] or 0,
+                    creation_time=r[8],
+                    last_modified=r[9],
+                )
+                for r in base_results
+            ]
+
+            families = self.duplicate_detector.detect_duplicate_family(files)
+
+            file_type_map: dict[int, str] = {}
+            for fam_files in families.values():
+                if len(fam_files) > 1:
+                    source = self.duplicate_detector.identify_source(fam_files)
+                    file_type_map[source.id] = "SOURCE"
+                    for f in fam_files:
+                        if f.id != source.id:
+                            file_type_map[f.id] = f"COPIE ID_{source.id}"
+
+            enriched: list[tuple] = []
+            for r in base_results:
+                enriched.append(r + (file_type_map.get(r[0], ""),))
+
+            if self.show_duplicates_var.get():
+                enriched = self._sort_by_duplicate_families(enriched)
+
+            return enriched
+
+        except Exception as e:  # pragma: no cover - runtime safeguard
+            self.log_action(f"Safe duplicate query failed: {str(e)}", "ERROR")
+            return []
+
+    # ------------------------------------------------------------------
     # Optimized DB queries
     # ------------------------------------------------------------------
 
@@ -2501,7 +2731,7 @@ No need to run analysis to see your files.
             if cached is not None:
                 rows = cached
             else:
-                rows = self._get_optimized_results_with_duplicates_info(
+                rows = self._safe_get_optimized_results_with_duplicates_info(
                     status_filter,
                     classification_filter,
                     offset=offset,
@@ -2512,7 +2742,7 @@ No need to run analysis to see your files.
             if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
                 self.results_total = len([r for r in rows if r[-1]])
             else:
-                self.results_total = self._get_results_count(status_filter, classification_filter)
+                self.results_total = self._safe_get_results_count(status_filter, classification_filter)
 
             self._insert_rows_batch_with_type(tree, rows)
 
