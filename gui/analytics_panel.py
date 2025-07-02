@@ -1271,6 +1271,30 @@ class AnalyticsPanel:
 
         return "\n".join(f"  {rec}" for rec in recommendations[:5])
 
+    def refresh_all(self) -> None:
+        """Actualise toutes les métriques analytics."""
+        try:
+            self.progress_label.config(text="🔄 Actualisation complète...")
+            self.parent.update_idletasks()
+
+            # Invalider le cache pour forcer le recalcul
+            self._invalidate_cache()
+
+            # Recalculer toutes les métriques
+            self.recalculate_all_metrics()
+
+            # Optionnel: actualiser aussi les onglets thématiques
+            self.update_thematic_tabs()
+
+            self.progress_label.config(text="✅ Actualisation terminée")
+
+            if hasattr(self, "log_action"):
+                self.log_action("Analytics refreshed via refresh_all()", "INFO")
+
+        except Exception as e:
+            self._handle_analytics_error("refresh_all", e)
+            self.progress_label.config(text="❌ Erreur actualisation")
+
     def _handle_analytics_error(self, operation: str, error: Exception) -> None:
         """Gestion centralisée d'erreurs pour l'Analytics Dashboard."""
         error_msg = f"Analytics {operation}: {str(error)}"
