@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+import csv
+import json
 import logging
-import time
-from pathlib import Path
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import sqlite3
 import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import yaml
-import sqlite3
-import json
-import csv
-import threading
-from typing import Any, Dict, Optional
+
 from content_analyzer.modules.duplicate_detector import DuplicateDetector, FileInfo
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,10 @@ class ResultsCache:
 
 from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
+from content_analyzer.modules.cache_manager import CacheManager
 from content_analyzer.modules.csv_parser import CSVParser
 from content_analyzer.modules.db_manager import DBManager
 from content_analyzer.modules.prompt_manager import PromptManager
-from content_analyzer.modules.cache_manager import CacheManager
 from content_analyzer.utils.prompt_validator import (
     PromptSizeValidator,
     TkinterDebouncer,
@@ -60,8 +61,8 @@ from content_analyzer.utils.prompt_validator import (
 )
 
 from .utils.analysis_thread import AnalysisThread
-from .utils.service_monitor import ServiceMonitor
 from .utils.log_viewer import LogViewer
+from .utils.service_monitor import ServiceMonitor
 
 
 class Tooltip:
@@ -145,8 +146,8 @@ class MainWindow:
         self._logs_update_id: str | None = None
         self._service_update_id: str | None = None
 
-        # Debouncer for heavy refresh operations
-        refresh_delay = 800 if self.is_windows else 300
+        # Debouncer for heavy refresh operations - more responsive
+        refresh_delay = 200 if self.is_windows else 100
         self.results_refresh_debouncer = TkinterDebouncer(
             self.root, delay_ms=refresh_delay
         )
@@ -488,7 +489,7 @@ No need to run analysis to see your files.
         ).pack(side="left", padx=5, pady=5)
         ttk.Button(
             action_frame,
-            text="\U0001F4CA ANALYTICS",
+            text="\U0001f4ca ANALYTICS",
             width=15,
             command=self.open_analytics_dashboard,
         ).pack(side="left", padx=5, pady=5)
@@ -1227,6 +1228,18 @@ No need to run analysis to see your files.
         }
         self.gui_logger.log(level_map.get(level, logging.INFO), message)
 
+    def invalidate_all_caches(self) -> None:
+        """Invalidate GUI caches and analytics cache."""
+        self.results_cache.invalidate()
+        self.results_offset = 0
+        self.results_total = 0
+        if hasattr(self, "analytics_panel"):
+            try:
+                self.analytics_panel._invalidate_cache()
+            except Exception as exc:  # pragma: no cover
+                logger.error("Analytics cache invalidation failed: %s", exc)
+        self.log_action("All caches invalidated", "INFO")
+
     # ------------------------------------------------------------------
     # SERVICE STATUS AND PROGRESS
     # ------------------------------------------------------------------
@@ -1235,7 +1248,9 @@ No need to run analysis to see your files.
             self.db_status_label.config(text="● DB", foreground="red")
             self.status_db_label.config(text="DB: No database loaded")
         else:
-            self.db_status_label.config(text=f"● DB {size_mb:.1f}MB", foreground="green")
+            self.db_status_label.config(
+                text=f"● DB {size_mb:.1f}MB", foreground="green"
+            )
             self.status_db_label.config(text=f"DB: {size_mb:.1f}MB loaded")
 
     def update_service_status(self) -> None:
@@ -1629,6 +1644,8 @@ No need to run analysis to see your files.
             messagebox.showerror("Analysis Failed", completion_msg, parent=self.root)
             self.log_action(f"Analysis failed: {status}", "ERROR")
             self.status_app_label.config(text="Failed")
+
+        self.invalidate_all_caches()
 
     def on_analysis_error(self, error: str) -> None:
         self.analysis_running = False
@@ -2137,8 +2154,6 @@ No need to run analysis to see your files.
                 ),
             )
 
-
-
             tree.bind(
                 "<Double-1>", lambda e: self.show_file_details(tree, results_window)
             )
@@ -2329,7 +2344,9 @@ No need to run analysis to see your files.
             self.log_action(f"Schema verification failed: {str(e)}", "ERROR")
             return False
 
-    def _safe_get_results_count(self, status_filter: str, classification_filter: str) -> int:
+    def _safe_get_results_count(
+        self, status_filter: str, classification_filter: str
+    ) -> int:
         """Count results safely ensuring the schema exists."""
         if not self._ensure_database_schema():
             return 0
@@ -2342,9 +2359,7 @@ No need to run analysis to see your files.
             db_path = Path("analysis_results.db")
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            query = (
-                "SELECT COUNT(*) FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
-            )
+            query = "SELECT COUNT(*) FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
             params: list[Any] = []
             if status_filter != "All":
                 query += " AND f.status = ?"
@@ -2409,10 +2424,10 @@ No need to run analysis to see your files.
             cursor.execute(base_query, params)
             rows = cursor.fetchall()
             conn.close()
-            if (
-                hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get()
-            ):
-                dup_ids = self._get_duplicate_file_ids(status_filter, classification_filter)
+            if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
+                dup_ids = self._get_duplicate_file_ids(
+                    status_filter, classification_filter
+                )
                 rows = [r for r in rows if r[0] in dup_ids]
             return rows
 
@@ -2468,6 +2483,11 @@ No need to run analysis to see your files.
                 for r in base_results
             ]
 
+            self.log_action(
+                f"Processing {len(files)} files for duplicate analysis",
+                "DEBUG",
+            )
+
             families = self.duplicate_detector.detect_duplicate_family(files)
 
             file_type_map: dict[int, str] = {}
@@ -2489,8 +2509,11 @@ No need to run analysis to see your files.
             return enriched
 
         except Exception as e:  # pragma: no cover - runtime safeguard
-            self.log_action(f"Safe duplicate query failed: {str(e)}", "ERROR")
-            return []
+            self.log_action(f"Duplicate analysis failed: {str(e)}", "ERROR")
+            base_results = self._safe_get_optimized_results(
+                status_filter, classification_filter, offset=offset, limit=limit
+            )
+            return [row + ("",) for row in base_results]
 
     # ------------------------------------------------------------------
     # Optimized DB queries
@@ -2711,6 +2734,28 @@ No need to run analysis to see your files.
             next_btn,
         )
 
+    def force_refresh_results_table(
+        self,
+        tree,
+        status_filter,
+        classification_filter,
+        offset: int = 0,
+        page_label: ttk.Label | None = None,
+        prev_btn: ttk.Button | None = None,
+        next_btn: ttk.Button | None = None,
+    ) -> None:
+        """Immediate refresh without debouncing."""
+        self.results_refresh_debouncer.cancel()
+        self._perform_refresh_results_table(
+            tree,
+            status_filter,
+            classification_filter,
+            offset,
+            page_label,
+            prev_btn,
+            next_btn,
+        )
+
     def _perform_refresh_results_table(
         self,
         tree,
@@ -2742,9 +2787,11 @@ No need to run analysis to see your files.
             if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
                 self.results_total = len([r for r in rows if r[-1]])
             else:
-                self.results_total = self._safe_get_results_count(status_filter, classification_filter)
+                self.results_total = self._safe_get_results_count(
+                    status_filter, classification_filter
+                )
 
-            self._insert_rows_batch_with_type(tree, rows)
+            self._insert_rows_batch(tree, rows)
 
             self._update_page_controls(page_label, prev_btn, next_btn)
             self.log_action(
@@ -2759,115 +2806,11 @@ No need to run analysis to see your files.
             self.log_action(f"Results refresh failed: {str(e)}", "ERROR")
 
     def _insert_rows_batch(self, tree, rows) -> None:
-        """Insert rows into the tree view with optional batching on Windows."""
-        if not self.is_windows:
-            for row in rows:
-                (
-                    file_id,
-                    name,
-                    host,
-                    extension,
-                    username,
-                    path,
-                    size,
-                    owner,
-                    creation_time,
-                    last_modified,
-                    status,
-                    security_class,
-                    rgpd_risk,
-                    finance_type,
-                    legal_type,
-                    confidence,
-                    proc_time,
-                    resume,
-                ) = row
-
-                tree.insert(
-                    "",
-                    "end",
-                    values=(
-                        file_id,
-                        name,
-                        host,
-                        extension,
-                        username,
-                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
-                        size,
-                        owner,
-                        creation_time,
-                        last_modified,
-                        status,
-                        security_class,
-                        rgpd_risk,
-                        finance_type,
-                        legal_type,
-                        confidence or 0,
-                        proc_time or 0,
-                        resume or "",
-                    ),
-                )
-            return
-
-        batch_size = 25
-
-        def insert_batch(start: int = 0) -> None:
-            end = min(start + batch_size, len(rows))
-            for i in range(start, end):
-                (
-                    file_id,
-                    name,
-                    host,
-                    extension,
-                    username,
-                    path,
-                    size,
-                    owner,
-                    creation_time,
-                    last_modified,
-                    status,
-                    security_class,
-                    rgpd_risk,
-                    finance_type,
-                    legal_type,
-                    confidence,
-                    proc_time,
-                    resume,
-                ) = rows[i]
-
-                tree.insert(
-                    "",
-                    "end",
-                    values=(
-                        file_id,
-                        name,
-                        host,
-                        extension,
-                        username,
-                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
-                        size,
-                        owner,
-                        creation_time,
-                        last_modified,
-                        status,
-                        security_class,
-                        rgpd_risk,
-                        finance_type,
-                        legal_type,
-                        confidence or 0,
-                        proc_time or 0,
-                        resume or "",
-                    ),
-                )
-            if end < len(rows):
-                self.root.after(5, lambda: insert_batch(end))
-
-        insert_batch()
-
-    def _insert_rows_batch_with_type(self, tree, rows) -> None:
         """Insert rows including the duplicate Type column."""
         if not self.is_windows:
             for row in rows:
+                if len(row) == 18:
+                    row = row + ("",)
                 (
                     file_id,
                     name,
@@ -2901,7 +2844,11 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
+                        (
+                            (path or "")[-50:] + "..."
+                            if path and len(path) > 50
+                            else (path or "")
+                        ),
                         size,
                         owner,
                         creation_time,
@@ -2924,6 +2871,9 @@ No need to run analysis to see your files.
         def insert_batch(start: int = 0) -> None:
             end = min(start + batch_size, len(rows))
             for i in range(start, end):
+                row = rows[i]
+                if len(row) == 18:
+                    row = row + ("",)
                 (
                     file_id,
                     name,
@@ -2944,7 +2894,7 @@ No need to run analysis to see your files.
                     proc_time,
                     resume,
                     file_type,
-                ) = rows[i]
+                ) = row
 
                 display_type = file_type or ""
 
@@ -2957,7 +2907,11 @@ No need to run analysis to see your files.
                         host,
                         extension,
                         username,
-                        (path or "")[-50:] + "..." if path and len(path) > 50 else (path or ""),
+                        (
+                            (path or "")[-50:] + "..."
+                            if path and len(path) > 50
+                            else (path or "")
+                        ),
                         size,
                         owner,
                         creation_time,
@@ -2988,11 +2942,11 @@ No need to run analysis to see your files.
         next_btn,
     ) -> None:
         """Callback triggered when duplicate filter checkbox changes."""
+        self.results_cache.invalidate()
         self.results_offset = 0
-        self.log_action(
-            f"Duplicates filter changed: {self.show_duplicates_var.get()}", "INFO"
-        )
-        self.refresh_results_table(
+        filter_state = self.show_duplicates_var.get()
+        self.log_action(f"Duplicates filter changed: {filter_state}", "INFO")
+        self.force_refresh_results_table(
             tree,
             status_filter.get(),
             classification_filter.get(),
@@ -3879,6 +3833,7 @@ RAW RESPONSE:
             if db_path.exists():
                 db_path.unlink()
             self.db_manager = DBManager(db_path)
+            self.invalidate_all_caches()
             self._update_db_status_labels(0.0)
             if hasattr(self, "analytics_panel"):
                 self.analytics_panel.set_db_manager(self.db_manager)
@@ -3987,6 +3942,7 @@ RAW RESPONSE:
 
             cache_manager.cleanup_expired()
             cache_db.unlink()
+            self.invalidate_all_caches()
 
             messagebox.showinfo(
                 "Cache Cleared",
@@ -4246,8 +4202,16 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
         controls_frame = ttk.Frame(analytics_frame)
         controls_frame.pack(fill="x", padx=5, pady=5)
 
-        ttk.Button(controls_frame, text="🔄 Actualiser Tout", command=self.refresh_all_analytics).pack(side="left", padx=5)
-        ttk.Button(controls_frame, text="📊 Export Analytics", command=self.export_analytics_report).pack(side="left", padx=5)
+        ttk.Button(
+            controls_frame,
+            text="🔄 Actualiser Tout",
+            command=self.refresh_all_analytics,
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            controls_frame,
+            text="📊 Export Analytics",
+            command=self.export_analytics_report,
+        ).pack(side="left", padx=5)
 
     def open_analytics_dashboard(self) -> None:
         """Open analytics dashboard in a modal window."""
@@ -4268,9 +4232,15 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
         controls = ttk.Frame(self.analytics_window)
         controls.pack(fill="x", padx=5, pady=5)
-        ttk.Button(controls, text="🔄 Actualiser Tout", command=self.refresh_all_analytics).pack(side="left", padx=5)
-        ttk.Button(controls, text="📊 Export Analytics", command=self.export_analytics_report).pack(side="left", padx=5)
-        ttk.Button(controls, text="Fermer", command=self.analytics_window.destroy).pack(side="right", padx=5)
+        ttk.Button(
+            controls, text="🔄 Actualiser Tout", command=self.refresh_all_analytics
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            controls, text="📊 Export Analytics", command=self.export_analytics_report
+        ).pack(side="left", padx=5)
+        ttk.Button(controls, text="Fermer", command=self.analytics_window.destroy).pack(
+            side="right", padx=5
+        )
 
     def refresh_all_analytics(self) -> None:
         if hasattr(self, "analytics_panel"):
