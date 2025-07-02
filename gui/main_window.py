@@ -2477,7 +2477,7 @@ No need to run analysis to see your files.
                     file_type_map[source.id] = "SOURCE"
                     for f in fam_files:
                         if f.id != source.id:
-                            file_type_map[f.id] = f"COPIE ID_{source.id}"
+                            file_type_map[f.id] = f"COPY_{source.id}"
 
             enriched: list[tuple] = []
             for r in base_results:
@@ -2654,7 +2654,7 @@ No need to run analysis to see your files.
                 file_type_map[source.id] = "SOURCE"
                 for f in fam_files:
                     if f.id != source.id:
-                        file_type_map[f.id] = f"COPIE ID_{source.id}"
+                        file_type_map[f.id] = f"COPY_{source.id}"
 
         enriched: list[tuple] = []
         for r in base_results:
@@ -2675,8 +2675,8 @@ No need to run analysis to see your files.
             if file_type == "SOURCE":
                 key = f"family_{row[0]}"
                 families.setdefault(key, []).append(row)
-            elif file_type and file_type.startswith("COPIE ID_"):
-                source_id = file_type.split("ID_")[1]
+            elif file_type and file_type.startswith("COPY_"):
+                source_id = file_type.split("COPY_")[1]
                 key = f"family_{source_id}"
                 families.setdefault(key, []).append(row)
             else:
@@ -2880,7 +2880,6 @@ No need to run analysis to see your files.
                     creation_time,
                     last_modified,
                     status,
-                    file_type,
                     security_class,
                     rgpd_risk,
                     finance_type,
@@ -2888,14 +2887,10 @@ No need to run analysis to see your files.
                     confidence,
                     proc_time,
                     resume,
+                    file_type,
                 ) = row
 
-                file_type = file_type or ""
-                display_type = file_type
-                if file_type == "SOURCE":
-                    display_type = "\U0001F4C4 SOURCE"
-                elif file_type and file_type.startswith("COPIE"):
-                    display_type = f"\U0001F4CB {file_type}"
+                display_type = file_type or ""
 
                 tree.insert(
                     "",
@@ -2941,7 +2936,6 @@ No need to run analysis to see your files.
                     creation_time,
                     last_modified,
                     status,
-                    file_type,
                     security_class,
                     rgpd_risk,
                     finance_type,
@@ -2949,14 +2943,10 @@ No need to run analysis to see your files.
                     confidence,
                     proc_time,
                     resume,
+                    file_type,
                 ) = rows[i]
 
-                file_type = file_type or ""
-                display_type = file_type
-                if file_type == "SOURCE":
-                    display_type = "\U0001F4C4 SOURCE"
-                elif file_type and file_type.startswith("COPIE"):
-                    display_type = f"\U0001F4CB {file_type}"
+                display_type = file_type or ""
 
                 tree.insert(
                     "",
