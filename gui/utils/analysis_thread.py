@@ -80,13 +80,32 @@ class AnalysisThread(threading.Thread):
                         )
                     if self.should_stop:
                         break
-            result = {
-                "status": "completed" if not self.should_stop else "stopped",
-                "files_processed": processed,
-                "files_total": total,
-                "processing_time": 0,
-                "errors": [],
-            }
+            try:
+                stats = db_mgr.get_processing_stats()
+                with db_mgr._connect() as conn:
+                    cursor = conn.cursor()
+                    total_time_ms = cursor.execute(
+                        "SELECT SUM(processing_time_ms) FROM reponses_llm"
+                    ).fetchone()[0] or 0
+                    error_count = cursor.execute(
+                        "SELECT COUNT(*) FROM fichiers WHERE status='error'"
+                    ).fetchone()[0] or 0
+
+                result = {
+                    "status": "completed" if not self.should_stop else "stopped",
+                    "files_processed": processed,
+                    "files_total": total,
+                    "processing_time": total_time_ms / 1000,
+                    "errors": [f"Total errors: {error_count}"] if error_count > 0 else [],
+                }
+            except Exception as e:
+                result = {
+                    "status": "completed" if not self.should_stop else "stopped",
+                    "files_processed": processed,
+                    "files_total": total,
+                    "processing_time": 0,
+                    "errors": [f"Stats calculation error: {str(e)}"],
+                }
             if self.completion_callback:
                 self.completion_callback(result)
         except Exception as exc:  # pragma: no cover - runtime errors

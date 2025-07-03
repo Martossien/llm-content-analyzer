@@ -126,7 +126,7 @@ class SMBeagleCSVParser:
             if value.startswith('"') and value.endswith('"'):
                 value = value[1:-1].replace('""', '"')
             else:
-                logger.warning(
+                logger.debug(
                     "Colonne %s devrait avoir des guillemets: %s",
                     field_index,
                     value,
@@ -134,7 +134,7 @@ class SMBeagleCSVParser:
         else:
             # Vérifier qu'il n'y a pas de guillemets
             if value.startswith('"') and value.endswith('"'):
-                logger.warning(
+                logger.debug(
                     "Colonne %s ne devrait pas avoir de guillemets: %s",
                     field_index,
                     value,

@@ -2428,11 +2428,16 @@ No need to run analysis to see your files.
             SELECT f.id, f.name, f.host, f.extension, f.username, f.path,
                    f.file_size, f.owner, f.creation_time, f.last_modified, f.status,
                    r.security_classification_cached,
+                   r.security_confidence,
                    r.rgpd_risk_cached,
+                   r.rgpd_confidence,
                    r.finance_type_cached,
+                   r.finance_confidence,
                    r.legal_type_cached,
-                   r.confidence_global, r.processing_time_ms,
-                   r.document_resume
+                   r.legal_confidence,
+                   r.document_resume,
+                   r.confidence_global,
+                   r.processing_time_ms
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
             WHERE 1=1
@@ -2566,11 +2571,16 @@ No need to run analysis to see your files.
         SELECT f.id, f.name, f.host, f.extension, f.username, f.path,
                f.file_size, f.owner, f.creation_time, f.last_modified, f.status,
                r.security_classification_cached,
+               r.security_confidence,
                r.rgpd_risk_cached,
+               r.rgpd_confidence,
                r.finance_type_cached,
+               r.finance_confidence,
                r.legal_type_cached,
-               r.confidence_global, r.processing_time_ms,
-               r.document_resume
+               r.legal_confidence,
+               r.document_resume,
+               r.confidence_global,
+               r.processing_time_ms
         FROM fichiers f
         LEFT JOIN reponses_llm r ON f.id = r.fichier_id
         WHERE 1=1
@@ -2839,7 +2849,7 @@ No need to run analysis to see your files.
         """Insert rows including the duplicate Type column."""
         if not self.is_windows:
             for row in rows:
-                if len(row) == 18:
+                if len(row) == 22:
                     row = row + ("",)
                 (
                     file_id,
@@ -2854,12 +2864,16 @@ No need to run analysis to see your files.
                     last_modified,
                     status,
                     security_class,
+                    security_conf,
                     rgpd_risk,
+                    rgpd_conf,
                     finance_type,
+                    finance_conf,
                     legal_type,
+                    legal_conf,
+                    resume,
                     confidence,
                     proc_time,
-                    resume,
                     file_type,
                 ) = row
 
@@ -2886,12 +2900,16 @@ No need to run analysis to see your files.
                         status,
                         display_type,
                         security_class,
+                        security_conf or 0,
                         rgpd_risk,
+                        rgpd_conf or 0,
                         finance_type,
+                        finance_conf or 0,
                         legal_type,
+                        legal_conf or 0,
+                        resume or "",
                         confidence or 0,
                         proc_time or 0,
-                        resume or "",
                     ),
                 )
             return
@@ -2902,7 +2920,7 @@ No need to run analysis to see your files.
             end = min(start + batch_size, len(rows))
             for i in range(start, end):
                 row = rows[i]
-                if len(row) == 18:
+                if len(row) == 22:
                     row = row + ("",)
                 (
                     file_id,
@@ -2917,12 +2935,16 @@ No need to run analysis to see your files.
                     last_modified,
                     status,
                     security_class,
+                    security_conf,
                     rgpd_risk,
+                    rgpd_conf,
                     finance_type,
+                    finance_conf,
                     legal_type,
+                    legal_conf,
+                    resume,
                     confidence,
                     proc_time,
-                    resume,
                     file_type,
                 ) = row
 
@@ -2949,12 +2971,16 @@ No need to run analysis to see your files.
                         status,
                         display_type,
                         security_class,
+                        security_conf or 0,
                         rgpd_risk,
+                        rgpd_conf or 0,
                         finance_type,
+                        finance_conf or 0,
                         legal_type,
+                        legal_conf or 0,
+                        resume or "",
                         confidence or 0,
                         proc_time or 0,
-                        resume or "",
                     ),
                 )
             if end < len(rows):
