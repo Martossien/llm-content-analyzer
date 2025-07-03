@@ -1373,9 +1373,30 @@ No need to run analysis to see your files.
             return False
 
     def start_analysis(self) -> None:
+
+        #debug si bd pas vide
         if not self.csv_file_path:
-            messagebox.showerror("No CSV File", "Please select a CSV file first")
-            return
+            # Check if database exists with pending files
+            db_path = Path("analysis_results.db")
+            if db_path.exists():
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                pending_count = cursor.execute("SELECT COUNT(*) FROM fichiers WHERE status='pending'").fetchone()[0]
+                conn.close()
+                if pending_count > 0:
+                    response = messagebox.askyesno("Resume Analysis", f"Found {pending_count} pending files.\nResume analysis without CSV?")
+                    if response:
+                        self.csv_file_path = "resumed"  # Dummy value
+                    else:
+                        messagebox.showerror("No CSV File", "Please select a CSV file first")
+                        return
+                else:
+                    messagebox.showerror("No CSV File", "Please select a CSV file first")
+                    return
+            else:
+                messagebox.showerror("No CSV File", "Please select a CSV file first")
+                return
+
         if not self.validate_configuration():
             return
         if not self.service_monitor.check_api_status():
@@ -1747,7 +1768,11 @@ No need to run analysis to see your files.
                     parent=self.root,
                 )
                 return
-
+            #debug refresh View Result
+            self.results_cache.invalidate()
+            self.results_offset = 0
+            self.results_total = 0
+            
             results_window = self.create_dialog_window(
                 self.root, "Analysis Results Viewer", "1400x700"
             )
@@ -2093,16 +2118,21 @@ No need to run analysis to see your files.
             refresh_btn = ttk.Button(
                 controls_frame,
                 text="Refresh",
-                command=lambda tr=tree, sf=status_filter, cf=classification_filter: self.refresh_results_table(
-                    tr,
-                    sf.get(),
-                    cf.get(),
-                    self.results_offset,
-                    page_label,
-                    prev_page_btn,
-                    next_page_btn,
-                ),
+                command=lambda: (
+                    self.results_cache.invalidate(),
+                    self.force_refresh_results_table(
+                        tree,
+                        status_filter.get(),
+                        classification_filter.get(),
+                        self.results_offset,
+                        page_label,
+                        prev_page_btn,
+                        next_page_btn
+                    )
+                )
             )
+
+
             refresh_btn.pack(side="right", padx=5)
 
             export_btn = ttk.Button(
