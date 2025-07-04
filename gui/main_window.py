@@ -1511,7 +1511,10 @@ No need to run analysis to see your files.
         if not response:
             return
         if self.analysis_thread and self.analysis_thread.is_alive():
-            self.analysis_thread.stop()
+            try:
+                self.analysis_thread.stop()
+            except AttributeError:
+                pass
             self.analysis_thread.join(timeout=5)
         self.analysis_running = False
         self.start_button.config(state="normal")
