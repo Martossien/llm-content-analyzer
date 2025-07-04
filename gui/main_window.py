@@ -280,7 +280,7 @@ No need to run analysis to see your files.
             "Nombre de workers parall\xE8les (optimal: 2-8 pour I/O-bound)\nAuto: laissez vide pour d\xE9tection automatique",
         )
 
-        ttk.Label(api_frame, text="Upload Spacing (s):").grid(
+        ttk.Label(api_frame, text="Initial Delay (s):").grid(
             row=3, column=0, sticky="w", padx=2, pady=2
         )
         self.upload_spacing_entry = ttk.Entry(api_frame, width=5)
@@ -288,7 +288,7 @@ No need to run analysis to see your files.
 
         upload_spacing_tooltip = Tooltip(
             self.upload_spacing_entry,
-            "Délai entre uploads (1-99s)\nEvite la congestion API\nAuto-ajustement selon performance\nDéfaut: 5s",
+            "Délai initial entre workers (1-99s)\nAjusté automatiquement selon la performance\nDéfaut: 5s",
         )
 
         self.adaptive_spacing_var = tk.BooleanVar(value=True)
@@ -690,7 +690,7 @@ No need to run analysis to see your files.
             self.workers_entry.insert(0, str(api_config.get("batch_size", 3)))
 
             pipeline_config = config.get("pipeline_config", {})
-            upload_cfg = pipeline_config.get("upload_spacing", {})
+            upload_cfg = pipeline_config.get("adaptive_spacing", {})
             self.upload_spacing_entry.delete(0, tk.END)
             self.upload_spacing_entry.insert(0, str(upload_cfg.get("initial_delay_seconds", 5)))
             self.adaptive_spacing_var.set(upload_cfg.get("enable_adaptive_spacing", True))
@@ -768,7 +768,7 @@ No need to run analysis to see your files.
                 if upload_spacing < 1 or upload_spacing > 99:
                     raise ValueError("Upload spacing must be between 1 and 99 seconds")
             except ValueError as e:
-                messagebox.showerror("Invalid Upload Spacing", str(e), parent=self.root)
+                messagebox.showerror("Invalid Delay", str(e), parent=self.root)
                 return
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
@@ -778,10 +778,10 @@ No need to run analysis to see your files.
                 config["api_config"]["batch_size"] = workers
             if "pipeline_config" not in config:
                 config["pipeline_config"] = {}
-            if "upload_spacing" not in config["pipeline_config"]:
-                config["pipeline_config"]["upload_spacing"] = {}
-            config["pipeline_config"]["upload_spacing"]["initial_delay_seconds"] = upload_spacing
-            config["pipeline_config"]["upload_spacing"]["enable_adaptive_spacing"] = self.adaptive_spacing_var.get()
+            if "adaptive_spacing" not in config["pipeline_config"]:
+                config["pipeline_config"]["adaptive_spacing"] = {}
+            config["pipeline_config"]["adaptive_spacing"]["initial_delay_seconds"] = upload_spacing
+            config["pipeline_config"]["adaptive_spacing"]["enable_adaptive_spacing"] = self.adaptive_spacing_var.get()
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(config, f, default_flow_style=False, indent=2)
             messagebox.showinfo(
@@ -1706,12 +1706,14 @@ No need to run analysis to see your files.
         throughput = performance.get("throughput_per_minute", 0)
         cache_hits = performance.get("cache_hits", 0)
         cache_hit_rate = (cache_hits / max(processed, 1)) * 100
+        avg_time = performance.get("avg_processing_time", 0.0)
 
         active_workers = info.get("current_workers", {}).get("active_workers", 0)
         max_workers = info.get("current_workers", {}).get("max_workers", 0)
 
         metrics_text = (
             f"Files: {processed}/{total} ({progress_pct:.1f}%) | "
+            f"Avg API: {avg_time:.1f}s | "
             f"Speed: {throughput:.0f}/min | "
             f"Cache Hit: {cache_hit_rate:.1f}% | "
             f"Workers: {active_workers}/{max_workers}"
