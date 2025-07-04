@@ -313,7 +313,7 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
         except Exception:
             cfg = {}
 
-        return AdaptivePipelineManager(cfg or {})
+        return AdaptivePipelineManager(cfg or {}, max_workers=self.max_workers)
 
     def _calculate_optimal_workers(self, count: Optional[int]) -> int:
         if count and count > 0:
