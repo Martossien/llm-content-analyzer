@@ -12,6 +12,7 @@ import json
 import argparse
 from pathlib import Path
 from typing import Optional, Dict, Any
+import threading
 
 import yaml
 
@@ -31,6 +32,9 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Lock global pour parsing JSON thread-safe
+_json_parsing_lock = threading.Lock()
 
 
 class ContentAnalyzer:
@@ -154,14 +158,28 @@ class ContentAnalyzer:
             "raw_response": json.dumps(extracted_json, ensure_ascii=False),
         }
 
+    def _thread_safe_parse_api_response(self, api_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse la réponse API de manière thread-safe."""
+        with _json_parsing_lock:
+            return self._parse_api_response(api_result)
+
     def _extract_json_from_content(self, content: str) -> Optional[Dict[str, Any]]:
         import json
         import logging
 
         logger = logging.getLogger(__name__)
 
+        # Protection: validation du contenu avant parsing
+        if not content or len(content.strip()) < 10:
+            logger.warning("Content too short for JSON parsing")
+            return None
+
         try:
-            return json.loads(content.strip())
+            parsed = json.loads(content.strip())
+            if self._validate_json_structure(parsed):
+                return parsed
+            logger.warning("JSON structure validation failed")
+            return None
         except json.JSONDecodeError:
             logger.debug("Direct JSON parsing failed, trying regex extraction")
 
@@ -170,7 +188,7 @@ class ContentAnalyzer:
         for match in matches:
             try:
                 parsed = json.loads(match)
-                if self._is_valid_analysis_json(parsed):
+                if self._validate_json_structure(parsed):
                     logger.info("Successfully extracted JSON using regex")
                     return parsed
             except json.JSONDecodeError:
@@ -180,14 +198,16 @@ class ContentAnalyzer:
         if json_candidate:
             try:
                 parsed = json.loads(json_candidate)
-                if self._is_valid_analysis_json(parsed):
+                if self._validate_json_structure(parsed):
                     logger.info("Successfully extracted JSON using balanced extraction")
                     return parsed
+                else:
+                    logger.warning("Balanced extraction failed structure validation")
             except json.JSONDecodeError:
-                pass
+                logger.warning("Balanced extraction produced invalid JSON")
 
         logger.warning("All JSON extraction strategies failed")
-        return self._create_fallback_json(content)
+        return None
 
     def _extract_balanced_json(self, content: str) -> Optional[str]:
         start_pos = content.find("{")
@@ -239,6 +259,24 @@ class ContentAnalyzer:
             "original_content": content[:500] + ("..." if len(content) > 500 else ""),
         }
 
+    def _validate_json_structure(self, parsed: Dict[str, Any]) -> bool:
+        """Validation stricte de la structure JSON."""
+        if not isinstance(parsed, dict):
+            return False
+
+        expected_keys = {"security", "rgpd", "finance", "legal"}
+        present_keys = set(parsed.keys())
+
+        if len(present_keys.intersection(expected_keys)) < 2:
+            return False
+
+        for domain in expected_keys.intersection(present_keys):
+            domain_data = parsed[domain]
+            if not isinstance(domain_data, dict):
+                return False
+
+        return True
+
     # ------------------------------------------------------------------
     # Single file analysis
     # ------------------------------------------------------------------
@@ -289,9 +327,18 @@ class ContentAnalyzer:
                 file_metadata,
                 analysis_type="comprehensive",
             )
-            api_result = self.api_client.analyze_file(file_row["path"], prompt)
 
-            parsed_result = self._parse_api_response(api_result)
+            adaptive_timeouts = None
+            if hasattr(self, "adaptive_manager"):
+                adaptive_timeouts = self.adaptive_manager.get_adaptive_timeouts()
+
+            api_result = self.api_client.analyze_file(
+                file_row["path"],
+                prompt,
+                adaptive_timeouts,
+            )
+
+            parsed_result = self._thread_safe_parse_api_response(api_result)
 
             if self.enable_cache and parsed_result.get("status") == "completed":
                 self.cache_manager.store_result(
