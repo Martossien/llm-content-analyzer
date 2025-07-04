@@ -280,14 +280,33 @@ No need to run analysis to see your files.
             "Nombre de workers parall\xE8les (optimal: 2-8 pour I/O-bound)\nAuto: laissez vide pour d\xE9tection automatique",
         )
 
+        ttk.Label(api_frame, text="Upload Spacing (s):").grid(
+            row=3, column=0, sticky="w", padx=2, pady=2
+        )
+        self.upload_spacing_entry = ttk.Entry(api_frame, width=5)
+        self.upload_spacing_entry.grid(row=3, column=1, sticky="w", padx=2, pady=2)
+
+        upload_spacing_tooltip = Tooltip(
+            self.upload_spacing_entry,
+            "Délai entre uploads (1-99s)\nEvite la congestion API\nAuto-ajustement selon performance\nDéfaut: 5s",
+        )
+
+        self.adaptive_spacing_var = tk.BooleanVar(value=True)
+        self.adaptive_spacing_check = ttk.Checkbutton(
+            api_frame,
+            text="Auto-ajustement espacement",
+            variable=self.adaptive_spacing_var,
+        )
+        self.adaptive_spacing_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=2, pady=2)
+
         self.test_api_button = ttk.Button(
             api_frame, text="Test Connection", command=self.test_api_connection
         )
-        self.test_api_button.grid(row=4, column=0, sticky="ew", padx=2, pady=5)
+        self.test_api_button.grid(row=5, column=0, sticky="ew", padx=2, pady=5)
 
         ttk.Button(
             api_frame, text="Save Configuration", command=self.save_api_configuration
-        ).grid(row=4, column=1, sticky="ew", padx=2, pady=5)
+        ).grid(row=5, column=1, sticky="ew", padx=2, pady=5)
 
         # Panel 2B: Exclusions
         excl_frame = ttk.LabelFrame(config_frame, text="File Exclusions")
@@ -669,6 +688,12 @@ No need to run analysis to see your files.
             self.api_token_entry.insert(0, api_config.get("token", ""))
             self.workers_entry.delete(0, tk.END)
             self.workers_entry.insert(0, str(api_config.get("batch_size", 3)))
+
+            pipeline_config = config.get("pipeline_config", {})
+            upload_cfg = pipeline_config.get("upload_spacing", {})
+            self.upload_spacing_entry.delete(0, tk.END)
+            self.upload_spacing_entry.insert(0, str(upload_cfg.get("initial_delay_seconds", 5)))
+            self.adaptive_spacing_var.set(upload_cfg.get("enable_adaptive_spacing", True))
             self.status_config_label.config(foreground="black")
         except Exception as e:  # pragma: no cover - file errors
             messagebox.showerror(
@@ -738,12 +763,25 @@ No need to run analysis to see your files.
                     parent=self.root,
                 )
                 return
+            try:
+                upload_spacing = int(self.upload_spacing_entry.get().strip())
+                if upload_spacing < 1 or upload_spacing > 99:
+                    raise ValueError("Upload spacing must be between 1 and 99 seconds")
+            except ValueError as e:
+                messagebox.showerror("Invalid Upload Spacing", str(e), parent=self.root)
+                return
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             config["api_config"]["url"] = url
             config["api_config"]["token"] = self.api_token_entry.get().strip()
             if workers > 0:
                 config["api_config"]["batch_size"] = workers
+            if "pipeline_config" not in config:
+                config["pipeline_config"] = {}
+            if "upload_spacing" not in config["pipeline_config"]:
+                config["pipeline_config"]["upload_spacing"] = {}
+            config["pipeline_config"]["upload_spacing"]["initial_delay_seconds"] = upload_spacing
+            config["pipeline_config"]["upload_spacing"]["enable_adaptive_spacing"] = self.adaptive_spacing_var.get()
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(config, f, default_flow_style=False, indent=2)
             messagebox.showinfo(

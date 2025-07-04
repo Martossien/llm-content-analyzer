@@ -159,3 +159,14 @@ templates:
     system_prompt: "Tu es un expert en s\xE9curit\xE9 informatique."
     user_template: "Analyse s\xE9curitaire du fichier {{ file_name }}. Classification:\
       \ {{ metadata_summary }}"
+
+pipeline_config:
+  upload_spacing:
+    initial_delay_seconds: 5
+    min_delay_seconds: 1
+    max_delay_seconds: 99
+    response_time_threshold: 5
+    adjustment_step: 1
+    buffer_size: 2
+    enable_adaptive_spacing: true
+

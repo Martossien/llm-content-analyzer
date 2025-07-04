@@ -316,6 +316,29 @@ class ContentAnalyzer:
             return {"status": "error", "error": str(exc)}
 
     # ------------------------------------------------------------------
+    # Decoupled upload/processing helpers
+    # ------------------------------------------------------------------
+    def upload_file_for_processing(self, file_row: Dict[str, Any]) -> Dict[str, Any]:
+        """Upload uniquement le fichier vers l'API et retourne un référent."""
+        prompt = self.prompt_manager.build_analysis_prompt(
+            {
+                "file_name": Path(file_row["path"]).name,
+                "file_size_readable": self._format_file_size(file_row.get("file_size", 0)),
+                "owner": file_row.get("owner", "unknown"),
+                "last_modified": file_row.get("last_modified", ""),
+                "file_extension": Path(file_row["path"]).suffix,
+                "file_signature": file_row.get("file_signature", "unknown"),
+            },
+            analysis_type="comprehensive",
+        )
+        api_res = self.api_client.analyze_file(file_row["path"], prompt)
+        return api_res
+
+    def process_uploaded_file(self, upload_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Traite un résultat d'upload préalablement effectué."""
+        return self._parse_api_response(upload_result)
+
+    # ------------------------------------------------------------------
     # Batch analysis helper
     # ------------------------------------------------------------------
     def analyze_batch(
