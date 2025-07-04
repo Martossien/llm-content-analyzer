@@ -57,6 +57,16 @@ class AdaptivePipelineManager:
                 avg_time = sum(self.response_times) / len(self.response_times)
                 self.metrics.avg_api_response_time = avg_time
 
+                if len(self.response_times) >= 4:
+                    prev = sum(list(self.response_times)[-4:-1]) / 3
+                    if avg_time < prev * 0.9 or avg_time > prev * 1.1:
+                        step = -self.adjustment_step if avg_time < prev else self.adjustment_step
+                        new = max(self.min_spacing, min(self.current_spacing + step, self.max_spacing))
+                        if new != self.current_spacing:
+                            tag = "amélioration" if step < 0 else "dégradation"
+                            logging.info(f"API en {tag} ({prev:.1f}s→{avg_time:.1f}s) → espacement {self.current_spacing}s → {new}s")
+                            self.current_spacing = self.metrics.current_upload_spacing = new
+                            return
                 if avg_time > self.threshold:
                     new_spacing = min(self.current_spacing + self.adjustment_step, self.max_spacing)
                     if new_spacing != self.current_spacing:
