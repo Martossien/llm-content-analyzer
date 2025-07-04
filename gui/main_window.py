@@ -61,6 +61,7 @@ from content_analyzer.utils.prompt_validator import (
 )
 
 from .utils.analysis_thread import AnalysisThread
+from .utils.multi_worker_analysis_thread import MultiWorkerAnalysisThread
 from .utils.log_viewer import LogViewer
 from .utils.service_monitor import ServiceMonitor
 
@@ -129,7 +130,7 @@ class MainWindow:
         self.log_viewer = LogViewer(Path("logs/content_analyzer.log"))
 
         self.db_manager: DBManager | None = None
-        self.analysis_thread: AnalysisThread | None = None
+        self.analysis_thread: MultiWorkerAnalysisThread | None = None
         self.analysis_running = False
 
         # Pagination state for results viewer
@@ -269,17 +270,15 @@ No need to run analysis to see your files.
         self.api_token_entry = ttk.Entry(api_frame, width=30, show="*")
         self.api_token_entry.grid(row=1, column=1, sticky="ew", padx=2, pady=2)
 
-        ttk.Label(api_frame, text="Max Context:").grid(
+        ttk.Label(api_frame, text="Workers:").grid(
             row=2, column=0, sticky="w", padx=2, pady=2
         )
-        self.max_context_entry = ttk.Entry(api_frame, width=10)
-        self.max_context_entry.grid(row=2, column=1, sticky="ew", padx=2, pady=2)
-
-        ttk.Label(api_frame, text="Workers:").grid(
-            row=3, column=0, sticky="w", padx=2, pady=2
-        )
         self.workers_entry = ttk.Entry(api_frame, width=5)
-        self.workers_entry.grid(row=3, column=1, sticky="w", padx=2, pady=2)
+        self.workers_entry.grid(row=2, column=1, sticky="w", padx=2, pady=2)
+        workers_tooltip = Tooltip(
+            self.workers_entry,
+            "Nombre de workers parall\xE8les (optimal: 2-8 pour I/O-bound)\nAuto: laissez vide pour d\xE9tection automatique",
+        )
 
         self.test_api_button = ttk.Button(
             api_frame, text="Test Connection", command=self.test_api_connection
@@ -468,6 +467,12 @@ No need to run analysis to see your files.
             command=self.stop_analysis,
         )
         self.stop_button.pack(side="left", padx=5, pady=5)
+        ttk.Button(
+            action_frame,
+            text="\U0001f465 WORKER STATUS",
+            width=15,
+            command=self.show_worker_status,
+        ).pack(side="left", padx=5, pady=5)
         self.single_button = ttk.Button(
             action_frame,
             text="ANALYZE SELECTED FILE",
@@ -662,8 +667,6 @@ No need to run analysis to see your files.
             self.api_url_entry.insert(0, api_config.get("url", "http://localhost:8080"))
             self.api_token_entry.delete(0, tk.END)
             self.api_token_entry.insert(0, api_config.get("token", ""))
-            self.max_context_entry.delete(0, tk.END)
-            self.max_context_entry.insert(0, str(api_config.get("max_tokens", 100000)))
             self.workers_entry.delete(0, tk.END)
             self.workers_entry.insert(0, str(api_config.get("batch_size", 3)))
             self.status_config_label.config(foreground="black")
@@ -724,25 +727,23 @@ No need to run analysis to see your files.
                 )
                 return
             try:
-                max_context = int(self.max_context_entry.get())
-                if max_context < 1000 or max_context > 500000:
-                    raise ValueError("Max context must be between 1000 and 500000")
+                workers_input = self.workers_entry.get().strip()
+                workers = int(workers_input) if workers_input else 0
+                if workers_input and (workers < 1 or workers > 32):
+                    raise ValueError("Workers must be between 1 and 32")
             except ValueError as e:
-                messagebox.showerror("Invalid Max Context", str(e), parent=self.root)
-                return
-            try:
-                workers = int(self.workers_entry.get())
-                if workers < 1 or workers > 10:
-                    raise ValueError("Workers must be between 1 and 10")
-            except ValueError as e:
-                messagebox.showerror("Invalid Workers", str(e), parent=self.root)
+                messagebox.showerror(
+                    "Invalid Workers",
+                    str(e),
+                    parent=self.root,
+                )
                 return
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             config["api_config"]["url"] = url
             config["api_config"]["token"] = self.api_token_entry.get().strip()
-            config["api_config"]["max_tokens"] = max_context
-            config["api_config"]["batch_size"] = workers
+            if workers > 0:
+                config["api_config"]["batch_size"] = workers
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(config, f, default_flow_style=False, indent=2)
             messagebox.showinfo(
@@ -1357,21 +1358,15 @@ No need to run analysis to see your files.
                 )
                 return False
             try:
-                max_context = int(self.max_context_entry.get())
-                if max_context < 1000:
-                    raise ValueError("Too small")
+                workers_input = self.workers_entry.get().strip()
+                if workers_input:
+                    workers = int(workers_input)
+                    if workers < 1 or workers > 32:
+                        raise ValueError("Workers must be between 1 and 32")
             except ValueError:
                 messagebox.showerror(
-                    "Invalid Configuration", "Max context must be a number >= 1000"
-                )
-                return False
-            try:
-                workers = int(self.workers_entry.get())
-                if workers < 1 or workers > 10:
-                    raise ValueError("Out of range")
-            except ValueError:
-                messagebox.showerror(
-                    "Invalid Configuration", "Workers must be between 1 and 10"
+                    "Invalid Configuration",
+                    "Workers must be a number between 1 and 32, or empty for auto",
                 )
                 return False
             return True
@@ -1418,12 +1413,15 @@ No need to run analysis to see your files.
                 return
         try:
             output_db = Path("analysis_results.db")
-            self.analysis_thread = AnalysisThread(
+            workers_input = self.workers_entry.get().strip()
+            max_workers = int(workers_input) if workers_input else None
+            self.analysis_thread = MultiWorkerAnalysisThread(
                 config_path=self.config_path,
                 csv_file=Path(self.csv_file_path),
                 output_db=output_db,
-                progress_callback=self.on_analysis_progress,
-                completion_callback=self.on_analysis_complete,
+                max_workers=max_workers,
+                progress_callback=self.on_analysis_progress_enhanced,
+                completion_callback=self.on_analysis_complete_enhanced,
                 error_callback=self.on_analysis_error,
             )
             self.db_manager = DBManager(output_db)
@@ -1442,7 +1440,11 @@ No need to run analysis to see your files.
             self.browse_button.config(state="disabled")
             self.analysis_thread.start()
             self.update_progress_display()
-            self.log_action(f"Analysis started: {self.csv_file_path}", "INFO")
+            optimal_workers = self.analysis_thread.max_workers
+            self.log_action(
+                f"Analysis started with {optimal_workers} workers: {self.csv_file_path}",
+                "INFO",
+            )
             self.status_app_label.config(text="Running Analysis...")
         except Exception as e:
             messagebox.showerror("Start Error", f"Cannot start analysis:\n{str(e)}")
@@ -1649,6 +1651,32 @@ No need to run analysis to see your files.
     def on_analysis_progress(self, info: dict) -> None:
         self.current_file_path = info.get("current_file")
 
+    def on_analysis_progress_enhanced(self, info: dict) -> None:
+        """Progress callback with worker metrics."""
+        self.current_file_path = info.get("current_workers", {}).get("current_files", {})
+
+        processed = info.get("processed", 0)
+        total = info.get("total", 0)
+        performance = info.get("performance", {})
+
+        progress_pct = (processed / total * 100) if total > 0 else 0
+        self.progress_bar["value"] = progress_pct
+
+        throughput = performance.get("throughput_per_minute", 0)
+        cache_hits = performance.get("cache_hits", 0)
+        cache_hit_rate = (cache_hits / max(processed, 1)) * 100
+
+        active_workers = info.get("current_workers", {}).get("active_workers", 0)
+        max_workers = info.get("current_workers", {}).get("max_workers", 0)
+
+        metrics_text = (
+            f"Files: {processed}/{total} ({progress_pct:.1f}%) | "
+            f"Speed: {throughput:.0f}/min | "
+            f"Cache Hit: {cache_hit_rate:.1f}% | "
+            f"Workers: {active_workers}/{max_workers}"
+        )
+        self.progress_metrics_label.config(text=metrics_text)
+
     def on_analysis_complete(self, result: dict) -> None:
         self.analysis_running = False
         self.start_button.config(state="normal")
@@ -1667,6 +1695,50 @@ No need to run analysis to see your files.
             f"Processing time: {processing_time:.1f}s\n"
             f"Errors: {errors}"
         )
+        if status == "completed":
+            messagebox.showinfo("Analysis Complete", completion_msg, parent=self.root)
+            self.log_action(
+                f"Analysis completed successfully: {files_processed}/{files_total} files",
+                "INFO",
+            )
+            self.status_app_label.config(text="Completed")
+        else:
+            messagebox.showerror("Analysis Failed", completion_msg, parent=self.root)
+            self.log_action(f"Analysis failed: {status}", "ERROR")
+            self.status_app_label.config(text="Failed")
+
+        self.invalidate_all_caches()
+
+    def on_analysis_complete_enhanced(self, result: dict) -> None:
+        """Completion callback with performance statistics."""
+        self.analysis_running = False
+        self.start_button.config(state="normal")
+        self.pause_button.config(state="disabled", text="PAUSE")
+        self.stop_button.config(state="disabled")
+        self.browse_button.config(state="normal")
+
+        status = result.get("status", "unknown")
+        files_processed = result.get("files_processed", 0)
+        files_total = result.get("files_total", 0)
+        processing_time = result.get("processing_time", 0)
+        speedup = result.get("speedup_estimate", 1.0)
+        workers_used = result.get("workers_used", 1)
+        perf = result.get("performance_stats", {})
+        cache_hit_rate = (
+            perf.get("cache_hits", 0) / max(files_processed, 1) * 100
+        )
+
+        completion_msg = (
+            f"Analysis completed!\n\n"
+            f"Status: {status}\n"
+            f"Files processed: {files_processed}/{files_total}\n"
+            f"Workers used: {workers_used}\n"
+            f"Estimated speedup: {speedup:.1f}x\n"
+            f"Throughput: {perf.get('throughput_per_minute', 0):.0f} files/min\n"
+            f"Cache hit rate: {cache_hit_rate:.1f}%\n"
+            f"Processing time: {processing_time:.1f}s"
+        )
+
         if status == "completed":
             messagebox.showinfo("Analysis Complete", completion_msg, parent=self.root)
             self.log_action(
@@ -3888,6 +3960,57 @@ RAW RESPONSE:
         ttk.Button(
             maintenance_window, text="Close", command=maintenance_window.destroy
         ).pack(pady=10)
+
+    def show_worker_status(self) -> None:
+        """Display detailed worker status in a modal window."""
+        if not (
+            hasattr(self, "analysis_thread") and self.analysis_thread and self.analysis_thread.is_alive()
+        ):
+            messagebox.showinfo("Worker Status", "No active analysis running", parent=self.root)
+            return
+
+        try:
+            status = self.analysis_thread.get_worker_status()
+            status_window = self.create_dialog_window(self.root, "Worker Status Monitor", "600x400")
+
+            perf_frame = ttk.LabelFrame(status_window, text="Performance Metrics")
+            perf_frame.pack(fill="x", padx=10, pady=5)
+
+            perf = status.get("performance", {})
+            metrics_text = f"""
+Workers Active: {status.get('active_workers', 0)}/{status.get('max_workers', 0)}
+Files Processed: {perf.get('processed', 0)}
+Throughput: {perf.get('throughput_per_minute', 0):.1f} files/min
+Cache Hit Rate: {perf.get('cache_hits', 0) / max(perf.get('processed', 1), 1) * 100:.1f}%
+Average Processing: {perf.get('avg_processing_time', 0):.2f}s/file
+Errors: {perf.get('errors', 0)}
+"""
+
+            ttk.Label(perf_frame, text=metrics_text, font=("Consolas", 10)).pack(anchor="w", padx=10, pady=5)
+
+            files_frame = ttk.LabelFrame(status_window, text="Current Files")
+            files_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+            files_listbox = tk.Listbox(files_frame, font=("Consolas", 9))
+            files_listbox.pack(fill="both", expand=True, padx=5, pady=5)
+
+            current_files = status.get("current_files", {})
+            for worker_id, file_path in current_files.items():
+                files_listbox.insert(tk.END, f"Worker {worker_id}: {Path(file_path).name}")
+            if not current_files:
+                files_listbox.insert(tk.END, "No files currently being processed")
+
+            controls_frame = ttk.Frame(status_window)
+            controls_frame.pack(fill="x", padx=10, pady=5)
+
+            def refresh_status() -> None:
+                status_window.destroy()
+                self.show_worker_status()
+
+            ttk.Button(controls_frame, text="Refresh", command=refresh_status).pack(side="left", padx=5)
+            ttk.Button(controls_frame, text="Close", command=status_window.destroy).pack(side="right", padx=5)
+        except Exception as e:
+            messagebox.showerror("Status Error", f"Failed to get worker status:\n{str(e)}", parent=self.root)
 
     def reset_database(self, parent_window: tk.Toplevel) -> None:
         response = messagebox.askyesno(
