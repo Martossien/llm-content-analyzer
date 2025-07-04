@@ -48,6 +48,9 @@ class AdaptivePipelineManager:
         )
 
     def record_api_response_time(self, response_time: float) -> None:
+        if response_time < 0.001:
+            logging.warning(f"Ignoring unrealistic API time: {response_time}s")
+            return
         with self.lock:
             self.response_times.append(response_time)
             if self.adaptive_enabled and len(self.response_times) >= 3:
@@ -98,6 +101,7 @@ class AdaptivePipelineManager:
 
     def get_pipeline_status(self) -> Dict[str, Any]:
         with self.lock:
+            self.metrics.queue_depth = self.processing_queue.qsize()
             return {
                 "current_spacing": self.current_spacing,
                 "avg_response_time": self.metrics.avg_api_response_time,

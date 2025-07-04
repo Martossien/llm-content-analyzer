@@ -54,6 +54,19 @@ class PerformanceMonitor:
         with self.lock:
             return self.metrics.copy()
 
+    def get_gui_safe_snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            snapshot = {
+                "processed": self.metrics["processed"],
+                "errors": self.metrics["errors"],
+                "cache_hits": self.metrics["cache_hits"],
+                "avg_processing_time": self.metrics["avg_processing_time"],
+                "throughput_per_minute": self.metrics["throughput_per_minute"],
+                "worker_utilization": dict(self.metrics.get("worker_utilization", {})),
+                "timestamp": time.time(),
+            }
+            return snapshot
+
 
 class LegacyMultiWorkerAnalysisThread(threading.Thread):
     """Analysis thread running multiple workers in parallel (legacy implementation)."""
@@ -96,6 +109,16 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
         cpu_count = os.cpu_count() or 1
         optimal = min(32, cpu_count + 4)
         return min(optimal, 8)
+
+    def _calculate_worker_distribution(self) -> tuple[int, int]:
+        """Determine upload vs processing worker counts."""
+        if self.max_workers == 1:
+            return 1, 0
+        if self.max_workers == 2:
+            return 1, 1
+        upload_workers = max(1, self.max_workers // 3)
+        processing_workers = max(1, self.max_workers - upload_workers)
+        return upload_workers, processing_workers
 
     def pause(self) -> None:
         self.is_paused.set()
@@ -280,6 +303,36 @@ class EnhancedMultiWorkerAnalysisThread(threading.Thread):
 
         self.performance_monitor = PerformanceMonitor()
 
+        self.upload_workers, self.processing_workers = self._calculate_worker_distribution()
+
+    # ------------------------------------------------------------------
+    # Control helpers for GUI
+    # ------------------------------------------------------------------
+    def pause(self) -> None:
+        self.is_paused.set()
+
+    def resume(self) -> None:
+        self.is_paused.clear()
+
+    def stop(self) -> None:
+        self.should_stop.set()
+        self.is_paused.clear()
+        for _ in range(self.processing_workers):
+            self.pipeline_manager.processing_queue.put((None, None))
+
+    def get_status(self) -> Dict[str, Any]:
+        stats = self.performance_monitor.get_stats()
+        pipeline = self.pipeline_manager.get_pipeline_status()
+        return {
+            "is_running": self.is_alive(),
+            "is_paused": self.is_paused.is_set(),
+            "should_stop": self.should_stop.is_set(),
+            "upload_workers": self.upload_workers,
+            "processing_workers": self.processing_workers,
+            "performance": stats,
+            "pipeline": pipeline,
+        }
+
     def _calculate_optimal_workers(self, count: Optional[int]) -> int:
         if count and count > 0:
             return min(count, 32)
@@ -296,11 +349,11 @@ class EnhancedMultiWorkerAnalysisThread(threading.Thread):
             if delay > 0:
                 time.sleep(delay)
             self.pipeline_manager.register_upload_start()
-            start = time.time()
+            start = time.perf_counter()
             try:
                 analyzer = ContentAnalyzer(self.config_path)
                 result = analyzer.analyze_single_file(file_row)
-                response_time = time.time() - start
+                response_time = time.perf_counter() - start
                 self.pipeline_manager.record_api_response_time(response_time)
                 self.pipeline_manager.processing_queue.put((file_row, result))
             except Exception as exc:  # pragma: no cover - runtime
@@ -315,7 +368,7 @@ class EnhancedMultiWorkerAnalysisThread(threading.Thread):
             if file_row is None:
                 break
             self.pipeline_manager.register_llm_processing_start()
-            start = time.time()
+            start = time.perf_counter()
             try:
                 analyzer = ContentAnalyzer(self.config_path)
                 final_result = upload_result
@@ -335,7 +388,7 @@ class EnhancedMultiWorkerAnalysisThread(threading.Thread):
                     with DBManager(self.output_db) as db:
                         db.update_file_status(file_row.get("id"), "error", final_result.get("error", ""))
                     self.performance_monitor.record_error(worker_id)
-                proc_time = time.time() - start
+                proc_time = time.perf_counter() - start
                 self.pipeline_manager.register_llm_processing_complete()
                 self.performance_monitor.record_completion(worker_id, proc_time, False)
             except Exception as exc:  # pragma: no cover - runtime
@@ -352,8 +405,56 @@ class EnhancedMultiWorkerAnalysisThread(threading.Thread):
                     self.completion_callback({"status": "completed", "files_processed": 0, "files_total": 0, "processing_time": 0, "errors": 0})
                 return
 
-            upload_workers = max(1, self.max_workers // 3)
-            processing_workers = self.max_workers - upload_workers
+            upload_workers, processing_workers = self.upload_workers, self.processing_workers
+
+            if processing_workers == 0:
+                # Sequential mode with adaptive spacing
+                for file_row in files:
+                    if self.should_stop.is_set():
+                        break
+                    delay = self.pipeline_manager.should_delay_upload()
+                    if delay > 0:
+                        time.sleep(delay)
+                    self.pipeline_manager.register_upload_start()
+                    start = time.perf_counter()
+                    analyzer = ContentAnalyzer(self.config_path)
+                    result = analyzer.analyze_single_file(file_row)
+                    duration = time.perf_counter() - start
+                    self.pipeline_manager.record_api_response_time(duration)
+                    if result.get("status") in {"completed", "cached"}:
+                        llm_data = result.get("result", {})
+                        llm_data["processing_time_ms"] = result.get("processing_time_ms", 0)
+                        with DBManager(self.output_db) as db:
+                            db.store_analysis_result(
+                                file_row.get("id"),
+                                result.get("task_id", ""),
+                                llm_data,
+                                result.get("resume", ""),
+                                result.get("raw_response", ""),
+                            )
+                            db.update_file_status(file_row.get("id"), "completed")
+                        self.performance_monitor.record_completion(0, duration, result.get("status") == "cached")
+                    else:
+                        with DBManager(self.output_db) as db:
+                            db.update_file_status(file_row.get("id"), "error", result.get("error", ""))
+                        self.performance_monitor.record_error(0)
+                    if self.progress_callback:
+                        status = self.pipeline_manager.get_pipeline_status()
+                        status.update(self.performance_monitor.get_gui_safe_snapshot())
+                        self.progress_callback(status)
+                stats = self.performance_monitor.get_stats()
+                if self.completion_callback:
+                    self.completion_callback({
+                        "status": "completed",
+                        "files_processed": stats.get("processed", 0),
+                        "files_total": len(files),
+                        "processing_time": time.time() - self.pipeline_manager.last_upload_time,
+                        "errors": stats.get("errors", 0),
+                        "performance_stats": stats,
+                        "workers_used": self.max_workers,
+                    })
+                return
+
             chunk_size = max(1, len(files) // upload_workers)
             file_chunks = [files[i:i + chunk_size] for i in range(0, len(files), chunk_size)]
 
@@ -366,7 +467,7 @@ class EnhancedMultiWorkerAnalysisThread(threading.Thread):
                         break
                     if self.progress_callback:
                         status = self.pipeline_manager.get_pipeline_status()
-                        status.update(self.performance_monitor.get_stats())
+                        status.update(self.performance_monitor.get_gui_safe_snapshot())
                         self.progress_callback(status)
                     time.sleep(0.5)
 
