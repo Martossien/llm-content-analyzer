@@ -161,7 +161,7 @@ templates:
       \ {{ metadata_summary }}"
 
 pipeline_config:
-  upload_spacing:
+  adaptive_spacing:
     initial_delay_seconds: 5
     min_delay_seconds: 1
     max_delay_seconds: 99
