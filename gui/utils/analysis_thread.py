@@ -96,7 +96,7 @@ class AnalysisThread(threading.Thread):
                     "files_processed": processed,
                     "files_total": total,
                     "processing_time": total_time_ms / 1000,
-                    "errors": [f"Total errors: {error_count}"] if error_count > 0 else [],
+                    "errors": error_count,
                 }
             except Exception as e:
                 result = {
