@@ -1299,12 +1299,23 @@ No need to run analysis to see your files.
                 processing = stats.get("processing", 0)
                 progress_pct = ((completed + errors) / total * 100) if total > 0 else 0
                 current_time = time.time()
-                if hasattr(self, "last_progress_time"):
+
+                # Calculate processing speed (files per minute)
+                if hasattr(self, "last_progress_time") and hasattr(self, "last_completed"):
                     time_diff = current_time - self.last_progress_time
-                    files_diff = completed - getattr(self, "last_completed", 0)
-                    speed = (files_diff / time_diff * 60) if time_diff > 0 else 0
+                    files_diff = completed - self.last_completed
+                    if time_diff >= 1.0:
+                        speed = (files_diff / time_diff * 60) if time_diff > 0 else 0
+                        self.last_progress_time = current_time
+                        self.last_completed = completed
+                    else:
+                        speed = getattr(self, "last_speed", 0)
                 else:
                     speed = 0
+                    self.last_progress_time = current_time
+                    self.last_completed = completed
+
+                self.last_speed = speed
                 cache_hit_rate = self.get_cache_hit_rate()
                 metrics_text = (
                     f"Files: {completed}/{total} ({progress_pct:.1f}%) | "
@@ -1328,8 +1339,6 @@ No need to run analysis to see your files.
                     self.time_estimate_label.config(
                         text=f"Estimated Time Remaining: {time_str}"
                     )
-                self.last_progress_time = current_time
-                self.last_completed = completed
             except Exception as e:
                 self.log_action(f"Progress update error: {str(e)}", "ERROR")
         if self.analysis_running:
@@ -1423,6 +1432,10 @@ No need to run analysis to see your files.
             if hasattr(self, "analytics_panel"):
                 self.analytics_panel.set_db_manager(self.db_manager)
             self.analysis_running = True
+
+            # Initialize progress tracking variables
+            self.last_progress_time = time.time()
+            self.last_completed = 0
             self.start_button.config(state="disabled")
             self.pause_button.config(state="normal")
             self.stop_button.config(state="normal")
@@ -1646,13 +1659,13 @@ No need to run analysis to see your files.
         files_processed = result.get("files_processed", 0)
         files_total = result.get("files_total", 0)
         processing_time = result.get("processing_time", 0)
-        errors = result.get("errors", [])
+        errors = result.get("errors", 0)
         completion_msg = (
             f"Analysis completed!\n\n"
             f"Status: {status}\n"
             f"Files processed: {files_processed}/{files_total}\n"
             f"Processing time: {processing_time:.1f}s\n"
-            f"Errors: {len(errors)}"
+            f"Errors: {errors}"
         )
         if status == "completed":
             messagebox.showinfo("Analysis Complete", completion_msg, parent=self.root)
