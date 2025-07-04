@@ -266,8 +266,8 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
         return max(1.0, sequential_time / total_time) if total_time > 0 else 1.0
 
 
-class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
-    """Thread multi-workers avec throttling adaptatif simple."""
+class SmartMultiWorkerAnalysisThread(threading.Thread):
+    """Multi-worker analysis thread with adaptive throttling."""
 
     def __init__(
         self,
@@ -290,9 +290,6 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
 
         self.max_workers = self._calculate_optimal_workers(max_workers)
 
-        self.adaptive_config = self._load_adaptive_config()
-        self.current_delay = self.adaptive_config.get("initial_delay_seconds", 5)
-
         self.is_paused = threading.Event()
         self.should_stop = threading.Event()
 
@@ -300,18 +297,23 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
         self.current_files: Dict[int, str] = {}
         self.files_lock = threading.Lock()
 
+        self.adaptive_manager = self._init_adaptive_manager()
+
         self.db_manager: Optional[DBManager] = None
 
     # ------------------------------------------------------------------
     # Config helpers
     # ------------------------------------------------------------------
-    def _load_adaptive_config(self) -> Dict[str, Any]:
+    def _init_adaptive_manager(self) -> "AdaptivePipelineManager":
+        from content_analyzer.modules.adaptive_pipeline_manager import AdaptivePipelineManager
+
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f)
-            return cfg.get("pipeline_config", {}).get("adaptive_spacing", {})
         except Exception:
-            return {}
+            cfg = {}
+
+        return AdaptivePipelineManager(cfg or {})
 
     def _calculate_optimal_workers(self, count: Optional[int]) -> int:
         if count and count > 0:
@@ -337,40 +339,33 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
         with self.files_lock:
             current = self.current_files.copy()
         stats = self.performance_monitor.get_stats()
+        pipeline_status = self.adaptive_manager.get_pipeline_status()
         return {
             "active_workers": len(current),
             "max_workers": self.max_workers,
-            "current_delay": self.current_delay,
+            "current_spacing": pipeline_status.get("current_spacing"),
             "current_files": current,
             "performance": stats,
+            "pipeline": pipeline_status,
             "is_paused": self.is_paused.is_set(),
             "should_stop": self.should_stop.is_set(),
         }
 
     # ------------------------------------------------------------------
-    # Adaptive delay update
-    # ------------------------------------------------------------------
-    def _update_adaptive_delay(self, response_time: float) -> None:
-        threshold = self.adaptive_config.get("response_time_threshold", 5.0)
-        step = self.adaptive_config.get("adjustment_step", 1)
-        min_delay = self.adaptive_config.get("min_delay_seconds", 1)
-        max_delay = self.adaptive_config.get("max_delay_seconds", 99)
-
-        if response_time > threshold:
-            self.current_delay = min(max_delay, self.current_delay + step)
-        elif response_time < threshold * 0.7:
-            self.current_delay = max(min_delay, self.current_delay - step)
-
-    # ------------------------------------------------------------------
     # Worker function
     # ------------------------------------------------------------------
-    def _worker_task(self, file_row: Dict[str, Any], worker_id: int) -> Dict[str, Any]:
+    def _smart_worker_task(self, file_row: Dict[str, Any], worker_id: int) -> Dict[str, Any]:
         if self.is_paused.is_set():
             self.is_paused.wait()
         if self.should_stop.is_set():
             return {"status": "cancelled", "error": "Analysis stopped"}
 
-        time.sleep(self.current_delay)
+        delay = self.adaptive_manager.should_delay_upload()
+        if delay > 0:
+            time.sleep(delay)
+        self.adaptive_manager.register_upload_start()
+        self.adaptive_manager.register_llm_processing_start()
+
         start = time.time()
         file_path = file_row.get("path", "Unknown")
         with self.files_lock:
@@ -381,7 +376,8 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
             duration = time.time() - start
             was_cached = result.get("status") == "cached"
             self.performance_monitor.record_completion(worker_id, duration, was_cached)
-            self._update_adaptive_delay(duration)
+            self.adaptive_manager.record_api_response_time(duration)
+            self.adaptive_manager.register_llm_processing_complete()
             return result
         except Exception as exc:  # pragma: no cover - runtime errors
             self.performance_monitor.record_error(worker_id)
@@ -419,7 +415,7 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_file = {
-                    executor.submit(self._worker_task, row, idx % self.max_workers): row
+                    executor.submit(self._smart_worker_task, row, idx % self.max_workers): row
                     for idx, row in enumerate(files)
                 }
 
@@ -467,7 +463,11 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
                 "errors": total_errors,
                 "performance_stats": final_stats,
                 "workers_used": self.max_workers,
-                "speedup_estimate": self._calculate_speedup(total_time, processed, final_stats.get("avg_processing_time", 0.0)),
+                "speedup_estimate": self._calculate_speedup(
+                    total_time,
+                    processed,
+                    final_stats.get("avg_processing_time", 0.0),
+                ),
             }
             if self.completion_callback:
                 self.completion_callback(result)
@@ -487,5 +487,5 @@ class AdaptiveMultiWorkerAnalysisThread(threading.Thread):
 
 
 # Backwards compatibility
-MultiWorkerAnalysisThread = AdaptiveMultiWorkerAnalysisThread
+MultiWorkerAnalysisThread = SmartMultiWorkerAnalysisThread
 
