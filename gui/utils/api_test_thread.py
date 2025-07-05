@@ -65,6 +65,7 @@ class APITestThread(threading.Thread):
 
     # ------------------------------------------------------------------
     def run(self) -> None:  # pragma: no cover - integration thread
+        start_time = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as ex:
             futures = []
             for i in range(self.iterations):
@@ -72,6 +73,7 @@ class APITestThread(threading.Thread):
                     break
                 worker_id = i % self.max_workers
                 futures.append(ex.submit(self._test_api_worker, i, worker_id))
+
             for fut in concurrent.futures.as_completed(futures):
                 if self.should_stop.is_set():
                     break
@@ -79,22 +81,31 @@ class APITestThread(threading.Thread):
                     res = fut.result()
                     self.test_results.append(res)
                     self._update_metrics(res)
+
                     if self.progress_callback:
                         self.progress_callback(
                             {
                                 "completed": len(self.test_results),
                                 "total": self.iterations,
-                                "metrics": asdict(self.metrics),
+                                "percentage": (len(self.test_results) / self.iterations) * 100,
+                                "current_metrics": asdict(self.metrics),
+                                "elapsed_time": time.time() - start_time,
+                                "eta": self._calculate_eta(start_time, len(self.test_results), self.iterations),
                             }
                         )
                 except Exception as exc:  # pragma: no cover - runtime errors
                     logger.error("Test worker failed: %s", exc)
+                    self.metrics.corrupted_responses += 1
+
         if self.completion_callback:
+            final_stats = self._generate_final_report()
             self.completion_callback(
                 {
                     "status": "completed",
                     "metrics": asdict(self.metrics),
                     "results": self.test_results,
+                    "final_report": final_stats,
+                    "total_duration": time.time() - start_time,
                 }
             )
 
@@ -125,7 +136,7 @@ class APITestThread(threading.Thread):
         if self.delay_between_requests > 0:
             time.sleep(self.delay_between_requests * worker_id)
         api_start = time.time()
-        result = analyzer.analyze_single_file(file_row)
+        result = analyzer.analyze_single_file(file_row, force_analysis=True)
         api_duration = time.time() - api_start
         raw_content = result.get("raw_response", "")
         quality = self._analyze_response_quality(result, raw_content)
@@ -170,26 +181,54 @@ class APITestThread(threading.Thread):
         return quality
 
     # ------------------------------------------------------------------
-    def _update_metrics(self, res: Dict[str, Any]) -> None:
-        status = res.get("quality", {}).get("status")
-        if status == "success":
+    def _update_metrics(self, result: Dict[str, Any]) -> None:
+        """Met à jour les métriques en comptant toutes les réponses."""
+        status = result.get("status", "error")
+        processing_time = result.get("processing_time", result.get("api_duration", 0.0))
+
+        if status in ["completed", "cached"]:
             self.metrics.successful_responses += 1
-        elif status == "corrupted":
+        elif status == "error":
             self.metrics.corrupted_responses += 1
-        elif status == "truncated":
-            self.metrics.truncated_responses += 1
-        elif status == "malformed_json":
-            self.metrics.malformed_json += 1
-        self.metrics.response_times.append(res.get("api_duration", 0.0))
-        worker_id = res.get("worker_id", 0)
+
+        if processing_time > 0:
+            self.metrics.response_times.append(processing_time)
+
+        if self.metrics.response_times:
+            avg_time = sum(self.metrics.response_times) / len(self.metrics.response_times)
+            self.metrics.throughput_per_minute = 60.0 / avg_time if avg_time > 0 else 0.0
+
+        worker_id = result.get("worker_id", 0)
         self.metrics.worker_efficiency.setdefault(worker_id, 0)
         self.metrics.worker_efficiency[worker_id] += 1
-        elapsed = sum(self.metrics.response_times)
-        processed = len(self.metrics.response_times)
-        self.metrics.throughput_per_minute = (
-            (processed / elapsed) * 60 if elapsed else 0.0
-        )
-        self.metrics.response_hashes.append(res.get("response_hash", ""))
+
+        if status == "completed" and "result" in result:
+            self._analyze_response_variance(result["result"])
+
+        self.metrics.response_hashes.append(result.get("response_hash", ""))
+
+    # ------------------------------------------------------------------
+    def _analyze_response_variance(self, analysis_result: Dict[str, Any]) -> None:
+        """Analyse la variance des classifications LLM."""
+        if "security" in analysis_result:
+            sec_class = analysis_result["security"].get("classification", "unknown")
+            self.metrics.classification_variance.setdefault("security", {})
+            self.metrics.classification_variance["security"].setdefault(sec_class, 0)
+            self.metrics.classification_variance["security"][sec_class] += 1
+
+        if "rgpd" in analysis_result:
+            rgpd_risk = analysis_result["rgpd"].get("risk_level", "unknown")
+            self.metrics.classification_variance.setdefault("rgpd", {})
+            self.metrics.classification_variance["rgpd"].setdefault(rgpd_risk, 0)
+            self.metrics.classification_variance["rgpd"][rgpd_risk] += 1
+
+        confidence = analysis_result.get("confidence_global", 0)
+        if confidence > 0:
+            vals = self.metrics.confidence_stats.setdefault("values", [])
+            vals.append(confidence)
+            if len(vals) >= 2:
+                self.metrics.confidence_stats["mean"] = mean(vals)
+                self.metrics.confidence_stats["std"] = stdev(vals) if len(vals) > 1 else 0.0
 
     # ------------------------------------------------------------------
     def get_final_metrics(self) -> Dict[str, Any]:
@@ -373,43 +412,83 @@ class APITestThread(threading.Thread):
             },
             "reliability_analysis": reliability_analysis,
             "scalability_metrics": scalability_metrics,
-            "recommendations": self._generate_recommendations(
-                reliability_analysis, scalability_metrics
-            ),
+            "recommendations": self._generate_recommendations(),
         }
 
     # ------------------------------------------------------------------
-    def _generate_recommendations(self, reliability: Dict, scalability: Dict) -> List[str]:
+    def _generate_recommendations(self) -> List[str]:
         """Génère recommandations basées sur les résultats."""
         recommendations = []
 
-        if reliability.get("overall_reliability_score", 0) < 80:
+        reliability_score = (self.metrics.successful_responses / len(self.test_results) * 100) if self.test_results else 0
+
+        if reliability_score < 95:
             recommendations.append(
-                "⚠️ Variance LLM élevée détectée - Vérifier prompts et température"
+                f"⚠️ Fiabilité faible ({reliability_score:.1f}%) - Vérifier configuration API"
             )
 
-        if self.metrics.corrupted_responses > 0:
-            recommendations.append(
-                "🚨 Corruption de réponses détectée - Réduire la charge ou vérifier API"
-            )
+        if self.metrics.response_times:
+            avg_time = sum(self.metrics.response_times) / len(self.metrics.response_times)
+            if avg_time > 10.0:
+                recommendations.append(
+                    f"🐌 Temps de réponse élevé ({avg_time:.1f}s) - Optimiser workers ou timeouts"
+                )
 
-        if self.metrics.truncated_responses > 0:
+        security_variance = self._calculate_classification_variance("security")
+        if security_variance > 20:
             recommendations.append(
-                "✂️ Troncature JSON détectée - Augmenter timeout ou réduire workers"
-            )
-
-        efficiency = scalability.get("current_efficiency", 0)
-        if efficiency < 0.5:
-            recommendations.append(
-                f"📉 Efficacité faible ({efficiency:.1%}) - Réduire à {scalability.get('recommended_workers')} workers"
-            )
-        elif efficiency > 0.9:
-            recommendations.append(
-                f"📈 Excellente efficacité - Possibilité d'augmenter à {scalability.get('recommended_workers')} workers"
+                f"🔄 Variance sécurité élevée ({security_variance:.1f}%) - Améliorer prompt"
             )
 
         if not recommendations:
             recommendations.append("✅ Configuration optimale détectée")
 
         return recommendations
+
+    # ------------------------------------------------------------------
+    def _calculate_eta(self, start_time: float, completed: int, total: int) -> float:
+        """Calcule le temps estimé restant pour la fin."""
+        if completed == 0:
+            return 0.0
+        elapsed = time.time() - start_time
+        rate = completed / elapsed
+        remaining = total - completed
+        return remaining / rate if rate > 0 else 0.0
+
+    # ------------------------------------------------------------------
+    def _calculate_classification_variance(self, domain: str) -> float:
+        """Calcule un pourcentage de variance pour un domaine donné."""
+        if domain not in self.metrics.classification_variance:
+            return 0.0
+        classifications = self.metrics.classification_variance[domain]
+        total = sum(classifications.values())
+        if total <= 1:
+            return 0.0
+        unique_classifications = len(classifications)
+        max_possible_unique = min(total, 5)
+        variance_percentage = (unique_classifications / max_possible_unique) * 100
+        return min(variance_percentage, 100.0)
+
+    # ------------------------------------------------------------------
+    def _generate_final_report(self) -> Dict[str, Any]:
+        """Génère un rapport final détaillé à la fin des tests."""
+        total_responses = len(self.test_results)
+        if total_responses == 0:
+            return {"error": "No responses to analyze"}
+
+        security_variance = self._calculate_classification_variance("security")
+        rgpd_variance = self._calculate_classification_variance("rgpd")
+
+        return {
+            "reliability_score": (self.metrics.successful_responses / total_responses) * 100,
+            "variance_analysis": {
+                "security_consistency": 100 - security_variance,
+                "rgpd_consistency": 100 - rgpd_variance,
+            },
+            "performance_analysis": {
+                "avg_response_time": sum(self.metrics.response_times) / len(self.metrics.response_times) if self.metrics.response_times else 0,
+                "throughput_per_minute": self.metrics.throughput_per_minute,
+            },
+            "recommendations": self._generate_recommendations(),
+        }
 

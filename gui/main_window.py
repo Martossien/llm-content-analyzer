@@ -933,6 +933,9 @@ No need to run analysis to see your files.
         self.test_progress_bar = ttk.Progressbar(progress_frame, mode="determinate")
         self.test_progress_bar.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
+        self.test_time_var = tk.StringVar(value="0s")
+        ttk.Label(progress_frame, textvariable=self.test_time_var).pack(side="right", padx=5)
+
         notebook = ttk.Notebook(self.test_results_window)
         notebook.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -994,16 +997,21 @@ No need to run analysis to see your files.
         close_button.pack(side="right", padx=5)
 
     def on_api_test_progress(self, progress_data):
-        """Callback pour mise à jour progress des tests API."""
+        """Callback amélioré pour mise à jour progress des tests API."""
         if not hasattr(self, "test_results_window") or not self.test_results_window.winfo_exists():
             return
 
         completed = progress_data.get("completed", 0)
         total = progress_data.get("total", 1)
+        percentage = progress_data.get("percentage", 0.0)
+
         self.test_progress_bar["maximum"] = total
         self.test_progress_bar["value"] = completed
+        self.test_progress_var.set(f"Test {completed}/{total} ({percentage:.1f}%)")
 
-        self.test_progress_var.set(f"Test {completed}/{total}")
+        elapsed = progress_data.get("elapsed_time", 0)
+        eta = progress_data.get("eta", 0)
+        self.test_time_var.set(f"Écoulé: {elapsed:.1f}s | ETA: {eta:.1f}s")
 
         metrics = progress_data.get("current_metrics", {})
         self.update_test_metrics_display(metrics)
@@ -1023,22 +1031,48 @@ No need to run analysis to see your files.
         self.log_action(f"Test API terminé: {results.get('status', 'unknown')}", "INFO")
 
     def update_test_metrics_display(self, metrics):
-        """Met à jour l'affichage des métriques temps réel."""
+        """Met à jour l'affichage des métriques avec toutes les données."""
         if not hasattr(self, "tech_metrics_text"):
             return
 
-        tech_content = (
-            f"Réponses traitées: {metrics.get('successful_responses', 0)}\n"
-            f"Corruptions détectées: {metrics.get('corrupted_responses', 0)}\n"
-            f"Troncatures détectées: {metrics.get('truncated_responses', 0)}\n"
-            f"JSON malformés: {metrics.get('malformed_json', 0)}\n"
-            f"Temps moyen: {metrics.get('avg_response_time', 0):.2f}s\n"
-            f"Throughput: {metrics.get('throughput_per_minute', 0):.1f} req/min"
-        )
+        successful = metrics.get("successful_responses", 0)
+        corrupted = metrics.get("corrupted_responses", 0)
+        truncated = metrics.get("truncated_responses", 0)
+        malformed = metrics.get("malformed_json", 0)
+        throughput = metrics.get("throughput_per_minute", 0.0)
+
+        classification_variance = metrics.get("classification_variance", {})
+        security_classifications = classification_variance.get("security", {})
+        rgpd_classifications = classification_variance.get("rgpd", {})
+
+        confidence_stats = metrics.get("confidence_stats", {})
+        avg_confidence = confidence_stats.get("mean", 0.0)
+        confidence_std = confidence_stats.get("std", 0.0)
+
+        display_text = f"""📊 MÉTRIQUES TEMPS RÉEL
+
+🔥 Performance:
+   • Réponses réussies: {successful}
+   • Corruptions détectées: {corrupted}
+   • Troncatures JSON: {truncated}
+   • JSON malformés: {malformed}
+   • Débit: {throughput:.1f} req/min
+
+🎯 Fiabilité LLM:
+   • Confiance moyenne: {avg_confidence:.1f}%
+   • Écart-type confiance: {confidence_std:.1f}%
+
+🔄 Variance Classifications:
+   • Sécurité: {list(security_classifications.keys())}
+   • RGPD: {list(rgpd_classifications.keys())}
+
+⚡ Workers:
+   • Actifs: {metrics.get('worker_efficiency', {})}
+"""
 
         self.tech_metrics_text.config(state="normal")
         self.tech_metrics_text.delete("1.0", "end")
-        self.tech_metrics_text.insert("1.0", tech_content)
+        self.tech_metrics_text.insert("1.0", display_text)
         self.tech_metrics_text.config(state="disabled")
 
     def display_final_test_summary(self, summary):
