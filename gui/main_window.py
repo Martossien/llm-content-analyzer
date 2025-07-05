@@ -133,6 +133,8 @@ class MainWindow:
         self.db_manager: DBManager | None = None
         self.analysis_thread: MultiWorkerAnalysisThread | None = None
         self.analysis_running = False
+        self.api_test_thread: APITestThread | None = None
+        self.api_test_running = False
 
         # Pagination state for results viewer
         self.results_offset = 0
@@ -219,6 +221,10 @@ No need to run analysis to see your files.
         dialog.geometry(f"+{x}+{y}")
         dialog.after_idle(lambda: dialog.grab_set())
         return dialog
+
+    def create_tooltip(self, widget: tk.Widget, text: str) -> Tooltip:
+        """Helper to attach a tooltip to a widget."""
+        return Tooltip(widget, text)
 
     def build_ui(self) -> None:
         """Construct all UI sections."""
@@ -307,14 +313,21 @@ No need to run analysis to see your files.
         )
         self.test_api_button.grid(row=5, column=0, sticky="ew", padx=2, pady=5)
 
-        self.api_test_button = ttk.Button(
-            api_frame, text="TEST API", command=self.open_api_test_dialog
+        test_api_button = ttk.Button(
+            api_frame,
+            text="🧪 TEST API",
+            command=self.open_api_test_dialog,
+            style="Accent.TButton",
         )
-        self.api_test_button.grid(row=6, column=0, sticky="ew", padx=2, pady=5)
+        test_api_button.grid(row=5, column=1, sticky="ew", padx=2, pady=5)
+        self.create_tooltip(
+            test_api_button,
+            "Lance des tests de charge pour diagnostiquer bugs de concurrence et mesurer fiabilité LLM",
+        )
 
         ttk.Button(
             api_frame, text="Save Configuration", command=self.save_api_configuration
-        ).grid(row=5, column=1, sticky="ew", padx=2, pady=5)
+        ).grid(row=6, column=0, columnspan=2, sticky="ew", padx=2, pady=5)
 
         # Panel 2B: Exclusions
         excl_frame = ttk.LabelFrame(config_frame, text="File Exclusions")
@@ -756,109 +769,314 @@ No need to run analysis to see your files.
     # ------------------------------------------------------------------
     # API TESTING
     # ------------------------------------------------------------------
-    def open_api_test_dialog(self) -> None:
-        dialog = self.create_dialog_window(
-            self.root, "Configuration Test API", "500x400"
-        )
-        ttk.Label(dialog, text="Test File:").grid(
-            row=0, column=0, sticky="w", padx=2, pady=2
-        )
-        file_entry = ttk.Entry(dialog, width=40)
-        file_entry.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
-        ttk.Button(
-            dialog,
-            text="Browse",
-            command=lambda: file_entry.insert(
-                0, filedialog.askopenfilename(parent=dialog)
-            ),
-        ).grid(row=0, column=2, padx=2, pady=2)
+    def open_api_test_dialog(self):
+        """Ouvre le dialog de configuration des tests API."""
+        if not self.config_path or not self.config_path.exists():
+            messagebox.showerror("Erreur", "Configuration requise avant de tester l'API")
+            return
 
-        ttk.Label(dialog, text="Iterations:").grid(
-            row=1, column=0, sticky="w", padx=2, pady=2
-        )
-        iter_spin = tk.Spinbox(dialog, from_=1, to=100, width=5)
-        iter_spin.grid(row=1, column=1, sticky="w", padx=2, pady=2)
+        test_window = self.create_dialog_window(self.root, "Configuration Test API", "600x500")
 
-        ttk.Label(dialog, text="Workers:").grid(
-            row=2, column=0, sticky="w", padx=2, pady=2
-        )
-        worker_spin = tk.Spinbox(dialog, from_=1, to=8, width=5)
-        worker_spin.grid(row=2, column=1, sticky="w", padx=2, pady=2)
+        file_frame = ttk.LabelFrame(test_window, text="📄 Fichier de Test")
+        file_frame.pack(fill="x", padx=10, pady=5)
 
-        ttk.Label(dialog, text="Delay (s):").grid(
-            row=3, column=0, sticky="w", padx=2, pady=2
-        )
-        delay_spin = tk.Spinbox(dialog, from_=0, to=10, width=5)
-        delay_spin.grid(row=3, column=1, sticky="w", padx=2, pady=2)
+        self.test_file_var = tk.StringVar()
+        file_entry = ttk.Entry(file_frame, textvariable=self.test_file_var, state="readonly")
+        file_entry.pack(side="left", fill="x", expand=True, padx=5, pady=5)
 
-        ttk.Label(dialog, text="Template:").grid(
-            row=4, column=0, sticky="w", padx=2, pady=2
+        browse_test_button = ttk.Button(
+            file_frame,
+            text="Parcourir",
+            command=self.browse_test_file,
         )
+        browse_test_button.pack(side="right", padx=5, pady=5)
+
+        params_frame = ttk.LabelFrame(test_window, text="⚙️ Paramètres de Test")
+        params_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(params_frame, text="Nombre de workers:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        self.test_workers_var = tk.IntVar(value=4)
+        workers_spin = ttk.Spinbox(params_frame, from_=1, to=8, textvariable=self.test_workers_var, width=10)
+        workers_spin.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+
+        ttk.Label(params_frame, text="Nombre d'itérations:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        self.test_iterations_var = tk.IntVar(value=20)
+        iterations_spin = ttk.Spinbox(params_frame, from_=5, to=100, textvariable=self.test_iterations_var, width=10)
+        iterations_spin.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        ttk.Label(params_frame, text="Délai entre requêtes (s):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        self.test_delay_var = tk.DoubleVar(value=0.5)
+        delay_scale = ttk.Scale(params_frame, from_=0, to=5, variable=self.test_delay_var, orient="horizontal")
+        delay_scale.grid(row=2, column=1, sticky="ew", padx=5, pady=2)
+        delay_label = ttk.Label(params_frame, text="0.5s")
+        delay_label.grid(row=2, column=2, padx=5, pady=2)
+
+        def update_delay_label(*_):
+            delay_label.config(text=f"{self.test_delay_var.get():.1f}s")
+
+        self.test_delay_var.trace("w", update_delay_label)
+
+        ttk.Label(params_frame, text="Type de template:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        self.test_template_var = tk.StringVar(value="comprehensive")
         template_combo = ttk.Combobox(
-            dialog, values=self.prompt_manager.get_available_templates()
+            params_frame,
+            textvariable=self.test_template_var,
+            values=["comprehensive", "security_focused"],
+            state="readonly",
+            width=15,
         )
-        template_combo.grid(row=4, column=1, sticky="w", padx=2, pady=2)
-        template_combo.set("comprehensive")
+        template_combo.grid(row=3, column=1, sticky="w", padx=5, pady=2)
 
-        def start_test() -> None:
-            path = Path(file_entry.get())
-            if not path.exists():
-                messagebox.showerror(
-                    "Invalid", "Please select a valid file", parent=dialog
-                )
-                return
-            dialog.destroy()
-            self._start_api_test(
-                path,
-                int(iter_spin.get()),
-                int(worker_spin.get()),
-                float(delay_spin.get()),
-                template_combo.get(),
-            )
+        desc_frame = ttk.LabelFrame(test_window, text="ℹ️ Description")
+        desc_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        ttk.Button(dialog, text="Start", command=start_test).grid(
-            row=5, column=0, padx=2, pady=10
-        )
-        ttk.Button(dialog, text="Cancel", command=dialog.destroy).grid(
-            row=5, column=1, padx=2, pady=10
+        desc_text = tk.Text(desc_frame, height=6, wrap="word", state="disabled")
+        desc_text.pack(fill="both", expand=True, padx=5, pady=5)
+
+        desc_content = (
+            "Ce test va :\n• Analyser le même fichier plusieurs fois avec différents workers\n"
+            "• Détecter les corruptions de contenu et troncatures JSON\n"
+            "• Mesurer la variance des classifications LLM\n"
+            "• Calculer les métriques de performance et scalabilité\n"
+            "• Générer des recommandations d'optimisation\n\n"
+            "Durée estimée : 2-5 minutes selon les paramètres."
         )
 
-    def _start_api_test(
-        self,
-        file_path: Path,
-        iterations: int,
-        workers: int,
-        delay: float,
-        template: str,
-    ) -> None:
-        results_window = self.create_dialog_window(
-            self.root, "API Test Results", "500x300"
+        desc_text.config(state="normal")
+        desc_text.insert("1.0", desc_content)
+        desc_text.config(state="disabled")
+
+        buttons_frame = ttk.Frame(test_window)
+        buttons_frame.pack(fill="x", padx=10, pady=10)
+
+        start_test_button = ttk.Button(
+            buttons_frame,
+            text="🚀 Démarrer Test",
+            command=lambda: self.start_api_test(test_window),
+            style="Accent.TButton",
         )
-        progress_label = ttk.Label(results_window, text="Starting...")
-        progress_label.pack(anchor="w", padx=2, pady=2)
+        start_test_button.pack(side="right", padx=5)
 
-        def on_progress(info: Dict[str, Any]) -> None:
-            completed = info.get("completed", 0)
-            total = info.get("total", iterations)
-            progress_label.config(text=f"{completed}/{total} completed")
+        cancel_button = ttk.Button(buttons_frame, text="Annuler", command=test_window.destroy)
+        cancel_button.pack(side="right", padx=5)
 
-        def on_complete(info: Dict[str, Any]) -> None:
-            metrics = info.get("metrics", {})
-            progress_label.config(
-                text=f"Done. Success: {metrics.get('successful_responses',0)}"
-            )
+    def browse_test_file(self):
+        """Sélection du fichier de test."""
+        file_path = filedialog.askopenfilename(
+            title="Sélectionner un fichier pour les tests",
+            filetypes=[
+                ("Tous fichiers supportés", "*.pdf *.docx *.txt *.md"),
+                ("PDF", "*.pdf"),
+                ("Word", "*.docx"),
+                ("Texte", "*.txt *.md"),
+                ("Tous", "*.*"),
+            ],
+        )
+        if file_path:
+            self.test_file_var.set(file_path)
+
+    def start_api_test(self, test_window):
+        """Démarre les tests API."""
+        if not self.test_file_var.get():
+            messagebox.showerror("Erreur", "Veuillez sélectionner un fichier de test")
+            return
+
+        test_file_path = Path(self.test_file_var.get())
+        if not test_file_path.exists():
+            messagebox.showerror("Erreur", "Le fichier sélectionné n'existe pas")
+            return
+
+        test_window.destroy()
+
+        self.create_test_results_window()
 
         self.api_test_thread = APITestThread(
-            self.config_path,
-            file_path,
-            iterations,
-            workers,
-            delay,
-            template,
-            on_progress,
-            on_complete,
+            config_path=self.config_path,
+            test_file_path=test_file_path,
+            iterations=self.test_iterations_var.get(),
+            max_workers=self.test_workers_var.get(),
+            delay_between_requests=self.test_delay_var.get(),
+            template_type=self.test_template_var.get(),
+            progress_callback=self.on_api_test_progress,
+            completion_callback=self.on_api_test_complete,
         )
+
+        self.api_test_running = True
         self.api_test_thread.start()
+
+        self.log_action(
+            f"Test API démarré: {test_file_path.name} ({self.test_iterations_var.get()} itérations, {self.test_workers_var.get()} workers)",
+            "INFO",
+        )
+
+    def create_test_results_window(self):
+        """Crée la fenêtre d'affichage des résultats temps réel."""
+        self.test_results_window = tk.Toplevel(self.root)
+        self.test_results_window.title("🧪 Résultats Test API - Temps Réel")
+        self.test_results_window.geometry("800x600")
+        self.test_results_window.transient(self.root)
+
+        self.test_progress_var = tk.StringVar(value="Initialisation...")
+        self.test_status_var = tk.StringVar(value="En cours")
+
+        header_frame = ttk.Frame(self.test_results_window)
+        header_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(header_frame, text="🧪 Test API en cours", font=("Arial", 14, "bold")).pack(side="left")
+        status_label = ttk.Label(header_frame, textvariable=self.test_status_var, foreground="blue")
+        status_label.pack(side="right")
+
+        progress_frame = ttk.Frame(self.test_results_window)
+        progress_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(progress_frame, textvariable=self.test_progress_var).pack(side="left")
+        self.test_progress_bar = ttk.Progressbar(progress_frame, mode="determinate")
+        self.test_progress_bar.pack(side="right", fill="x", expand=True, padx=(10, 0))
+
+        notebook = ttk.Notebook(self.test_results_window)
+        notebook.pack(fill="both", expand=True, padx=10, pady=5)
+
+        tech_frame = ttk.Frame(notebook)
+        notebook.add(tech_frame, text="📊 Métriques Techniques")
+
+        self.tech_metrics_text = tk.Text(tech_frame, height=10, state="disabled")
+        tech_scroll = ttk.Scrollbar(tech_frame, orient="vertical", command=self.tech_metrics_text.yview)
+        self.tech_metrics_text.configure(yscrollcommand=tech_scroll.set)
+        self.tech_metrics_text.pack(side="left", fill="both", expand=True)
+        tech_scroll.pack(side="right", fill="y")
+
+        llm_frame = ttk.Frame(notebook)
+        notebook.add(llm_frame, text="🧠 Fiabilité LLM")
+
+        self.llm_metrics_text = tk.Text(llm_frame, height=10, state="disabled")
+        llm_scroll = ttk.Scrollbar(llm_frame, orient="vertical", command=self.llm_metrics_text.yview)
+        self.llm_metrics_text.configure(yscrollcommand=llm_scroll.set)
+        self.llm_metrics_text.pack(side="left", fill="both", expand=True)
+        llm_scroll.pack(side="right", fill="y")
+
+        perf_frame = ttk.Frame(notebook)
+        notebook.add(perf_frame, text="⚡ Performance")
+
+        self.perf_metrics_text = tk.Text(perf_frame, height=10, state="disabled")
+        perf_scroll = ttk.Scrollbar(perf_frame, orient="vertical", command=self.perf_metrics_text.yview)
+        self.perf_metrics_text.configure(yscrollcommand=perf_scroll.set)
+        self.perf_metrics_text.pack(side="left", fill="both", expand=True)
+        perf_scroll.pack(side="right", fill="y")
+
+        buttons_frame = ttk.Frame(self.test_results_window)
+        buttons_frame.pack(fill="x", padx=10, pady=10)
+
+        self.stop_test_button = ttk.Button(
+            buttons_frame,
+            text="⏹️ Arrêter Test",
+            command=self.stop_api_test,
+            state="normal",
+        )
+        self.stop_test_button.pack(side="left", padx=5)
+
+        self.export_csv_button = ttk.Button(
+            buttons_frame,
+            text="📋 Export CSV",
+            command=lambda: self.export_test_results("csv"),
+            state="disabled",
+        )
+        self.export_csv_button.pack(side="right", padx=5)
+
+        self.export_json_button = ttk.Button(
+            buttons_frame,
+            text="📄 Export JSON",
+            command=lambda: self.export_test_results("json"),
+            state="disabled",
+        )
+        self.export_json_button.pack(side="right", padx=5)
+
+        close_button = ttk.Button(buttons_frame, text="Fermer", command=self.test_results_window.destroy)
+        close_button.pack(side="right", padx=5)
+
+    def on_api_test_progress(self, progress_data):
+        """Callback pour mise à jour progress des tests API."""
+        if not hasattr(self, "test_results_window") or not self.test_results_window.winfo_exists():
+            return
+
+        completed = progress_data.get("completed", 0)
+        total = progress_data.get("total", 1)
+        self.test_progress_bar["maximum"] = total
+        self.test_progress_bar["value"] = completed
+
+        self.test_progress_var.set(f"Test {completed}/{total}")
+
+        metrics = progress_data.get("current_metrics", {})
+        self.update_test_metrics_display(metrics)
+
+    def on_api_test_complete(self, results):
+        """Callback pour fin des tests API."""
+        self.api_test_running = False
+        self.test_status_var.set("Terminé")
+        self.stop_test_button.config(state="disabled")
+        self.export_csv_button.config(state="normal")
+        self.export_json_button.config(state="normal")
+
+        if hasattr(self.api_test_thread, "get_summary_report"):
+            summary = self.api_test_thread.get_summary_report()
+            self.display_final_test_summary(summary)
+
+        self.log_action(f"Test API terminé: {results.get('status', 'unknown')}", "INFO")
+
+    def update_test_metrics_display(self, metrics):
+        """Met à jour l'affichage des métriques temps réel."""
+        if not hasattr(self, "tech_metrics_text"):
+            return
+
+        tech_content = (
+            f"Réponses traitées: {metrics.get('successful_responses', 0)}\n"
+            f"Corruptions détectées: {metrics.get('corrupted_responses', 0)}\n"
+            f"Troncatures détectées: {metrics.get('truncated_responses', 0)}\n"
+            f"JSON malformés: {metrics.get('malformed_json', 0)}\n"
+            f"Temps moyen: {metrics.get('avg_response_time', 0):.2f}s\n"
+            f"Throughput: {metrics.get('throughput_per_minute', 0):.1f} req/min"
+        )
+
+        self.tech_metrics_text.config(state="normal")
+        self.tech_metrics_text.delete("1.0", "end")
+        self.tech_metrics_text.insert("1.0", tech_content)
+        self.tech_metrics_text.config(state="disabled")
+
+    def display_final_test_summary(self, summary):
+        """Affiche le résumé final des tests."""
+        overview = summary.get("test_overview", {})
+        reliability = summary.get("reliability_analysis", {})
+        recommendations = summary.get("recommendations", [])
+
+        llm_content = (
+            f"Taux de succès: {overview.get('success_rate_percent', 0):.1f}%\n"
+            f"Consistance sécurité: {reliability.get('security_consistency_percent', 0):.1f}%\n"
+            f"Consistance RGPD: {reliability.get('rgpd_consistency_percent', 0):.1f}%\n"
+            f"Score fiabilité global: {reliability.get('overall_reliability_score', 0):.1f}%\n"
+            f"Confiance moyenne: {reliability.get('confidence_mean', 0):.1f}%\n\n"
+            "🎯 RECOMMANDATIONS:\n" + "\n".join(recommendations)
+        )
+
+        self.llm_metrics_text.config(state="normal")
+        self.llm_metrics_text.delete("1.0", "end")
+        self.llm_metrics_text.insert("1.0", llm_content)
+        self.llm_metrics_text.config(state="disabled")
+
+    def stop_api_test(self):
+        """Arrête les tests API en cours."""
+        if hasattr(self, "api_test_thread") and self.api_test_thread.is_alive():
+            self.api_test_thread.stop()
+            self.test_status_var.set("Arrêt en cours...")
+            self.stop_test_button.config(state="disabled")
+
+    def export_test_results(self, format_type):
+        """Exporte les résultats des tests."""
+        if hasattr(self, "api_test_thread"):
+            try:
+                export_path = self.api_test_thread.export_test_results(format_type)
+                messagebox.showinfo("Export réussi", f"Résultats exportés vers:\n{export_path}")
+                self.log_action(f"Export test API: {export_path}", "INFO")
+            except Exception as e:
+                messagebox.showerror("Erreur export", f"Impossible d'exporter:\n{str(e)}")
 
     def save_api_configuration(self) -> None:
         try:
