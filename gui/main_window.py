@@ -62,6 +62,7 @@ from content_analyzer.utils.prompt_validator import (
 
 from .utils.analysis_thread import AnalysisThread
 from .utils.multi_worker_analysis_thread import MultiWorkerAnalysisThread
+from .utils.api_test_thread import APITestThread
 from .utils.log_viewer import LogViewer
 from .utils.service_monitor import ServiceMonitor
 
@@ -277,7 +278,7 @@ No need to run analysis to see your files.
         self.workers_entry.grid(row=2, column=1, sticky="w", padx=2, pady=2)
         workers_tooltip = Tooltip(
             self.workers_entry,
-            "Nombre de workers parall\xE8les (optimal: 2-8 pour I/O-bound)\nAuto: laissez vide pour d\xE9tection automatique",
+            "Nombre de workers parall\xe8les (optimal: 2-8 pour I/O-bound)\nAuto: laissez vide pour d\xe9tection automatique",
         )
 
         ttk.Label(api_frame, text="Initial Delay (s):").grid(
@@ -297,12 +298,19 @@ No need to run analysis to see your files.
             text="Auto-ajustement espacement",
             variable=self.adaptive_spacing_var,
         )
-        self.adaptive_spacing_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=2, pady=2)
+        self.adaptive_spacing_check.grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=2, pady=2
+        )
 
         self.test_api_button = ttk.Button(
             api_frame, text="Test Connection", command=self.test_api_connection
         )
         self.test_api_button.grid(row=5, column=0, sticky="ew", padx=2, pady=5)
+
+        self.api_test_button = ttk.Button(
+            api_frame, text="TEST API", command=self.open_api_test_dialog
+        )
+        self.api_test_button.grid(row=6, column=0, sticky="ew", padx=2, pady=5)
 
         ttk.Button(
             api_frame, text="Save Configuration", command=self.save_api_configuration
@@ -692,8 +700,12 @@ No need to run analysis to see your files.
             pipeline_config = config.get("pipeline_config", {})
             upload_cfg = pipeline_config.get("adaptive_spacing", {})
             self.upload_spacing_entry.delete(0, tk.END)
-            self.upload_spacing_entry.insert(0, str(upload_cfg.get("initial_delay_seconds", 5)))
-            self.adaptive_spacing_var.set(upload_cfg.get("enable_adaptive_spacing", True))
+            self.upload_spacing_entry.insert(
+                0, str(upload_cfg.get("initial_delay_seconds", 5))
+            )
+            self.adaptive_spacing_var.set(
+                upload_cfg.get("enable_adaptive_spacing", True)
+            )
             self.status_config_label.config(foreground="black")
         except Exception as e:  # pragma: no cover - file errors
             messagebox.showerror(
@@ -741,6 +753,113 @@ No need to run analysis to see your files.
         finally:
             self.test_api_button.config(state="normal", text="Test Connection")
 
+    # ------------------------------------------------------------------
+    # API TESTING
+    # ------------------------------------------------------------------
+    def open_api_test_dialog(self) -> None:
+        dialog = self.create_dialog_window(
+            self.root, "Configuration Test API", "500x400"
+        )
+        ttk.Label(dialog, text="Test File:").grid(
+            row=0, column=0, sticky="w", padx=2, pady=2
+        )
+        file_entry = ttk.Entry(dialog, width=40)
+        file_entry.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
+        ttk.Button(
+            dialog,
+            text="Browse",
+            command=lambda: file_entry.insert(
+                0, filedialog.askopenfilename(parent=dialog)
+            ),
+        ).grid(row=0, column=2, padx=2, pady=2)
+
+        ttk.Label(dialog, text="Iterations:").grid(
+            row=1, column=0, sticky="w", padx=2, pady=2
+        )
+        iter_spin = tk.Spinbox(dialog, from_=1, to=100, width=5)
+        iter_spin.grid(row=1, column=1, sticky="w", padx=2, pady=2)
+
+        ttk.Label(dialog, text="Workers:").grid(
+            row=2, column=0, sticky="w", padx=2, pady=2
+        )
+        worker_spin = tk.Spinbox(dialog, from_=1, to=8, width=5)
+        worker_spin.grid(row=2, column=1, sticky="w", padx=2, pady=2)
+
+        ttk.Label(dialog, text="Delay (s):").grid(
+            row=3, column=0, sticky="w", padx=2, pady=2
+        )
+        delay_spin = tk.Spinbox(dialog, from_=0, to=10, width=5)
+        delay_spin.grid(row=3, column=1, sticky="w", padx=2, pady=2)
+
+        ttk.Label(dialog, text="Template:").grid(
+            row=4, column=0, sticky="w", padx=2, pady=2
+        )
+        template_combo = ttk.Combobox(
+            dialog, values=self.prompt_manager.get_available_templates()
+        )
+        template_combo.grid(row=4, column=1, sticky="w", padx=2, pady=2)
+        template_combo.set("comprehensive")
+
+        def start_test() -> None:
+            path = Path(file_entry.get())
+            if not path.exists():
+                messagebox.showerror(
+                    "Invalid", "Please select a valid file", parent=dialog
+                )
+                return
+            dialog.destroy()
+            self._start_api_test(
+                path,
+                int(iter_spin.get()),
+                int(worker_spin.get()),
+                float(delay_spin.get()),
+                template_combo.get(),
+            )
+
+        ttk.Button(dialog, text="Start", command=start_test).grid(
+            row=5, column=0, padx=2, pady=10
+        )
+        ttk.Button(dialog, text="Cancel", command=dialog.destroy).grid(
+            row=5, column=1, padx=2, pady=10
+        )
+
+    def _start_api_test(
+        self,
+        file_path: Path,
+        iterations: int,
+        workers: int,
+        delay: float,
+        template: str,
+    ) -> None:
+        results_window = self.create_dialog_window(
+            self.root, "API Test Results", "500x300"
+        )
+        progress_label = ttk.Label(results_window, text="Starting...")
+        progress_label.pack(anchor="w", padx=2, pady=2)
+
+        def on_progress(info: Dict[str, Any]) -> None:
+            completed = info.get("completed", 0)
+            total = info.get("total", iterations)
+            progress_label.config(text=f"{completed}/{total} completed")
+
+        def on_complete(info: Dict[str, Any]) -> None:
+            metrics = info.get("metrics", {})
+            progress_label.config(
+                text=f"Done. Success: {metrics.get('successful_responses',0)}"
+            )
+
+        self.api_test_thread = APITestThread(
+            self.config_path,
+            file_path,
+            iterations,
+            workers,
+            delay,
+            template,
+            on_progress,
+            on_complete,
+        )
+        self.api_test_thread.start()
+
     def save_api_configuration(self) -> None:
         try:
             url = self.api_url_entry.get().strip()
@@ -780,8 +899,12 @@ No need to run analysis to see your files.
                 config["pipeline_config"] = {}
             if "adaptive_spacing" not in config["pipeline_config"]:
                 config["pipeline_config"]["adaptive_spacing"] = {}
-            config["pipeline_config"]["adaptive_spacing"]["initial_delay_seconds"] = upload_spacing
-            config["pipeline_config"]["adaptive_spacing"]["enable_adaptive_spacing"] = self.adaptive_spacing_var.get()
+            config["pipeline_config"]["adaptive_spacing"][
+                "initial_delay_seconds"
+            ] = upload_spacing
+            config["pipeline_config"]["adaptive_spacing"][
+                "enable_adaptive_spacing"
+            ] = self.adaptive_spacing_var.get()
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(config, f, default_flow_style=False, indent=2)
             messagebox.showinfo(
@@ -1340,7 +1463,9 @@ No need to run analysis to see your files.
                 current_time = time.time()
 
                 # Calculate processing speed (files per minute)
-                if hasattr(self, "last_progress_time") and hasattr(self, "last_completed"):
+                if hasattr(self, "last_progress_time") and hasattr(
+                    self, "last_completed"
+                ):
                     time_diff = current_time - self.last_progress_time
                     files_diff = completed - self.last_completed
                     if time_diff >= 1.0:
@@ -1416,24 +1541,33 @@ No need to run analysis to see your files.
 
     def start_analysis(self) -> None:
 
-        #debug si bd pas vide
+        # debug si bd pas vide
         if not self.csv_file_path:
             # Check if database exists with pending files
             db_path = Path("analysis_results.db")
             if db_path.exists():
                 conn = sqlite3.connect(db_path)
                 cursor = conn.cursor()
-                pending_count = cursor.execute("SELECT COUNT(*) FROM fichiers WHERE status='pending'").fetchone()[0]
+                pending_count = cursor.execute(
+                    "SELECT COUNT(*) FROM fichiers WHERE status='pending'"
+                ).fetchone()[0]
                 conn.close()
                 if pending_count > 0:
-                    response = messagebox.askyesno("Resume Analysis", f"Found {pending_count} pending files.\nResume analysis without CSV?")
+                    response = messagebox.askyesno(
+                        "Resume Analysis",
+                        f"Found {pending_count} pending files.\nResume analysis without CSV?",
+                    )
                     if response:
                         self.csv_file_path = "resumed"  # Dummy value
                     else:
-                        messagebox.showerror("No CSV File", "Please select a CSV file first")
+                        messagebox.showerror(
+                            "No CSV File", "Please select a CSV file first"
+                        )
                         return
                 else:
-                    messagebox.showerror("No CSV File", "Please select a CSV file first")
+                    messagebox.showerror(
+                        "No CSV File", "Please select a CSV file first"
+                    )
                     return
             else:
                 messagebox.showerror("No CSV File", "Please select a CSV file first")
@@ -1694,7 +1828,9 @@ No need to run analysis to see your files.
 
     def on_analysis_progress_enhanced(self, info: dict) -> None:
         """Progress callback with worker metrics."""
-        self.current_file_path = info.get("current_workers", {}).get("current_files", {})
+        self.current_file_path = info.get("current_workers", {}).get(
+            "current_files", {}
+        )
 
         processed = info.get("processed", 0)
         total = info.get("total", 0)
@@ -1767,9 +1903,7 @@ No need to run analysis to see your files.
         speedup = result.get("speedup_estimate", 1.0)
         workers_used = result.get("workers_used", 1)
         perf = result.get("performance_stats", {})
-        cache_hit_rate = (
-            perf.get("cache_hits", 0) / max(files_processed, 1) * 100
-        )
+        cache_hit_rate = perf.get("cache_hits", 0) / max(files_processed, 1) * 100
 
         completion_msg = (
             f"Analysis completed!\n\n"
@@ -1896,11 +2030,11 @@ No need to run analysis to see your files.
                     parent=self.root,
                 )
                 return
-            #debug refresh View Result
+            # debug refresh View Result
             self.results_cache.invalidate()
             self.results_offset = 0
             self.results_total = 0
-            
+
             results_window = self.create_dialog_window(
                 self.root, "Analysis Results Viewer", "1400x700"
             )
@@ -2255,11 +2389,10 @@ No need to run analysis to see your files.
                         self.results_offset,
                         page_label,
                         prev_page_btn,
-                        next_page_btn
-                    )
-                )
+                        next_page_btn,
+                    ),
+                ),
             )
-
 
             refresh_btn.pack(side="right", padx=5)
 
@@ -4007,14 +4140,20 @@ RAW RESPONSE:
     def show_worker_status(self) -> None:
         """Display detailed worker status in a modal window."""
         if not (
-            hasattr(self, "analysis_thread") and self.analysis_thread and self.analysis_thread.is_alive()
+            hasattr(self, "analysis_thread")
+            and self.analysis_thread
+            and self.analysis_thread.is_alive()
         ):
-            messagebox.showinfo("Worker Status", "No active analysis running", parent=self.root)
+            messagebox.showinfo(
+                "Worker Status", "No active analysis running", parent=self.root
+            )
             return
 
         try:
             status = self.analysis_thread.get_worker_status()
-            status_window = self.create_dialog_window(self.root, "Worker Status Monitor", "600x400")
+            status_window = self.create_dialog_window(
+                self.root, "Worker Status Monitor", "600x400"
+            )
 
             perf_frame = ttk.LabelFrame(status_window, text="Performance Metrics")
             perf_frame.pack(fill="x", padx=10, pady=5)
@@ -4029,7 +4168,9 @@ Average Processing: {perf.get('avg_processing_time', 0):.2f}s/file
 Errors: {perf.get('errors', 0)}
 """
 
-            ttk.Label(perf_frame, text=metrics_text, font=("Consolas", 10)).pack(anchor="w", padx=10, pady=5)
+            ttk.Label(perf_frame, text=metrics_text, font=("Consolas", 10)).pack(
+                anchor="w", padx=10, pady=5
+            )
 
             files_frame = ttk.LabelFrame(status_window, text="Current Files")
             files_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -4039,7 +4180,9 @@ Errors: {perf.get('errors', 0)}
 
             current_files = status.get("current_files", {})
             for worker_id, file_path in current_files.items():
-                files_listbox.insert(tk.END, f"Worker {worker_id}: {Path(file_path).name}")
+                files_listbox.insert(
+                    tk.END, f"Worker {worker_id}: {Path(file_path).name}"
+                )
             if not current_files:
                 files_listbox.insert(tk.END, "No files currently being processed")
 
@@ -4050,10 +4193,18 @@ Errors: {perf.get('errors', 0)}
                 status_window.destroy()
                 self.show_worker_status()
 
-            ttk.Button(controls_frame, text="Refresh", command=refresh_status).pack(side="left", padx=5)
-            ttk.Button(controls_frame, text="Close", command=status_window.destroy).pack(side="right", padx=5)
+            ttk.Button(controls_frame, text="Refresh", command=refresh_status).pack(
+                side="left", padx=5
+            )
+            ttk.Button(
+                controls_frame, text="Close", command=status_window.destroy
+            ).pack(side="right", padx=5)
         except Exception as e:
-            messagebox.showerror("Status Error", f"Failed to get worker status:\n{str(e)}", parent=self.root)
+            messagebox.showerror(
+                "Status Error",
+                f"Failed to get worker status:\n{str(e)}",
+                parent=self.root,
+            )
 
     def reset_database(self, parent_window: tk.Toplevel) -> None:
         response = messagebox.askyesno(
