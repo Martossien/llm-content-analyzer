@@ -175,4 +175,15 @@ pipeline_config:
     adjustment_step: 1
     buffer_size: 2
     enable_adaptive_spacing: true
+  upload_spacing:
+    initial_delay_seconds: 3.0
+    min_delay_seconds: 1.0
+    max_delay_seconds: 60.0
+    response_time_threshold: 5.0
+    adjustment_step: 2.0
+    buffer_size: 2
+    enable_adaptive_spacing: true
+    reset_threshold_factor: 0.5
+    green_zone_factor: 0.6
+    red_zone_factor: 3.0
 

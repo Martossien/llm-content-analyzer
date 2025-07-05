@@ -30,9 +30,14 @@ class PerformanceMonitor:
             "avg_processing_time": 0.0,
             "worker_utilization": {},
             "throughput_per_minute": 0.0,
+            "timeouts": 0,
+            "timeout_details": {},
+            "adaptive_timeout_avg": 0.0,
         }
 
-    def record_completion(self, worker_id: int, processing_time: float, was_cached: bool = False) -> None:
+    def record_completion(
+        self, worker_id: int, processing_time: float, was_cached: bool = False
+    ) -> None:
         with self.lock:
             self.metrics["processed"] += 1
             if was_cached:
@@ -40,17 +45,35 @@ class PerformanceMonitor:
 
             processed = self.metrics["processed"]
             current_avg = self.metrics["avg_processing_time"]
-            self.metrics["avg_processing_time"] = (current_avg * (processed - 1) + processing_time) / processed
+            self.metrics["avg_processing_time"] = (
+                current_avg * (processed - 1) + processing_time
+            ) / processed
 
             self.metrics.setdefault("worker_utilization", {}).setdefault(worker_id, 0)
             self.metrics["worker_utilization"][worker_id] += 1
 
             elapsed = time.time() - self.start_time
-            self.metrics["throughput_per_minute"] = (processed / elapsed) * 60 if elapsed > 0 else 0.0
+            self.metrics["throughput_per_minute"] = (
+                (processed / elapsed) * 60 if elapsed > 0 else 0.0
+            )
 
     def record_error(self, worker_id: int) -> None:
         with self.lock:
             self.metrics["errors"] += 1
+
+    def record_timeout(self, timeout_value: int, spacing: float) -> None:
+        """Enregistre un timeout avec contexte."""
+        with self.lock:
+            self.metrics["timeouts"] += 1
+            key = f"{timeout_value}s"
+            self.metrics.setdefault("timeout_details", {}).setdefault(key, 0)
+            self.metrics["timeout_details"][key] += 1
+
+            current_avg = self.metrics.get("adaptive_timeout_avg", 0.0)
+            total = self.metrics["timeouts"]
+            self.metrics["adaptive_timeout_avg"] = (
+                current_avg * (total - 1) + timeout_value
+            ) / total
 
     def get_stats(self) -> Dict[str, Any]:
         with self.lock:
@@ -148,7 +171,9 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
     # ------------------------------------------------------------------
     # Worker function
     # ------------------------------------------------------------------
-    def _analyze_single_file_worker(self, file_row: Dict[str, Any], worker_id: int) -> Dict[str, Any]:
+    def _analyze_single_file_worker(
+        self, file_row: Dict[str, Any], worker_id: int
+    ) -> Dict[str, Any]:
         start = time.time()
         file_path = file_row.get("path", "Unknown")
         with self.files_lock:
@@ -191,18 +216,24 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
 
             if total_files == 0:
                 if self.completion_callback:
-                    self.completion_callback({
-                        "status": "completed",
-                        "files_processed": 0,
-                        "files_total": 0,
-                        "processing_time": 0,
-                        "errors": 0,
-                    })
+                    self.completion_callback(
+                        {
+                            "status": "completed",
+                            "files_processed": 0,
+                            "files_total": 0,
+                            "processing_time": 0,
+                            "errors": 0,
+                        }
+                    )
                 return
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as executor:
                 future_to_file = {
-                    executor.submit(self._analyze_single_file_worker, row, idx % self.max_workers): row
+                    executor.submit(
+                        self._analyze_single_file_worker, row, idx % self.max_workers
+                    ): row
                     for idx, row in enumerate(files)
                 }
 
@@ -215,7 +246,9 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
                         status = result.get("status")
                         if status in {"completed", "cached"}:
                             llm_data = result.get("result", {})
-                            llm_data["processing_time_ms"] = result.get("processing_time_ms", 0)
+                            llm_data["processing_time_ms"] = result.get(
+                                "processing_time_ms", 0
+                            )
                             self.db_manager.store_analysis_result(
                                 file_row["id"],
                                 result.get("task_id", ""),
@@ -223,22 +256,30 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
                                 result.get("resume", ""),
                                 result.get("raw_response", ""),
                             )
-                            self.db_manager.update_file_status(file_row["id"], "completed")
+                            self.db_manager.update_file_status(
+                                file_row["id"], "completed"
+                            )
                         else:
-                            self.db_manager.update_file_status(file_row["id"], "error", result.get("error", ""))
+                            self.db_manager.update_file_status(
+                                file_row["id"], "error", result.get("error", "")
+                            )
                             total_errors += 1
 
                         processed += 1
                         if self.progress_callback:
-                            self.progress_callback({
-                                "processed": processed,
-                                "total": total_files,
-                                "current_workers": self.get_worker_status(),
-                                "performance": self.performance_monitor.get_stats(),
-                            })
+                            self.progress_callback(
+                                {
+                                    "processed": processed,
+                                    "total": total_files,
+                                    "current_workers": self.get_worker_status(),
+                                    "performance": self.performance_monitor.get_stats(),
+                                }
+                            )
                     except Exception as exc:  # pragma: no cover - result errors
                         total_errors += 1
-                        self.db_manager.update_file_status(file_row["id"], "error", str(exc))
+                        self.db_manager.update_file_status(
+                            file_row["id"], "error", str(exc)
+                        )
 
             total_time = time.time() - start_time
             final_stats = self.performance_monitor.get_stats()
@@ -250,7 +291,9 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
                 "errors": total_errors,
                 "performance_stats": final_stats,
                 "workers_used": self.max_workers,
-                "speedup_estimate": self._calculate_speedup(total_time, processed, final_stats.get("avg_processing_time", 0.0)),
+                "speedup_estimate": self._calculate_speedup(
+                    total_time, processed, final_stats.get("avg_processing_time", 0.0)
+                ),
             }
             if self.completion_callback:
                 self.completion_callback(result)
@@ -262,7 +305,9 @@ class LegacyMultiWorkerAnalysisThread(threading.Thread):
                 self.db_manager.close()
 
     # ------------------------------------------------------------------
-    def _calculate_speedup(self, total_time: float, processed: int, avg_processing_time: float) -> float:
+    def _calculate_speedup(
+        self, total_time: float, processed: int, avg_processing_time: float
+    ) -> float:
         if avg_processing_time <= 0 or processed == 0:
             return 1.0
         sequential_time = processed * avg_processing_time
@@ -308,7 +353,9 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
     # Config helpers
     # ------------------------------------------------------------------
     def _init_adaptive_manager(self) -> "AdaptivePipelineManager":
-        from content_analyzer.modules.adaptive_pipeline_manager import AdaptivePipelineManager
+        from content_analyzer.modules.adaptive_pipeline_manager import (
+            AdaptivePipelineManager,
+        )
 
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
@@ -357,7 +404,9 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
     # ------------------------------------------------------------------
     # Worker function
     # ------------------------------------------------------------------
-    def _smart_worker_task(self, file_row: Dict[str, Any], worker_id: int) -> Dict[str, Any]:
+    def _smart_worker_task(
+        self, file_row: Dict[str, Any], worker_id: int
+    ) -> Dict[str, Any]:
         if self.should_stop.is_set():
             return {"status": "cancelled", "error": "stopped_before_start"}
 
@@ -419,22 +468,28 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
 
             if total_files == 0:
                 if self.completion_callback:
-                    self.completion_callback({
-                        "status": "completed",
-                        "files_processed": 0,
-                        "files_total": 0,
-                        "processing_time": 0,
-                        "errors": 0,
-                    })
+                    self.completion_callback(
+                        {
+                            "status": "completed",
+                            "files_processed": 0,
+                            "files_total": 0,
+                            "processing_time": 0,
+                            "errors": 0,
+                        }
+                    )
                 return
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as executor:
                 future_to_file = {}
                 for idx, row in enumerate(files):
                     if self.should_stop.is_set():
                         logger.info("Stop requested - halting task submission")
                         break
-                    future = executor.submit(self._smart_worker_task, row, idx % self.max_workers)
+                    future = executor.submit(
+                        self._smart_worker_task, row, idx % self.max_workers
+                    )
                     future_to_file[future] = row
 
                 for future, file_row in future_to_file.items():
@@ -443,11 +498,22 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                         future.cancel()
                         continue
                     try:
-                        result = future.result(timeout=30)
+                        current_spacing = getattr(
+                            self.adaptive_manager, "current_spacing", 30.0
+                        )
+                        adaptive_timeout = int(max(60, min(current_spacing + 30, 120)))
+                        logger.debug(
+                            "🕐 Timeout adaptatif: %ds (espacement: %.1fs)",
+                            adaptive_timeout,
+                            current_spacing,
+                        )
+                        result = future.result(timeout=adaptive_timeout)
                         status = result.get("status")
                         if status in {"completed", "cached"}:
                             llm_data = result.get("result", {})
-                            llm_data["processing_time_ms"] = result.get("processing_time_ms", 0)
+                            llm_data["processing_time_ms"] = result.get(
+                                "processing_time_ms", 0
+                            )
                             self.db_manager.store_analysis_result(
                                 file_row["id"],
                                 result.get("task_id", ""),
@@ -455,25 +521,45 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                                 result.get("resume", ""),
                                 result.get("raw_response", ""),
                             )
-                            self.db_manager.update_file_status(file_row["id"], "completed")
+                            self.db_manager.update_file_status(
+                                file_row["id"], "completed"
+                            )
                         else:
-                            self.db_manager.update_file_status(file_row["id"], "error", result.get("error", ""))
+                            self.db_manager.update_file_status(
+                                file_row["id"], "error", result.get("error", "")
+                            )
                             total_errors += 1
 
                         processed += 1
                         if self.progress_callback:
-                            self.progress_callback({
-                                "processed": processed,
-                                "total": total_files,
-                                "current_workers": self.get_worker_status(),
-                                "performance": self.performance_monitor.get_stats(),
-                            })
+                            self.progress_callback(
+                                {
+                                    "processed": processed,
+                                    "total": total_files,
+                                    "current_workers": self.get_worker_status(),
+                                    "performance": self.performance_monitor.get_stats(),
+                                }
+                            )
                     except concurrent.futures.TimeoutError:
-                        logger.warning("Timeout waiting for worker result: %s", file_row.get("path", "unknown"))
+                        logger.error(
+                            "🕐 TIMEOUT WORKER: %s | Espacement: %.1fs | Timeout: %ds | Workers: %d",
+                            file_row.get("path", "unknown"),
+                            current_spacing,
+                            adaptive_timeout,
+                            self.max_workers,
+                        )
+                        self.db_manager.update_file_status(
+                            file_row["id"], "error", f"timeout_{adaptive_timeout}s"
+                        )
+                        self.performance_monitor.record_timeout(
+                            adaptive_timeout, current_spacing
+                        )
                         total_errors += 1
                     except Exception as exc:  # pragma: no cover - result errors
                         total_errors += 1
-                        self.db_manager.update_file_status(file_row["id"], "error", str(exc))
+                        self.db_manager.update_file_status(
+                            file_row["id"], "error", str(exc)
+                        )
 
             total_time = time.time() - start_time
             final_stats = self.performance_monitor.get_stats()
@@ -502,7 +588,9 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                 self.db_manager.close()
 
     # ------------------------------------------------------------------
-    def _calculate_speedup(self, total_time: float, processed: int, avg_processing_time: float) -> float:
+    def _calculate_speedup(
+        self, total_time: float, processed: int, avg_processing_time: float
+    ) -> float:
         if avg_processing_time <= 0 or processed == 0:
             return 1.0
         sequential_time = processed * avg_processing_time
@@ -511,4 +599,3 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
 
 # Backwards compatibility
 MultiWorkerAnalysisThread = SmartMultiWorkerAnalysisThread
-

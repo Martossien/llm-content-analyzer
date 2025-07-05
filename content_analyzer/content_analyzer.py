@@ -40,7 +40,11 @@ _json_parsing_lock = threading.Lock()
 class ContentAnalyzer:
     """Orchestrateur principal pour l'analyse de contenu LLM"""
 
-    def __init__(self, config_path: Optional[Path] = None, stop_event: Optional[threading.Event] = None) -> None:
+    def __init__(
+        self,
+        config_path: Optional[Path] = None,
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
         """Initialise l'analyseur de contenu et charge la configuration."""
 
         self.config_path = config_path or Path(
@@ -161,7 +165,9 @@ class ContentAnalyzer:
             "raw_response": json.dumps(extracted_json, ensure_ascii=False),
         }
 
-    def _thread_safe_parse_api_response(self, api_result: Dict[str, Any]) -> Dict[str, Any]:
+    def _thread_safe_parse_api_response(
+        self, api_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Parse la réponse API de manière thread-safe."""
         with _json_parsing_lock:
             return self._parse_api_response(api_result)
@@ -286,7 +292,16 @@ class ContentAnalyzer:
     def analyze_single_file(self, file_row: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the full analysis workflow for a single file."""
         start = time.perf_counter()
+        file_path = file_row.get("path", "unknown")
+        file_size = file_row.get("file_size", 0)
+
         try:
+            logger.debug(
+                "🔍 Début analyse: %s (%s)",
+                Path(file_path).name,
+                self._format_file_size(file_size),
+            )
+
             if self.stop_event and self.stop_event.is_set():
                 return {"status": "cancelled", "reason": "interrupted_by_user"}
 
@@ -298,7 +313,6 @@ class ContentAnalyzer:
                 file_row
             )
 
-            cache_used = False
             cached = None
             if self.stop_event and self.stop_event.is_set():
                 return {"status": "cancelled", "reason": "interrupted_before_cache"}
@@ -309,6 +323,7 @@ class ContentAnalyzer:
                     file_row.get("file_size"),
                 )
             if cached:
+                logger.info("✅ Cache HIT: %s", Path(file_path).name)
                 return {
                     "status": "cached",
                     "result": cached["analysis_data"],
@@ -350,6 +365,10 @@ class ContentAnalyzer:
                 stop_event=self.stop_event,
             )
 
+            if api_result.get("status") == "cancelled":
+                logger.info("⏹️ Analyse annulée: %s", Path(file_path).name)
+                return {"status": "cancelled", "reason": "interrupted_during_api"}
+
             if self.stop_event and self.stop_event.is_set():
                 return {"status": "cancelled", "reason": "interrupted_after_api"}
 
@@ -365,19 +384,58 @@ class ContentAnalyzer:
                     file_row.get("file_size"),
                 )
 
+            status = parsed_result.get("status", "error")
+            duration = time.perf_counter() - start
+
+            if status == "completed":
+                confidence = parsed_result.get("result", {}).get("confidence_global", 0)
+                logger.info(
+                    "✅ Analyse réussie: %s | Durée: %.1fs | Confiance: %d%% | Cache: %s",
+                    Path(file_path).name,
+                    duration,
+                    confidence,
+                    "HIT" if cached else "MISS",
+                )
+            elif status == "error":
+                error_msg = parsed_result.get("error", "unknown")
+                logger.error(
+                    "❌ Analyse échouée: %s | Durée: %.1fs | Erreur: %s",
+                    Path(file_path).name,
+                    duration,
+                    error_msg,
+                )
+
             return {
-                "status": parsed_result.get("status", "error"),
+                "status": status,
                 "result": parsed_result.get("result", {}),
                 "task_id": parsed_result.get("task_id", ""),
-                "processing_time_ms": int((time.perf_counter() - start) * 1000),
+                "processing_time_ms": int(duration * 1000),
                 "cache_used": False,
                 "resume": parsed_result.get("resume", ""),
                 "raw_response": parsed_result.get("raw_response", ""),
             }
         except Exception as exc:  # pragma: no cover - runtime errors
+            duration = time.perf_counter() - start
             if self.stop_event and self.stop_event.is_set():
-                return {"status": "cancelled", "reason": "interrupted_during_processing"}
-            return {"status": "error", "error": str(exc)}
+                logger.info(
+                    "⏹️ Analyse interrompue: %s | Durée: %.1fs",
+                    Path(file_path).name,
+                    duration,
+                )
+                return {
+                    "status": "cancelled",
+                    "reason": "interrupted_during_processing",
+                }
+            else:
+                logger.error(
+                    "💥 EXCEPTION ANALYSE: %s | Durée: %.1fs | Type: %s | Détail: %s | Taille: %s",
+                    Path(file_path).name,
+                    duration,
+                    type(exc).__name__,
+                    str(exc),
+                    self._format_file_size(file_size),
+                )
+                return {"status": "error", "error": f"{type(exc).__name__}: {str(exc)}"}
 
     # ------------------------------------------------------------------
     # Decoupled upload/processing helpers
@@ -387,7 +445,9 @@ class ContentAnalyzer:
         prompt = self.prompt_manager.build_analysis_prompt(
             {
                 "file_name": Path(file_row["path"]).name,
-                "file_size_readable": self._format_file_size(file_row.get("file_size", 0)),
+                "file_size_readable": self._format_file_size(
+                    file_row.get("file_size", 0)
+                ),
                 "owner": file_row.get("owner", "unknown"),
                 "last_modified": file_row.get("last_modified", ""),
                 "file_extension": Path(file_row["path"]).suffix,

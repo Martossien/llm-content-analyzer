@@ -53,7 +53,7 @@ class AdaptivePipelineManager:
         )
 
     def record_api_response_time(self, response_time: float) -> None:
-        """Logique d'espacement à 3 zones: Rouge (>10s), Neutre (4s-10s), Verte (<4s)."""
+        """Système d'espacement adaptatif avec sécurité primaire et seuils relatifs."""
         if response_time < 0.001:
             logging.warning(f"Ignoring unrealistic API time: {response_time}s")
             return
@@ -63,38 +63,66 @@ class AdaptivePipelineManager:
             if not (self.adaptive_enabled and len(self.response_times) >= 3):
                 return
 
-            avg_time = sum(self.response_times) / len(self.response_times)
-            self.metrics.avg_api_response_time = avg_time
-
             if getattr(self, "_max_workers", 1) == 1:
                 logging.debug("Single worker mode: adaptive spacing disabled")
                 return
 
             max_workers = getattr(self, "_max_workers", None)
-            min_safe_spacing = max(self.min_spacing, max_workers) if max_workers else self.min_spacing
+            min_safe_spacing = (
+                max(self.min_spacing, max_workers) if max_workers else self.min_spacing
+            )
 
-            zone_red_threshold = self.threshold * 2.0
-            zone_green_threshold = self.threshold * 0.8
-
-            if avg_time > zone_red_threshold:
-                new_spacing = min(self.current_spacing + self.adjustment_step, self.max_spacing)
-                if new_spacing != self.current_spacing:
+            # Sécurité primaire: réduction immédiate si le temps API est inférieur à l'espacement actuel
+            if response_time < self.current_spacing:
+                immediate_spacing = max(response_time - 1.0, min_safe_spacing)
+                if immediate_spacing < self.current_spacing:
                     logging.info(
-                        f"🔴 API lente: {avg_time:.1f}s > {zone_red_threshold:.1f}s → espacement {self.current_spacing}s → {new_spacing}s"
+                        f"⚡ RESET IMMÉDIAT: API {response_time:.1f}s < espacement {self.current_spacing:.1f}s → {immediate_spacing:.1f}s"
                     )
-                    self.current_spacing = new_spacing
+                    self.current_spacing = immediate_spacing
+                    self.metrics.current_upload_spacing = self.current_spacing
+                    return
 
-            elif avg_time < zone_green_threshold and self.current_spacing > min_safe_spacing:
-                new_spacing = max(self.current_spacing - self.adjustment_step, min_safe_spacing)
-                if new_spacing != self.current_spacing:
-                    logging.info(
-                        f"🟢 API rapide: {avg_time:.1f}s < {zone_green_threshold:.1f}s → espacement {self.current_spacing}s → {new_spacing}s"
+            if len(self.response_times) >= 5:
+                baseline_time = sum(self.response_times) / len(self.response_times)
+                self.metrics.avg_api_response_time = baseline_time
+
+                zone_red_threshold = baseline_time * 1.8
+                zone_green_threshold = baseline_time * 0.7
+
+                if baseline_time > zone_red_threshold:
+                    new_spacing = min(
+                        self.current_spacing + self.adjustment_step, self.max_spacing
                     )
-                    self.current_spacing = new_spacing
-            else:
-                logging.debug(
-                    f"🟡 API stable: {avg_time:.1f}s → espacement maintenu à {self.current_spacing}s"
-                )
+                    if new_spacing != self.current_spacing:
+                        logging.info(
+                            f"🔴 API dégradée: {baseline_time:.1f}s > {zone_red_threshold:.1f}s (baseline×1.8) → espacement {self.current_spacing:.1f}s → {new_spacing:.1f}s"
+                        )
+                        self.current_spacing = new_spacing
+
+                elif (
+                    baseline_time < zone_green_threshold
+                    and self.current_spacing > min_safe_spacing
+                ):
+                    new_spacing = max(
+                        self.current_spacing - self.adjustment_step, min_safe_spacing
+                    )
+                    if new_spacing != self.current_spacing:
+                        logging.info(
+                            f"🟢 API performante: {baseline_time:.1f}s < {zone_green_threshold:.1f}s (baseline×0.7) → espacement {self.current_spacing:.1f}s → {new_spacing:.1f}s"
+                        )
+                        self.current_spacing = new_spacing
+                else:
+                    logging.debug(
+                        f"🟡 API stable: {baseline_time:.1f}s (baseline: {baseline_time:.1f}s, seuils: {zone_green_threshold:.1f}s-{zone_red_threshold:.1f}s) → espacement maintenu à {self.current_spacing:.1f}s"
+                    )
+
+                if self.current_spacing > baseline_time * 4:
+                    emergency_spacing = max(baseline_time * 1.5, min_safe_spacing)
+                    logging.warning(
+                        f"🆘 ESPACEMENT EXCESSIF: {self.current_spacing:.1f}s > {baseline_time * 4:.1f}s (4×baseline) → correction {emergency_spacing:.1f}s"
+                    )
+                    self.current_spacing = emergency_spacing
 
             self.metrics.current_upload_spacing = self.current_spacing
 
@@ -149,3 +177,78 @@ class AdaptivePipelineManager:
                 "adaptive_enabled": self.adaptive_enabled,
                 "last_adjustment": f"Threshold: {self.threshold}s, Range: {self.min_spacing}-{self.max_spacing}s",
             }
+
+    # ------------------------------------------------------------------
+    # Diagnostic helpers
+    # ------------------------------------------------------------------
+    def get_detailed_status(self) -> Dict[str, Any]:
+        """Status détaillé pour monitoring en temps réel."""
+        with self.lock:
+            recent_times = list(self.response_times)[-5:]
+            baseline = (
+                sum(self.response_times) / len(self.response_times)
+                if self.response_times
+                else 0
+            )
+            return {
+                "espacement_actuel": self.current_spacing,
+                "seuils": {
+                    "vert": self.threshold * 0.6,
+                    "rouge": self.threshold * 3.0,
+                    "reset": self.current_spacing * 0.5,
+                },
+                "api_times": {
+                    "moyenne_10": baseline,
+                    "recent_5": recent_times,
+                    "min_max": (
+                        [min(self.response_times), max(self.response_times)]
+                        if self.response_times
+                        else [0, 0]
+                    ),
+                },
+                "metriques": {
+                    "uploads": self.metrics.uploads_completed,
+                    "throughput_min": self.metrics.throughput_per_minute,
+                    "adaptive_enabled": self.adaptive_enabled,
+                },
+                "diagnostic": self._diagnostic_spacing(),
+            }
+
+    def _diagnostic_spacing(self) -> str:
+        """Diagnostic automatique de l'espacement avec baseline adaptative."""
+        if not self.response_times:
+            return "🔄 Collecte de données en cours"
+
+        if len(self.response_times) < 5:
+            return "📊 Collecte baseline adaptative en cours"
+
+        baseline = sum(self.response_times) / len(self.response_times)
+        latest_response = self.response_times[-1]
+        ratio = self.current_spacing / baseline if baseline > 0 else 0
+
+        if latest_response < self.current_spacing:
+            return f"⚡ Sécurité primaire: API {latest_response:.1f}s < espacement {self.current_spacing:.1f}s → Reset requis"
+
+        if ratio > 4:
+            return f"⚠️ Espacement excessif (x{ratio:.1f} baseline {baseline:.1f}s)"
+        elif ratio < 1.2:
+            return f"🚀 Espacement optimal (x{ratio:.1f} baseline {baseline:.1f}s)"
+        elif ratio > 2.5:
+            return f"⚡ Espacement élevé (x{ratio:.1f} baseline {baseline:.1f}s)"
+        else:
+            return f"✅ Espacement normal (x{ratio:.1f} baseline {baseline:.1f}s)"
+
+    def auto_recovery_check(self) -> None:
+        """Vérifie et corrige automatiquement les états incohérents."""
+        if len(self.response_times) < 5:
+            return
+
+        avg_time = sum(self.response_times) / len(self.response_times)
+
+        if self.current_spacing > avg_time * 10:
+            emergency_spacing = max(avg_time * 2, self.min_spacing)
+            logging.warning(
+                f"🆘 AUTO-RECOVERY: Espacement aberrant {self.current_spacing:.1f}s → {emergency_spacing:.1f}s"
+            )
+            self.current_spacing = emergency_spacing
+            self.metrics.current_upload_spacing = emergency_spacing
