@@ -7,11 +7,14 @@ import threading
 import time
 import os
 import yaml
+import logging
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List
 
 from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.db_manager import DBManager
+
+logger = logging.getLogger(__name__)
 
 
 class PerformanceMonitor:
@@ -355,14 +358,23 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
     # Worker function
     # ------------------------------------------------------------------
     def _smart_worker_task(self, file_row: Dict[str, Any], worker_id: int) -> Dict[str, Any]:
+        if self.should_stop.is_set():
+            return {"status": "cancelled", "error": "stopped_before_start"}
+
         if self.is_paused.is_set():
             self.is_paused.wait()
         if self.should_stop.is_set():
-            return {"status": "cancelled", "error": "Analysis stopped"}
+            return {"status": "cancelled", "error": "stopped_after_pause"}
 
         delay = self.adaptive_manager.should_delay_upload()
         if delay > 0:
-            time.sleep(delay)
+            sleep_inc = 0.5
+            remaining = delay
+            while remaining > 0 and not self.should_stop.is_set():
+                time.sleep(min(sleep_inc, remaining))
+                remaining -= sleep_inc
+            if self.should_stop.is_set():
+                return {"status": "cancelled", "error": "stopped_during_delay"}
         self.adaptive_manager.register_upload_start()
         self.adaptive_manager.register_llm_processing_start()
 
@@ -371,8 +383,11 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
         with self.files_lock:
             self.current_files[worker_id] = file_path
         try:
-            analyzer = ContentAnalyzer(self.config_path)
+            analyzer = ContentAnalyzer(self.config_path, stop_event=self.should_stop)
+            analyzer._worker_count = self.max_workers
             result = analyzer.analyze_single_file(file_row)
+            if self.should_stop.is_set():
+                return {"status": "cancelled", "error": "stopped_after_analysis"}
             duration = time.time() - start
             was_cached = result.get("status") == "cached"
             self.performance_monitor.record_completion(worker_id, duration, was_cached)
@@ -414,17 +429,21 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                 return
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                future_to_file = {
-                    executor.submit(self._smart_worker_task, row, idx % self.max_workers): row
-                    for idx, row in enumerate(files)
-                }
-
-                for future in concurrent.futures.as_completed(future_to_file):
+                future_to_file = {}
+                for idx, row in enumerate(files):
                     if self.should_stop.is_set():
+                        logger.info("Stop requested - halting task submission")
                         break
-                    file_row = future_to_file[future]
+                    future = executor.submit(self._smart_worker_task, row, idx % self.max_workers)
+                    future_to_file[future] = row
+
+                for future, file_row in future_to_file.items():
+                    if self.should_stop.is_set():
+                        logger.info("Stop requested - cancelling remaining tasks")
+                        future.cancel()
+                        continue
                     try:
-                        result = future.result()
+                        result = future.result(timeout=30)
                         status = result.get("status")
                         if status in {"completed", "cached"}:
                             llm_data = result.get("result", {})
@@ -449,14 +468,18 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                                 "current_workers": self.get_worker_status(),
                                 "performance": self.performance_monitor.get_stats(),
                             })
+                    except concurrent.futures.TimeoutError:
+                        logger.warning("Timeout waiting for worker result: %s", file_row.get("path", "unknown"))
+                        total_errors += 1
                     except Exception as exc:  # pragma: no cover - result errors
                         total_errors += 1
                         self.db_manager.update_file_status(file_row["id"], "error", str(exc))
 
             total_time = time.time() - start_time
             final_stats = self.performance_monitor.get_stats()
+            final_status = "stopped" if self.should_stop.is_set() else "completed"
             result = {
-                "status": "completed" if not self.should_stop.is_set() else "stopped",
+                "status": final_status,
                 "files_processed": processed,
                 "files_total": total_files,
                 "processing_time": total_time,

@@ -2,6 +2,12 @@ api_config:
   batch_size: 1
   max_tokens: 32000
   timeout_seconds: 300
+  http_timeout_seconds: 60
+  adaptive_timeouts:
+    enable: true
+    base_http_timeout: 60
+    worker_factor: 1.5
+    max_http_timeout: 180
   token: sk-d88e3244ae2e4b64a5256c6f4946155a
   url: http://localhost:8080
 circuit_config:

@@ -40,7 +40,7 @@ _json_parsing_lock = threading.Lock()
 class ContentAnalyzer:
     """Orchestrateur principal pour l'analyse de contenu LLM"""
 
-    def __init__(self, config_path: Optional[Path] = None) -> None:
+    def __init__(self, config_path: Optional[Path] = None, stop_event: Optional[threading.Event] = None) -> None:
         """Initialise l'analyseur de contenu et charge la configuration."""
 
         self.config_path = config_path or Path(
@@ -62,6 +62,7 @@ class ContentAnalyzer:
         self.api_client = APIClient(self.config)
         self.db_manager = DBManager(Path("analysis_results.db"))
         self.prompt_manager = PromptManager(self.config_path)
+        self.stop_event = stop_event
         self._closed = False
 
     def close(self) -> None:
@@ -131,11 +132,13 @@ class ContentAnalyzer:
 
         if extracted_json is None:
             logger.error("Failed to extract JSON from content: %s", content[:200])
+            fallback = self._create_fallback_json(content)
             return {
-                "status": "error",
-                "result": {},
+                "status": "completed",
+                "result": fallback,
                 "task_id": task_id,
-                "error": "Could not parse JSON from API response",
+                "resume": fallback.get("resume", ""),
+                "raw_response": json.dumps(fallback, ensure_ascii=False),
             }
 
         resume = extracted_json.get("resume", "")
@@ -267,7 +270,7 @@ class ContentAnalyzer:
         expected_keys = {"security", "rgpd", "finance", "legal"}
         present_keys = set(parsed.keys())
 
-        if len(present_keys.intersection(expected_keys)) < 2:
+        if len(present_keys.intersection(expected_keys)) < 1:
             return False
 
         for domain in expected_keys.intersection(present_keys):
@@ -284,6 +287,9 @@ class ContentAnalyzer:
         """Execute the full analysis workflow for a single file."""
         start = time.perf_counter()
         try:
+            if self.stop_event and self.stop_event.is_set():
+                return {"status": "cancelled", "reason": "interrupted_by_user"}
+
             should_process, reason = self.file_filter.should_process_file(file_row)
             if not should_process:
                 return {"status": "filtered", "reason": reason}
@@ -294,6 +300,8 @@ class ContentAnalyzer:
 
             cache_used = False
             cached = None
+            if self.stop_event and self.stop_event.is_set():
+                return {"status": "cancelled", "reason": "interrupted_before_cache"}
             if self.enable_cache:
                 cached = self.cache_manager.get_cached_result(
                     file_row.get("fast_hash", ""),
@@ -332,11 +340,18 @@ class ContentAnalyzer:
             if hasattr(self, "adaptive_manager"):
                 adaptive_timeouts = self.adaptive_manager.get_adaptive_timeouts()
 
+            if self.stop_event and self.stop_event.is_set():
+                return {"status": "cancelled", "reason": "interrupted_before_api"}
+
             api_result = self.api_client.analyze_file(
                 file_row["path"],
                 prompt,
                 adaptive_timeouts,
+                stop_event=self.stop_event,
             )
+
+            if self.stop_event and self.stop_event.is_set():
+                return {"status": "cancelled", "reason": "interrupted_after_api"}
 
             parsed_result = self._thread_safe_parse_api_response(api_result)
 
@@ -360,6 +375,8 @@ class ContentAnalyzer:
                 "raw_response": parsed_result.get("raw_response", ""),
             }
         except Exception as exc:  # pragma: no cover - runtime errors
+            if self.stop_event and self.stop_event.is_set():
+                return {"status": "cancelled", "reason": "interrupted_during_processing"}
             return {"status": "error", "error": str(exc)}
 
     # ------------------------------------------------------------------

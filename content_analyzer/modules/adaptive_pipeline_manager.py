@@ -35,6 +35,10 @@ class AdaptivePipelineManager:
         self.buffer_size = self.config.get("buffer_size", 2)
         self.adaptive_enabled = self.config.get("enable_adaptive_spacing", True)
 
+        api_cfg = config.get("api_config", {})
+        self.base_timeout = api_cfg.get("timeout_seconds", 300)
+        self.base_http_timeout = api_cfg.get("http_timeout_seconds", 60)
+
         self.metrics = PipelineMetrics()
         self.response_times = deque(maxlen=10)
         self.lock = threading.Lock()
@@ -96,8 +100,8 @@ class AdaptivePipelineManager:
 
     def get_adaptive_timeouts(self) -> Dict[str, int]:
         """Calcule timeouts adaptatifs basés sur l'espacement actuel."""
-        base_timeout = 300
-        base_http_timeout = 30
+        base_timeout = self.base_timeout
+        base_http_timeout = self.base_http_timeout
 
         adaptive_factor = max(1.0, self.current_spacing / 10.0)
 
