@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from statistics import mean, stdev
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
 from content_analyzer.content_analyzer import ContentAnalyzer
@@ -260,3 +261,155 @@ class APITestThread(threading.Thread):
                     ensure_ascii=False,
                 )
         return export_path
+
+    # ------------------------------------------------------------------
+    def analyze_llm_reliability(self, responses: List[Dict]) -> Dict[str, Any]:
+        """Analyse détaillée de la variance et cohérence LLM."""
+        security_classifications = []
+        rgpd_levels = []
+        confidences = []
+
+        for response in responses:
+            result = response.get("result", {})
+            if "security" in result:
+                security_classifications.append(result["security"].get("classification"))
+            if "rgpd" in result:
+                rgpd_levels.append(result["rgpd"].get("risk_level"))
+
+            sec_conf = result.get("security", {}).get("confidence", 0)
+            rgpd_conf = result.get("rgpd", {}).get("confidence", 0)
+            finance_conf = result.get("finance", {}).get("confidence", 0)
+            legal_conf = result.get("legal", {}).get("confidence", 0)
+            global_conf = (sec_conf + rgpd_conf + finance_conf + legal_conf) / 4
+            confidences.append(global_conf)
+
+        security_counts = Counter(security_classifications)
+        rgpd_counts = Counter(rgpd_levels)
+
+        security_consistency = (
+            (max(security_counts.values()) / len(security_classifications)) * 100
+            if security_classifications
+            else 0
+        )
+        rgpd_consistency = (
+            (max(rgpd_counts.values()) / len(rgpd_levels)) * 100 if rgpd_levels else 0
+        )
+
+        confidence_mean = mean(confidences) if confidences else 0
+        confidence_std = stdev(confidences) if len(confidences) > 1 else 0
+
+        return {
+            "security_distribution": dict(security_counts),
+            "rgpd_distribution": dict(rgpd_counts),
+            "security_consistency_percent": security_consistency,
+            "rgpd_consistency_percent": rgpd_consistency,
+            "confidence_mean": confidence_mean,
+            "confidence_std": confidence_std,
+            "overall_reliability_score": (security_consistency + rgpd_consistency) / 2,
+            "total_responses": len(responses),
+        }
+
+    # ------------------------------------------------------------------
+    def calculate_scalability_metrics(self) -> Dict[str, Any]:
+        """Calcule métriques de scalabilité et recommandations."""
+        if not self.test_results:
+            return {"error": "No test results available"}
+
+        worker_performance: Dict[int, List[float]] = {}
+        for result in self.test_results:
+            worker_id = result.get("worker_id", 0)
+            duration = result.get("api_duration", 0)
+            worker_performance.setdefault(worker_id, []).append(duration)
+
+        worker_avg_times = {
+            wid: mean(times) if times else 0 for wid, times in worker_performance.items()
+        }
+
+        fastest_worker_time = min(worker_avg_times.values()) if worker_avg_times else 0
+        theoretical_max_throughput = (60 / fastest_worker_time) if fastest_worker_time > 0 else 0
+
+        optimal_workers = min(8, max(2, self.max_workers))
+        if self.metrics.throughput_per_minute > 0:
+            efficiency = self.metrics.throughput_per_minute / (
+                theoretical_max_throughput * self.max_workers
+            )
+            if efficiency < 0.7:
+                optimal_workers = max(1, self.max_workers - 1)
+            elif efficiency > 0.9:
+                optimal_workers = min(8, self.max_workers + 1)
+
+        return {
+            "worker_avg_times": worker_avg_times,
+            "theoretical_max_throughput": theoretical_max_throughput,
+            "current_efficiency": self.metrics.throughput_per_minute / theoretical_max_throughput
+            if theoretical_max_throughput > 0
+            else 0,
+            "recommended_workers": optimal_workers,
+            "scalability_score": min(100, (self.metrics.throughput_per_minute / self.max_workers) * 10),
+        }
+
+    # ------------------------------------------------------------------
+    def get_summary_report(self) -> Dict[str, Any]:
+        """Génère rapport de synthèse complet."""
+        total_tests = len(self.test_results)
+        successful = self.metrics.successful_responses
+
+        reliability_analysis = self.analyze_llm_reliability(self.test_results)
+        scalability_metrics = self.calculate_scalability_metrics()
+
+        return {
+            "test_overview": {
+                "total_tests": total_tests,
+                "successful_responses": successful,
+                "success_rate_percent": (successful / total_tests * 100) if total_tests > 0 else 0,
+                "corrupted_responses": self.metrics.corrupted_responses,
+                "truncated_responses": self.metrics.truncated_responses,
+                "malformed_json": self.metrics.malformed_json,
+            },
+            "performance_summary": {
+                "avg_response_time": mean(self.metrics.response_times) if self.metrics.response_times else 0,
+                "throughput_per_minute": self.metrics.throughput_per_minute,
+                "workers_used": self.max_workers,
+            },
+            "reliability_analysis": reliability_analysis,
+            "scalability_metrics": scalability_metrics,
+            "recommendations": self._generate_recommendations(
+                reliability_analysis, scalability_metrics
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    def _generate_recommendations(self, reliability: Dict, scalability: Dict) -> List[str]:
+        """Génère recommandations basées sur les résultats."""
+        recommendations = []
+
+        if reliability.get("overall_reliability_score", 0) < 80:
+            recommendations.append(
+                "⚠️ Variance LLM élevée détectée - Vérifier prompts et température"
+            )
+
+        if self.metrics.corrupted_responses > 0:
+            recommendations.append(
+                "🚨 Corruption de réponses détectée - Réduire la charge ou vérifier API"
+            )
+
+        if self.metrics.truncated_responses > 0:
+            recommendations.append(
+                "✂️ Troncature JSON détectée - Augmenter timeout ou réduire workers"
+            )
+
+        efficiency = scalability.get("current_efficiency", 0)
+        if efficiency < 0.5:
+            recommendations.append(
+                f"📉 Efficacité faible ({efficiency:.1%}) - Réduire à {scalability.get('recommended_workers')} workers"
+            )
+        elif efficiency > 0.9:
+            recommendations.append(
+                f"📈 Excellente efficacité - Possibilité d'augmenter à {scalability.get('recommended_workers')} workers"
+            )
+
+        if not recommendations:
+            recommendations.append("✅ Configuration optimale détectée")
+
+        return recommendations
+
