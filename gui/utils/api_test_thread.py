@@ -87,10 +87,13 @@ class APITestThread(threading.Thread):
                             {
                                 "completed": len(self.test_results),
                                 "total": self.iterations,
-                                "percentage": (len(self.test_results) / self.iterations) * 100,
+                                "percentage": (len(self.test_results) / self.iterations)
+                                * 100,
                                 "current_metrics": asdict(self.metrics),
                                 "elapsed_time": time.time() - start_time,
-                                "eta": self._calculate_eta(start_time, len(self.test_results), self.iterations),
+                                "eta": self._calculate_eta(
+                                    start_time, len(self.test_results), self.iterations
+                                ),
                             }
                         )
                 except Exception as exc:  # pragma: no cover - runtime errors
@@ -195,8 +198,12 @@ class APITestThread(threading.Thread):
             self.metrics.response_times.append(processing_time)
 
         if self.metrics.response_times:
-            avg_time = sum(self.metrics.response_times) / len(self.metrics.response_times)
-            self.metrics.throughput_per_minute = 60.0 / avg_time if avg_time > 0 else 0.0
+            avg_time = sum(self.metrics.response_times) / len(
+                self.metrics.response_times
+            )
+            self.metrics.throughput_per_minute = (
+                60.0 / avg_time if avg_time > 0 else 0.0
+            )
 
         worker_id = result.get("worker_id", 0)
         self.metrics.worker_efficiency.setdefault(worker_id, 0)
@@ -209,26 +216,54 @@ class APITestThread(threading.Thread):
 
     # ------------------------------------------------------------------
     def _analyze_response_variance(self, analysis_result: Dict[str, Any]) -> None:
-        """Analyse la variance des classifications LLM."""
-        if "security" in analysis_result:
+        """Analyse la variance des classifications LLM avec validation."""
+        if not analysis_result or not isinstance(analysis_result, dict):
+            return
+
+        if "security" in analysis_result and isinstance(
+            analysis_result["security"], dict
+        ):
             sec_class = analysis_result["security"].get("classification", "unknown")
-            self.metrics.classification_variance.setdefault("security", {})
-            self.metrics.classification_variance["security"].setdefault(sec_class, 0)
-            self.metrics.classification_variance["security"][sec_class] += 1
+            if sec_class:
+                self.metrics.classification_variance.setdefault("security", {})
+                self.metrics.classification_variance["security"].setdefault(
+                    sec_class, 0
+                )
+                self.metrics.classification_variance["security"][sec_class] += 1
 
-        if "rgpd" in analysis_result:
+        if "rgpd" in analysis_result and isinstance(analysis_result["rgpd"], dict):
             rgpd_risk = analysis_result["rgpd"].get("risk_level", "unknown")
-            self.metrics.classification_variance.setdefault("rgpd", {})
-            self.metrics.classification_variance["rgpd"].setdefault(rgpd_risk, 0)
-            self.metrics.classification_variance["rgpd"][rgpd_risk] += 1
+            if rgpd_risk:
+                self.metrics.classification_variance.setdefault("rgpd", {})
+                self.metrics.classification_variance["rgpd"].setdefault(rgpd_risk, 0)
+                self.metrics.classification_variance["rgpd"][rgpd_risk] += 1
 
-        confidence = analysis_result.get("confidence_global", 0)
-        if confidence > 0:
+        confidence = analysis_result.get("confidence_global")
+        if isinstance(confidence, (int, float)) and confidence > 0:
             vals = self.metrics.confidence_stats.setdefault("values", [])
             vals.append(confidence)
             if len(vals) >= 2:
-                self.metrics.confidence_stats["mean"] = mean(vals)
-                self.metrics.confidence_stats["std"] = stdev(vals) if len(vals) > 1 else 0.0
+                try:
+                    self.metrics.confidence_stats["mean"] = mean(vals)
+                    self.metrics.confidence_stats["std"] = (
+                        stdev(vals) if len(vals) > 1 else 0.0
+                    )
+                except (ValueError, TypeError):
+                    self.metrics.confidence_stats["values"] = [
+                        v for v in vals if isinstance(v, (int, float))
+                    ]
+
+    # ------------------------------------------------------------------
+    def _is_valid_response(self, response: Any) -> bool:
+        """Vérifie qu'une réponse de test est exploitable."""
+        return (
+            response is not None
+            and isinstance(response, dict)
+            and response.get("status") == "completed"
+            and "result" in response
+            and response.get("result") is not None
+            and isinstance(response["result"], dict)
+        )
 
     # ------------------------------------------------------------------
     def get_final_metrics(self) -> Dict[str, Any]:
@@ -304,48 +339,78 @@ class APITestThread(threading.Thread):
     # ------------------------------------------------------------------
     def analyze_llm_reliability(self, responses: List[Dict]) -> Dict[str, Any]:
         """Analyse détaillée de la variance et cohérence LLM."""
-        security_classifications = []
-        rgpd_levels = []
-        confidences = []
+        logger.info(f"Analyse fiabilité LLM: {len(responses)} réponses à traiter")
 
-        for response in responses:
-            result = response.get("result", {})
-            if "security" in result:
-                security_classifications.append(result["security"].get("classification"))
-            if "rgpd" in result:
-                rgpd_levels.append(result["rgpd"].get("risk_level"))
+        valid_responses: List[Dict[str, Any]] = []
+        for i, response in enumerate(responses):
+            if self._is_valid_response(response):
+                valid_responses.append(response)
+            else:
+                logger.debug(
+                    "Réponse %d invalide: %s - %s", i, type(response), response
+                )
 
-            sec_conf = result.get("security", {}).get("confidence", 0)
-            rgpd_conf = result.get("rgpd", {}).get("confidence", 0)
-            finance_conf = result.get("finance", {}).get("confidence", 0)
-            legal_conf = result.get("legal", {}).get("confidence", 0)
-            global_conf = (sec_conf + rgpd_conf + finance_conf + legal_conf) / 4
-            confidences.append(global_conf)
-
-        security_counts = Counter(security_classifications)
-        rgpd_counts = Counter(rgpd_levels)
-
-        security_consistency = (
-            (max(security_counts.values()) / len(security_classifications)) * 100
-            if security_classifications
-            else 0
-        )
-        rgpd_consistency = (
-            (max(rgpd_counts.values()) / len(rgpd_levels)) * 100 if rgpd_levels else 0
+        logger.info(
+            "Réponses valides: %d, échouées: %d",
+            len(valid_responses),
+            len(responses) - len(valid_responses),
         )
 
-        confidence_mean = mean(confidences) if confidences else 0
-        confidence_std = stdev(confidences) if len(confidences) > 1 else 0
+        if not valid_responses:
+            return {
+                "security_variance": 0,
+                "rgpd_variance": 0,
+                "confidence_mean": 0,
+                "confidence_std": 0,
+                "security_consistency_percent": 0,
+                "rgpd_consistency_percent": 0,
+                "overall_reliability_score": 0,
+                "total_responses": len(responses),
+                "valid_responses": 0,
+                "failed_responses": len(responses),
+            }
+
+        security_counts = Counter(
+            r["result"].get("security", {}).get("classification", "unknown")
+            for r in valid_responses
+            if "security" in r["result"]
+        )
+
+        rgpd_counts = Counter(
+            r["result"].get("rgpd", {}).get("risk_level", "unknown")
+            for r in valid_responses
+            if "rgpd" in r["result"]
+        )
+
+        confidences = [
+            r["result"].get("confidence_global", 0)
+            for r in valid_responses
+            if "confidence_global" in r["result"]
+            and isinstance(r["result"].get("confidence_global"), (int, float))
+        ]
+
+        try:
+            confidence_mean = mean(confidences) if confidences else 0
+            confidence_std = stdev(confidences) if len(confidences) > 1 else 0
+        except (ValueError, TypeError):
+            confidence_mean = 0
+            confidence_std = 0
 
         return {
-            "security_distribution": dict(security_counts),
-            "rgpd_distribution": dict(rgpd_counts),
-            "security_consistency_percent": security_consistency,
-            "rgpd_consistency_percent": rgpd_consistency,
+            "security_variance": self._calculate_variance(security_counts),
+            "rgpd_variance": self._calculate_variance(rgpd_counts),
             "confidence_mean": confidence_mean,
             "confidence_std": confidence_std,
-            "overall_reliability_score": (security_consistency + rgpd_consistency) / 2,
+            "security_consistency_percent": self._calculate_consistency(
+                security_counts
+            ),
+            "rgpd_consistency_percent": self._calculate_consistency(rgpd_counts),
+            "overall_reliability_score": self._calculate_reliability_score(
+                security_counts, rgpd_counts, confidences
+            ),
             "total_responses": len(responses),
+            "valid_responses": len(valid_responses),
+            "failed_responses": len(responses) - len(valid_responses),
         }
 
     # ------------------------------------------------------------------
@@ -361,11 +426,14 @@ class APITestThread(threading.Thread):
             worker_performance.setdefault(worker_id, []).append(duration)
 
         worker_avg_times = {
-            wid: mean(times) if times else 0 for wid, times in worker_performance.items()
+            wid: mean(times) if times else 0
+            for wid, times in worker_performance.items()
         }
 
         fastest_worker_time = min(worker_avg_times.values()) if worker_avg_times else 0
-        theoretical_max_throughput = (60 / fastest_worker_time) if fastest_worker_time > 0 else 0
+        theoretical_max_throughput = (
+            (60 / fastest_worker_time) if fastest_worker_time > 0 else 0
+        )
 
         optimal_workers = min(8, max(2, self.max_workers))
         if self.metrics.throughput_per_minute > 0:
@@ -380,47 +448,87 @@ class APITestThread(threading.Thread):
         return {
             "worker_avg_times": worker_avg_times,
             "theoretical_max_throughput": theoretical_max_throughput,
-            "current_efficiency": self.metrics.throughput_per_minute / theoretical_max_throughput
-            if theoretical_max_throughput > 0
-            else 0,
+            "current_efficiency": (
+                self.metrics.throughput_per_minute / theoretical_max_throughput
+                if theoretical_max_throughput > 0
+                else 0
+            ),
             "recommended_workers": optimal_workers,
-            "scalability_score": min(100, (self.metrics.throughput_per_minute / self.max_workers) * 10),
+            "scalability_score": min(
+                100, (self.metrics.throughput_per_minute / self.max_workers) * 10
+            ),
         }
 
     # ------------------------------------------------------------------
     def get_summary_report(self) -> Dict[str, Any]:
-        """Génère rapport de synthèse complet."""
-        total_tests = len(self.test_results)
-        successful = self.metrics.successful_responses
+        """Génère rapport de synthèse avec gestion d'erreurs robuste."""
+        try:
+            total_tests = len(self.test_results)
+            successful = self.metrics.successful_responses
 
-        reliability_analysis = self.analyze_llm_reliability(self.test_results)
-        scalability_metrics = self.calculate_scalability_metrics()
+            try:
+                reliability_analysis = self.analyze_llm_reliability(self.test_results)
+            except Exception as e:  # pragma: no cover - safeguard
+                logger.error(f"Erreur analyse fiabilité LLM: {e}")
+                reliability_analysis = {
+                    "error": f"Analyse échouée: {str(e)}",
+                    "security_variance": 0,
+                    "rgpd_variance": 0,
+                    "confidence_mean": 0,
+                    "confidence_std": 0,
+                }
 
-        return {
-            "test_overview": {
-                "total_tests": total_tests,
-                "successful_responses": successful,
-                "success_rate_percent": (successful / total_tests * 100) if total_tests > 0 else 0,
-                "corrupted_responses": self.metrics.corrupted_responses,
-                "truncated_responses": self.metrics.truncated_responses,
-                "malformed_json": self.metrics.malformed_json,
-            },
-            "performance_summary": {
-                "avg_response_time": mean(self.metrics.response_times) if self.metrics.response_times else 0,
-                "throughput_per_minute": self.metrics.throughput_per_minute,
-                "workers_used": self.max_workers,
-            },
-            "reliability_analysis": reliability_analysis,
-            "scalability_metrics": scalability_metrics,
-            "recommendations": self._generate_recommendations(),
-        }
+            try:
+                scalability_metrics = self.calculate_scalability_metrics()
+            except Exception as e:  # pragma: no cover - safeguard
+                logger.error(f"Erreur calcul scalabilité: {e}")
+                scalability_metrics = {"error": f"Calcul échoué: {str(e)}"}
+
+            return {
+                "test_overview": {
+                    "total_tests": total_tests,
+                    "successful_responses": successful,
+                    "success_rate_percent": (
+                        (successful / total_tests * 100) if total_tests > 0 else 0
+                    ),
+                    "corrupted_responses": self.metrics.corrupted_responses,
+                    "truncated_responses": self.metrics.truncated_responses,
+                    "malformed_json": self.metrics.malformed_json,
+                },
+                "performance_summary": {
+                    "avg_response_time": (
+                        mean(self.metrics.response_times)
+                        if self.metrics.response_times
+                        else 0
+                    ),
+                    "throughput_per_minute": self.metrics.throughput_per_minute,
+                    "workers_used": self.max_workers,
+                },
+                "reliability_analysis": reliability_analysis,
+                "scalability_metrics": scalability_metrics,
+                "recommendations": self._generate_recommendations(),
+            }
+        except Exception as e:  # pragma: no cover - safeguard
+            logger.error(f"Erreur génération rapport: {e}")
+            return {
+                "error": f"Rapport échoué: {str(e)}",
+                "test_overview": {
+                    "total_tests": (
+                        len(self.test_results) if hasattr(self, "test_results") else 0
+                    )
+                },
+            }
 
     # ------------------------------------------------------------------
     def _generate_recommendations(self) -> List[str]:
         """Génère recommandations basées sur les résultats."""
         recommendations = []
 
-        reliability_score = (self.metrics.successful_responses / len(self.test_results) * 100) if self.test_results else 0
+        reliability_score = (
+            (self.metrics.successful_responses / len(self.test_results) * 100)
+            if self.test_results
+            else 0
+        )
 
         if reliability_score < 95:
             recommendations.append(
@@ -428,7 +536,9 @@ class APITestThread(threading.Thread):
             )
 
         if self.metrics.response_times:
-            avg_time = sum(self.metrics.response_times) / len(self.metrics.response_times)
+            avg_time = sum(self.metrics.response_times) / len(
+                self.metrics.response_times
+            )
             if avg_time > 10.0:
                 recommendations.append(
                     f"🐌 Temps de réponse élevé ({avg_time:.1f}s) - Optimiser workers ou timeouts"
@@ -470,6 +580,45 @@ class APITestThread(threading.Thread):
         return min(variance_percentage, 100.0)
 
     # ------------------------------------------------------------------
+    def _calculate_variance(self, counts: Counter) -> float:
+        """Calcule variance en pourcentage."""
+        if not counts or sum(counts.values()) == 0:
+            return 0.0
+        total = sum(counts.values())
+        max_count = max(counts.values())
+        return 100 - ((max_count / total) * 100)
+
+    # ------------------------------------------------------------------
+    def _calculate_consistency(self, counts: Counter) -> float:
+        """Calcule pourcentage de consistance."""
+        if not counts or sum(counts.values()) == 0:
+            return 0.0
+        total = sum(counts.values())
+        max_count = max(counts.values())
+        return (max_count / total) * 100
+
+    # ------------------------------------------------------------------
+    def _calculate_reliability_score(
+        self,
+        security_counts: Counter,
+        rgpd_counts: Counter,
+        confidences: List[float],
+    ) -> float:
+        """Score global de fiabilité pondéré."""
+        security_consistency = self._calculate_consistency(security_counts)
+        rgpd_consistency = self._calculate_consistency(rgpd_counts)
+
+        confidence_score = 0.0
+        if confidences:
+            avg_conf = mean(confidences)
+            std_conf = stdev(confidences) if len(confidences) > 1 else 0
+            confidence_score = avg_conf * (1 - min(std_conf / 100, 0.5))
+
+        return (
+            security_consistency * 0.4 + rgpd_consistency * 0.4 + confidence_score * 0.2
+        )
+
+    # ------------------------------------------------------------------
     def _generate_final_report(self) -> Dict[str, Any]:
         """Génère un rapport final détaillé à la fin des tests."""
         total_responses = len(self.test_results)
@@ -480,15 +629,19 @@ class APITestThread(threading.Thread):
         rgpd_variance = self._calculate_classification_variance("rgpd")
 
         return {
-            "reliability_score": (self.metrics.successful_responses / total_responses) * 100,
+            "reliability_score": (self.metrics.successful_responses / total_responses)
+            * 100,
             "variance_analysis": {
                 "security_consistency": 100 - security_variance,
                 "rgpd_consistency": 100 - rgpd_variance,
             },
             "performance_analysis": {
-                "avg_response_time": sum(self.metrics.response_times) / len(self.metrics.response_times) if self.metrics.response_times else 0,
+                "avg_response_time": (
+                    sum(self.metrics.response_times) / len(self.metrics.response_times)
+                    if self.metrics.response_times
+                    else 0
+                ),
                 "throughput_per_minute": self.metrics.throughput_per_minute,
             },
             "recommendations": self._generate_recommendations(),
         }
-
