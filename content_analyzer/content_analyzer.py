@@ -289,8 +289,15 @@ class ContentAnalyzer:
     # ------------------------------------------------------------------
     # Single file analysis
     # ------------------------------------------------------------------
-    def analyze_single_file(self, file_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the full analysis workflow for a single file."""
+    def analyze_single_file(
+        self, file_row: Dict[str, Any], force_analysis: bool = False
+    ) -> Dict[str, Any]:
+        """Execute the full analysis workflow for a single file.
+
+        Args:
+            file_row: Données du fichier à analyser
+            force_analysis: Si ``True``, ignore le cache et force l'appel API
+        """
         start = time.perf_counter()
         file_path = file_row.get("path", "unknown")
         file_size = file_row.get("file_size", 0)
@@ -316,7 +323,8 @@ class ContentAnalyzer:
             cached = None
             if self.stop_event and self.stop_event.is_set():
                 return {"status": "cancelled", "reason": "interrupted_before_cache"}
-            if self.enable_cache:
+
+            if self.enable_cache and not force_analysis:
                 cached = self.cache_manager.get_cached_result(
                     file_row.get("fast_hash", ""),
                     "default_prompt_hash",
