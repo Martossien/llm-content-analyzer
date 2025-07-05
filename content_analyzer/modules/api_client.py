@@ -17,9 +17,7 @@ class APIClient:
         self.url = config["api_config"]["url"].rstrip("/")
         self.token = config["api_config"].get("token")
         self.base_timeout = config["api_config"].get("timeout_seconds", 300)
-        self.base_http_timeout = config["api_config"].get(
-            "http_timeout_seconds", 60
-        )
+        self.base_http_timeout = config["api_config"].get("http_timeout_seconds", 60)
         self.session = requests.Session()
         self._closed = False
 
@@ -46,7 +44,9 @@ class APIClient:
             timeout = self.base_timeout
             http_timeout = self.base_http_timeout
 
-        logger.info("Upload %s (timeout: %ds, http: %ds)", file_path, timeout, http_timeout)
+        logger.info(
+            "Upload %s (timeout: %ds, http: %ds)", file_path, timeout, http_timeout
+        )
         task_id = self._upload_file(file_path, prompt, http_timeout)
         logger.debug("Task id obtenu: %s", task_id)
         result = self._poll_result(
@@ -78,15 +78,39 @@ class APIClient:
         stop_event: Optional[threading.Event] = None,
     ) -> Dict[str, Any]:
         start = time.time()
+        poll_attempts = 0
+
         while True:
+            poll_attempts += 1
+
             if stop_event and stop_event.is_set():
-                logger.info("Polling interrupted for task %s", task_id)
+                logger.info(
+                    "⏹️ Polling interrompu par utilisateur: task=%s après %d tentatives",
+                    task_id,
+                    poll_attempts,
+                )
                 return {"status": "cancelled", "error": "interrupted_by_user"}
 
-            if time.time() - start > timeout:
-                return {"status": "failed", "error": "timeout"}
+            elapsed = time.time() - start
+            if elapsed > timeout:
+                logger.error(
+                    "⏰ TIMEOUT GLOBAL: task=%s | Durée: %.1fs > %ds | Tentatives: %d | URL: %s",
+                    task_id,
+                    elapsed,
+                    timeout,
+                    poll_attempts,
+                    self.url,
+                )
+                return {"status": "failed", "error": f"global_timeout_{timeout}s"}
 
             try:
+                logger.debug(
+                    "🔄 Polling tentative %d: task=%s (%.1fs écoulées)",
+                    poll_attempts,
+                    task_id,
+                    elapsed,
+                )
+
                 resp = self.session.get(
                     f"{self.url}/api/v2/status/{task_id}",
                     headers=self._headers(),
@@ -94,17 +118,67 @@ class APIClient:
                 )
                 resp.raise_for_status()
                 payload = resp.json()
+                status = payload.get("status")
+                if status in {"completed", "failed"}:
+                    logger.info(
+                        "✅ Polling terminé: task=%s | Status: %s | Durée: %.1fs | Tentatives: %d",
+                        task_id,
+                        status,
+                        elapsed,
+                        poll_attempts,
+                    )
+                    return payload
             except requests.exceptions.Timeout:
-                logger.warning("HTTP timeout (%ds) polling task %s", http_timeout, task_id)
+                logger.warning(
+                    "⏱️ HTTP TIMEOUT: task=%s | Timeout: %ds | Tentative: %d/%d | URL: %s",
+                    task_id,
+                    http_timeout,
+                    poll_attempts,
+                    int(timeout / 2),
+                    self.url,
+                )
                 time.sleep(5)
                 continue
+            except requests.exceptions.ConnectionError as exc:
+                logger.error(
+                    "🌐 CONNEXION ÉCHOUÉE: task=%s | Erreur: %s | URL: %s | Tentative: %d",
+                    task_id,
+                    str(exc),
+                    self.url,
+                    poll_attempts,
+                )
+                time.sleep(10)
+                continue
+            except requests.exceptions.HTTPError as exc:
+                status_code = getattr(exc.response, "status_code", "unknown")
+                logger.error(
+                    "🚫 ERREUR HTTP: task=%s | Code: %s | URL: %s | Réponse: %s",
+                    task_id,
+                    status_code,
+                    self.url,
+                    getattr(exc.response, "text", "no_response")[:200],
+                )
+                if status_code in [429, 503, 502]:
+                    time.sleep(30)
+                    continue
+                else:
+                    return {"status": "failed", "error": f"http_error_{status_code}"}
+            except Exception as exc:
+                logger.error(
+                    "💥 ERREUR INATTENDUE POLLING: task=%s | Type: %s | Détail: %s",
+                    task_id,
+                    type(exc).__name__,
+                    str(exc),
+                )
+                return {
+                    "status": "failed",
+                    "error": f"unexpected_error_{type(exc).__name__}",
+                }
 
-            status = payload.get("status")
-            if status in {"completed", "failed"}:
-                return payload
-
+            # Sleep interruptible
             for _ in range(20):
                 if stop_event and stop_event.is_set():
+                    logger.info("⏹️ Interruption pendant sleep: task=%s", task_id)
                     return {"status": "cancelled", "error": "interrupted_during_sleep"}
                 time.sleep(0.1)
 
