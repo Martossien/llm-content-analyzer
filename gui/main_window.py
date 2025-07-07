@@ -209,6 +209,14 @@ No need to run analysis to see your files.
         dialog.title(title)
         dialog.geometry(geometry)
         dialog.transient(parent)
+
+        # Linux z-order fix: temporarily force window on top
+        import platform
+
+        if platform.system() == "Linux":
+            dialog.attributes("-topmost", True)
+            dialog.after(100, lambda: dialog.attributes("-topmost", False))
+
         dialog.lift()
         dialog.focus_set()
         dialog.update_idletasks()
@@ -220,6 +228,8 @@ No need to run analysis to see your files.
         )
         dialog.geometry(f"+{x}+{y}")
         dialog.after_idle(lambda: dialog.grab_set())
+        dialog.after_idle(lambda: dialog.lift())
+        dialog.after_idle(lambda: dialog.focus_set())
         return dialog
 
     def create_tooltip(self, widget: tk.Widget, text: str) -> Tooltip:
@@ -862,6 +872,16 @@ No need to run analysis to see your files.
 
     def browse_test_file(self):
         """Sélection du fichier de test."""
+        # Identify the Configuration Test API window to use as parent
+        current_parent = None
+        for widget in self.root.winfo_children():
+            if isinstance(widget, tk.Toplevel) and "Configuration Test API" in widget.title():
+                current_parent = widget
+                break
+
+        if not current_parent:
+            current_parent = self.root
+
         file_path = filedialog.askopenfilename(
             title="Sélectionner un fichier pour les tests",
             filetypes=[
@@ -871,14 +891,31 @@ No need to run analysis to see your files.
                 ("Texte", "*.txt *.md"),
                 ("Tous", "*.*"),
             ],
+            parent=current_parent,
         )
+
+        if current_parent and current_parent.winfo_exists():
+            current_parent.lift()
+            current_parent.focus_set()
+            current_parent.grab_set()
+
         if file_path:
             self.test_file_var.set(file_path)
 
     def start_api_test(self, test_window):
         """Démarre les tests API."""
         if not self.test_file_var.get():
-            messagebox.showerror("Erreur", "Veuillez sélectionner un fichier de test")
+            messagebox.showerror(
+                "Erreur",
+                "Veuillez sélectionner un fichier de test",
+                parent=test_window,
+            )
+
+            if test_window and test_window.winfo_exists():
+                test_window.lift()
+                test_window.focus_set()
+                test_window.grab_set()
+
             return
 
         test_file_path = Path(self.test_file_var.get())
