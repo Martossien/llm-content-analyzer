@@ -7,7 +7,9 @@ import tkinter as tk
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import threading
+import queue
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +40,16 @@ class AnalyticsPanel:
         self._cache_timestamp = 0.0
         self.CACHE_DURATION = 30
 
+        # async calculation helpers
+        self._calculation_thread: Optional[threading.Thread] = None
+        self._result_queue: queue.Queue = queue.Queue()
+        self._calculation_in_progress = False
+
         self._build_ui()
         self.tabs: Dict[str, ttk.Frame] = {}
         self.update_alert_cards()
         self.update_thematic_tabs()
+        self._start_result_polling()
 
     def set_db_manager(self, db_manager: DBManager | None) -> None:
         self.db_manager = db_manager
@@ -64,7 +72,10 @@ class AnalyticsPanel:
         chk.grid(row=0, column=6, padx=5, pady=2, sticky="w")
         ttk.Entry(params_frame, textvariable=self.years_modified, width=4).grid(row=0, column=7, padx=5, pady=2)
 
-        ttk.Button(params_frame, text="🔄 Recalculer", command=self.recalculate_all_metrics).grid(row=0, column=8, padx=5)
+        self.recalculate_button = ttk.Button(
+            params_frame, text="🔄 Recalculer", command=self.recalculate_all_metrics
+        )
+        self.recalculate_button.grid(row=0, column=8, padx=5)
         ttk.Button(params_frame, text="💾 Sauver", command=self.save_user_preferences).grid(row=0, column=9, padx=5)
         ttk.Button(params_frame, text="📥 Restaurer", command=self.load_user_preferences).grid(row=0, column=10, padx=5)
 
@@ -319,6 +330,149 @@ class AnalyticsPanel:
         self._metrics_cache.clear()
         self._cache_timestamp = 0.0
 
+    # ------------------------------------------------------------------
+    # Async helpers
+    # ------------------------------------------------------------------
+
+    def _start_result_polling(self) -> None:
+        def poll_results() -> None:
+            try:
+                result = self._result_queue.get_nowait()
+                if isinstance(result, dict) and "metrics" in result:
+                    self._update_ui_with_metrics(result["metrics"])
+                elif isinstance(result, Exception):
+                    self._update_ui_with_error(result)
+            except queue.Empty:
+                pass
+            self.parent.after(100, poll_results)
+
+        self.parent.after(100, poll_results)
+
+    def _start_async_calculation(self) -> None:
+        self.progress_label.config(text="⏳ Calcul en cours...")
+        self.parent.update_idletasks()
+        self._disable_calculation_controls()
+        self._calculation_in_progress = True
+        self._calculation_thread = threading.Thread(
+            target=self._async_calculate_metrics,
+            daemon=True,
+        )
+        self._calculation_thread.start()
+
+    def _async_calculate_metrics(self) -> None:
+        try:
+            metrics = self.calculate_business_metrics()
+            self._result_queue.put({"metrics": metrics})
+        except Exception as exc:  # pragma: no cover - runtime
+            self._result_queue.put(exc)
+
+    def _update_ui_with_metrics(self, metrics: Dict[str, Any]) -> None:
+        try:
+            if not metrics:
+                self.progress_label.config(text="❌ Erreur calcul")
+                return
+            # reuse existing update_alert_cards UI logic
+            global_metrics = metrics.get("global", {})
+            total_files = global_metrics.get("total_files", 0)
+            total_size_gb = global_metrics.get("total_size_gb", 0)
+            if not hasattr(self, "totals_label"):
+                totals_frame = ttk.Frame(self.parent)
+                totals_frame.pack(fill="x", padx=5, pady=2)
+                self.totals_label = ttk.Label(
+                    totals_frame,
+                    text=f"📊 TOTAL: {total_files:,} fichiers | {total_size_gb:.1f}GB",
+                    font=("Arial", 12, "bold"),
+                    foreground="navy",
+                )
+                self.totals_label.pack()
+            else:
+                self.totals_label.config(
+                    text=f"📊 TOTAL: {total_files:,} fichiers | {total_size_gb:.1f}GB"
+                )
+
+            super_crit = metrics.get("super_critical", {})
+            count = super_crit.get("count", 0)
+            pct = super_crit.get("percentage", 0)
+            size_gb = super_crit.get("size_gb", 0)
+            self.super_critical_line1.config(text=f"{count} C3+RGPD+Legal")
+            self.super_critical_line2.config(text=f"{pct}% | {count} fichiers | {size_gb:.1f}GB")
+            self.super_critical_line3.config(text="Cumul risques max")
+            self.super_critical_line1.config(
+                foreground="darkred" if count > 0 else "green"
+            )
+
+            crit = metrics.get("critical", {})
+            count = crit.get("count", 0)
+            pct = crit.get("percentage", 0)
+            size_gb = crit.get("size_gb", 0)
+            self.critical_line1.config(text=f"{count} C3 OU RGPD OU Legal")
+            self.critical_line2.config(text=f"{pct}% | {count} fichiers | {size_gb:.1f}GB")
+            self.critical_line3.config(text="Un critère fort")
+            self.critical_line1.config(
+                foreground="darkorange" if count > 0 else "green"
+            )
+
+            dup = metrics.get("duplicates", {})
+            files_2x = dup.get("files_2x", 0)
+            groups = dup.get("total_groups", 0)
+            wasted_gb = dup.get("wasted_space_gb", 0)
+            pct = dup.get("percentage", 0)
+            max_copies = dup.get("max_copies", 0)
+            self.duplicates_line1.config(text=f"{files_2x} fichiers dupliqués 2 fois")
+            self.duplicates_line2.config(
+                text=f"{pct}% | {groups} groupes | {wasted_gb:.1f}GB gaspillé"
+            )
+            self.duplicates_line3.config(text=f"Top: {max_copies} copies max")
+            self.duplicates_line1.config(
+                foreground="orange" if wasted_gb > 0.5 else "green"
+            )
+
+            size_age = metrics.get("size_age", {})
+            large_pct = size_age.get("large_files_pct", 0)
+            dormant_pct = size_age.get("dormant_files_pct", 0)
+            affected = size_age.get("total_affected", 0)
+            archival_gb = size_age.get("archival_size_gb", 0)
+            self.size_age_line1.config(
+                text=f"{large_pct}% gros + {dormant_pct}% dormants"
+            )
+            self.size_age_line2.config(
+                text=f"{affected} fichiers | {archival_gb:.1f}GB archivage"
+            )
+            self.size_age_line3.config(text="Seuils utilisateur")
+            self.size_age_line1.config(
+                foreground="blue" if affected > 0 else "green"
+            )
+
+            try:
+                self.update_thematic_tabs()
+                self.update_extended_tabs(metrics)
+            except Exception as e:  # pragma: no cover - UI issues
+                logger.error("Erreur mise à jour onglets: %s", e)
+            self.progress_label.config(text="✅ Métriques à jour")
+        finally:
+            self._enable_calculation_controls()
+            self._calculation_in_progress = False
+
+    def _update_ui_with_error(self, error: Exception) -> None:
+        self._handle_analytics_error("calcul asynchrone", error)
+        self.progress_label.config(text="❌ Erreur calcul")
+        self._enable_calculation_controls()
+        self._calculation_in_progress = False
+
+    def _disable_calculation_controls(self) -> None:
+        if hasattr(self, "recalculate_button"):
+            try:
+                self.recalculate_button.config(state="disabled")
+            except Exception:
+                pass
+
+    def _enable_calculation_controls(self) -> None:
+        if hasattr(self, "recalculate_button"):
+            try:
+                self.recalculate_button.config(state="normal")
+            except Exception:
+                pass
+
     def _save_metrics_to_disk(self, metrics: Dict[str, Any]) -> None:
         try:
             cache_file = Path("analytics_cache.json")
@@ -533,76 +687,15 @@ class AnalyticsPanel:
             "top_users": top_users,
         }
 
-        self._metrics_cache = {cache_key: metrics}
+        self._metrics_cache[cache_key] = metrics
         self._cache_timestamp = current_time
         self._save_metrics_to_disk(metrics)
         return metrics
 
     def update_alert_cards(self) -> None:
-        self.progress_label.config(text="⏳ Calcul en cours...")
-        self.parent.update_idletasks()
-        metrics = self.calculate_business_metrics()
-        if not metrics:
-            self.progress_label.config(text="❌ Erreur calcul")
+        if self._calculation_in_progress:
             return
-        global_metrics = metrics.get('global', {})
-        total_files = global_metrics.get('total_files', 0)
-        total_size_gb = global_metrics.get('total_size_gb', 0)
-        if not hasattr(self, 'totals_label'):
-            totals_frame = ttk.Frame(self.parent)
-            totals_frame.pack(fill="x", padx=5, pady=2)
-            self.totals_label = ttk.Label(
-                totals_frame,
-                text=f"📊 TOTAL: {total_files:,} fichiers | {total_size_gb:.1f}GB",
-                font=("Arial", 12, "bold"),
-                foreground="navy",
-            )
-            self.totals_label.pack()
-        else:
-            self.totals_label.config(
-                text=f"📊 TOTAL: {total_files:,} fichiers | {total_size_gb:.1f}GB"
-            )
-        super_crit = metrics.get('super_critical', {})
-        count = super_crit.get('count', 0)
-        pct = super_crit.get('percentage', 0)
-        size_gb = super_crit.get('size_gb', 0)
-        self.super_critical_line1.config(text=f"{count} C3+RGPD+Legal")
-        self.super_critical_line2.config(text=f"{pct}% | {count} fichiers | {size_gb:.1f}GB")
-        self.super_critical_line3.config(text="Cumul risques max")
-        self.super_critical_line1.config(foreground="darkred" if count > 0 else "green")
-        crit = metrics.get('critical', {})
-        count = crit.get('count', 0)
-        pct = crit.get('percentage', 0)
-        size_gb = crit.get('size_gb', 0)
-        self.critical_line1.config(text=f"{count} C3 OU RGPD OU Legal")
-        self.critical_line2.config(text=f"{pct}% | {count} fichiers | {size_gb:.1f}GB")
-        self.critical_line3.config(text="Un critère fort")
-        self.critical_line1.config(foreground="darkorange" if count > 0 else "green")
-        dup = metrics.get('duplicates', {})
-        files_2x = dup.get('files_2x', 0)
-        groups = dup.get('total_groups', 0)
-        wasted_gb = dup.get('wasted_space_gb', 0)
-        pct = dup.get('percentage', 0)
-        max_copies = dup.get('max_copies', 0)
-        self.duplicates_line1.config(text=f"{files_2x} fichiers dupliqués 2 fois")
-        self.duplicates_line2.config(text=f"{pct}% | {groups} groupes | {wasted_gb:.1f}GB gaspillé")
-        self.duplicates_line3.config(text=f"Top: {max_copies} copies max")
-        self.duplicates_line1.config(foreground="orange" if wasted_gb > 0.5 else "green")
-        size_age = metrics.get('size_age', {})
-        large_pct = size_age.get('large_files_pct', 0)
-        dormant_pct = size_age.get('dormant_files_pct', 0)
-        affected = size_age.get('total_affected', 0)
-        archival_gb = size_age.get('archival_size_gb', 0)
-        self.size_age_line1.config(text=f"{large_pct}% gros + {dormant_pct}% dormants")
-        self.size_age_line2.config(text=f"{affected} fichiers | {archival_gb:.1f}GB archivage")
-        self.size_age_line3.config(text="Seuils utilisateur")
-        self.size_age_line1.config(foreground="blue" if affected > 0 else "green")
-        try:
-            self.update_thematic_tabs()
-            self.update_extended_tabs(metrics)
-        except Exception as e:  # pragma: no cover - UI issues
-            logger.error("Erreur mise à jour onglets: %s", e)
-        self.progress_label.config(text="✅ Métriques à jour")
+        self._start_async_calculation()
 
     def _build_security_tab(self, parent_frame: ttk.Frame) -> None:
         title_label = ttk.Label(parent_frame, text="🛡️ ANALYSE SÉCURITÉ", font=("Arial", 14, 'bold'))
@@ -964,20 +1057,13 @@ class AnalyticsPanel:
             if size_mb < 0 or size_mb > 999999:
                 messagebox.showerror("Erreur", "Taille doit être entre 0 et 999999 MB", parent=self.parent)
                 return
+            if self._calculation_in_progress:
+                return
             self.progress_label.config(text="⏳ Recalcul en cours...")
             self.parent.update_idletasks()
             self._invalidate_cache()
-            self.update_alert_cards()
-            self.progress_label.config(text="✅ Terminé")
-            success_window = tk.Toplevel(self.parent)
-            success_window.title("Succès")
-            success_window.geometry("300x100")
-            success_window.transient(self.parent)
-            success_window.lift()
-            success_window.focus_set()
-            success_window.grab_set()
-            ttk.Label(success_window, text="✅ Métriques recalculées avec succès!", font=("Arial", 12)).pack(pady=20)
-            ttk.Button(success_window, text="OK", command=success_window.destroy).pack()
+            self._start_async_calculation()
+            return
         except ValueError:
             messagebox.showerror("Erreur", "Paramètres invalides", parent=self.parent)
             self.progress_label.config(text="❌ Erreur")

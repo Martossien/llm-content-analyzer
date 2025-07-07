@@ -11,6 +11,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, Optional
+from content_analyzer.utils.sqlite_utils import SQLiteConnectionManager
 
 import pandas as pd
 import yaml
@@ -2898,26 +2899,24 @@ No need to run analysis to see your files.
                     self.db_manager = DBManager(db_path)
                 return True
 
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='fichiers'
-                """
-            )
-            table_exists = cursor.fetchone() is not None
-            if not table_exists:
-                self.log_action("Table 'fichiers' missing, creating schema", "WARN")
-                conn.close()
-                from content_analyzer.modules.csv_parser import CSVParser
+            with SQLiteConnectionManager(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND name='fichiers'
+                    """
+                )
+                table_exists = cursor.fetchone() is not None
+                if not table_exists:
+                    self.log_action("Table 'fichiers' missing, creating schema", "WARN")
+                    from content_analyzer.modules.csv_parser import CSVParser
 
-                parser = CSVParser(self.config_path)
-                with sqlite3.connect(db_path) as new_conn:
-                    parser._ensure_schema(new_conn)
-                return True
+                    parser = CSVParser(self.config_path)
+                    with SQLiteConnectionManager(db_path) as new_conn:
+                        parser._ensure_schema(new_conn)
+                    return True
 
-            conn.close()
             return True
 
         except Exception as e:  # pragma: no cover - runtime safeguard
@@ -2937,20 +2936,19 @@ No need to run analysis to see your files.
                     self._get_duplicate_file_ids(status_filter, classification_filter)
                 )
             db_path = Path("analysis_results.db")
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            query = "SELECT COUNT(*) FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
-            params: list[Any] = []
-            if status_filter != "All":
-                query += " AND f.status = ?"
-                params.append(status_filter)
-            if classification_filter and classification_filter != "All":
-                query += " AND r.security_classification_cached = ?"
-                params.append(classification_filter)
-            cursor.execute(query, params)
-            count = cursor.fetchone()[0]
-            conn.close()
-            return count
+            with SQLiteConnectionManager(db_path) as conn:
+                cursor = conn.cursor()
+                query = "SELECT COUNT(*) FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id WHERE 1=1"
+                params: list[Any] = []
+                if status_filter != "All":
+                    query += " AND f.status = ?"
+                    params.append(status_filter)
+                if classification_filter and classification_filter != "All":
+                    query += " AND r.security_classification_cached = ?"
+                    params.append(classification_filter)
+                cursor.execute(query, params)
+                count = cursor.fetchone()[0]
+                return count
         except Exception as e:  # pragma: no cover - runtime safeguard
             self.log_action(f"Safe count failed: {str(e)}", "ERROR")
             return 0
@@ -2971,44 +2969,44 @@ No need to run analysis to see your files.
             if self.is_windows and limit > 500:
                 limit = 500
             db_path = Path("analysis_results.db")
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
+            with SQLiteConnectionManager(db_path) as conn:
+                cursor = conn.cursor()
 
-            base_query = """
-            SELECT f.id, f.name, f.host, f.extension, f.username, f.path,
-                   f.file_size, f.owner, f.creation_time, f.last_modified, f.status,
-                   r.security_classification_cached,
-                   r.security_confidence,
-                   r.rgpd_risk_cached,
-                   r.rgpd_confidence,
-                   r.finance_type_cached,
-                   r.finance_confidence,
-                   r.legal_type_cached,
-                   r.legal_confidence,
-                   r.document_resume,
-                   r.confidence_global,
-                   r.processing_time_ms
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE 1=1
-            """
+                base_query = """
+                SELECT f.id, f.name, f.host, f.extension, f.username, f.path,
+                       f.file_size, f.owner, f.creation_time, f.last_modified, f.status,
+                       r.security_classification_cached,
+                       r.security_confidence,
+                       r.rgpd_risk_cached,
+                       r.rgpd_confidence,
+                       r.finance_type_cached,
+                       r.finance_confidence,
+                       r.legal_type_cached,
+                       r.legal_confidence,
+                       r.document_resume,
+                       r.confidence_global,
+                       r.processing_time_ms
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE 1=1
+                """
 
-            params: list[Any] = []
+                params: list[Any] = []
 
-            if status_filter != "All":
-                base_query += " AND f.status = ?"
-                params.append(status_filter)
+                if status_filter != "All":
+                    base_query += " AND f.status = ?"
+                    params.append(status_filter)
 
-            if classification_filter and classification_filter != "All":
-                base_query += " AND r.security_classification_cached = ?"
-                params.append(classification_filter)
+                if classification_filter and classification_filter != "All":
+                    base_query += " AND r.security_classification_cached = ?"
+                    params.append(classification_filter)
 
-            base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
+                base_query += " ORDER BY f.id DESC LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
 
-            cursor.execute(base_query, params)
-            rows = cursor.fetchall()
-            conn.close()
+                cursor.execute(base_query, params)
+                rows = cursor.fetchall()
+
             if hasattr(self, "show_duplicates_var") and self.show_duplicates_var.get():
                 dup_ids = self._get_duplicate_file_ids(
                     status_filter, classification_filter
@@ -4537,9 +4535,8 @@ Errors: {perf.get('errors', 0)}
                 return
 
             size_before = db_path.stat().st_size / (1024 * 1024)
-            conn = sqlite3.connect(db_path)
-            conn.execute("VACUUM")
-            conn.close()
+            with SQLiteConnectionManager(db_path) as conn:
+                conn.execute("VACUUM")
             size_after = db_path.stat().st_size / (1024 * 1024)
             saved_mb = size_before - size_after
 
