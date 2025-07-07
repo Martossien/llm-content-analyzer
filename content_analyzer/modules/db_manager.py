@@ -8,6 +8,7 @@ import logging
 
 from content_analyzer.utils import SQLiteConnectionManager
 from .duplicate_detector import FileInfo
+from .sql_optimizer import SQLQueryOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class DBManager:
                 logger.warning("Schema incompatible pour index %s: %s", index_name, exc)
                 return False
             logger.error(
-                "Erreur inattendue lors création index %s: %s", index_name, exc
+                "Erreur création index critique %s: %s", index_name, exc
             )
             return False
 
@@ -115,10 +116,6 @@ class DBManager:
             (
                 "CREATE INDEX IF NOT EXISTS idx_fast_hash_duplicates ON fichiers(fast_hash) WHERE fast_hash IS NOT NULL AND fast_hash != ''",
                 "idx_fast_hash_duplicates",
-            ),
-            (
-                "CREATE INDEX IF NOT EXISTS idx_duplicate_detection ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL AND fast_hash != ''",
-                "idx_duplicate_detection",
             ),
             (
                 "CREATE INDEX IF NOT EXISTS idx_covering_results ON fichiers(id, name, status, file_size, last_modified, path) WHERE status IN ('completed', 'error')",
@@ -157,19 +154,20 @@ class DBManager:
                 "idx_file_analysis_opt",
             ),
             (
-                "CREATE INDEX IF NOT EXISTS idx_duplicate_enhanced ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL AND fast_hash != ''",
-                "idx_duplicate_enhanced",
-            ),
-            (
                 "CREATE INDEX IF NOT EXISTS idx_user_analytics ON fichiers(owner, file_size, status) WHERE owner IS NOT NULL",
                 "idx_user_analytics",
             ),
         ]
 
+        specialized_indexes = SQLQueryOptimizer.get_specialized_index_definitions()
+
         for sql, name in critical_indexes:
             self._create_index_safely(conn, sql, name)
 
         for sql, name in performance_indexes:
+            self._create_index_safely(conn, sql, name)
+
+        for sql, name in specialized_indexes:
             self._create_index_safely(conn, sql, name)
 
     def _ensure_schema(self) -> None:
@@ -458,3 +456,32 @@ class DBManager:
         self._maintenance_timer = Timer(3600, _task)
         self._maintenance_timer.daemon = True
         self._maintenance_timer.start()
+
+    def verify_index_health(self) -> Dict[str, Any]:
+        """Check index health after initialization."""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='index'")
+            existing_indexes = {row[0] for row in cursor.fetchall()}
+
+            expected_indexes = {
+                'idx_status', 'idx_fichier_id', 'idx_gui_status_priority',
+                'idx_fast_hash_duplicates', 'idx_duplicate_detection_enhanced',
+                'idx_gui_analytics_composite', 'idx_age_analysis', 'idx_size_analysis'
+            }
+
+            missing = expected_indexes - existing_indexes
+            unexpected = existing_indexes - expected_indexes
+
+            health_report = {
+                'total_indexes': len(existing_indexes),
+                'expected_indexes': len(expected_indexes),
+                'missing_indexes': list(missing),
+                'unexpected_indexes': list(unexpected),
+                'health_status': 'OK' if not missing else 'WARNING'
+            }
+
+            if missing:
+                logger.warning("Index manquants détectés: %s", missing)
+
+            return health_report

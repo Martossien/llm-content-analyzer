@@ -62,20 +62,27 @@ class SQLQueryOptimizer:
                 offset += chunk_size
 
     # ------------------------------------------------------------------
-    def create_specialized_indexes(self, conn: sqlite3.Connection) -> None:
-        """Crée les indexes composites utilisés pour la GUI."""
-        specialized_indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_gui_analytics_composite ON fichiers(status, file_size, last_modified, fast_hash, extension)",
-            "CREATE INDEX IF NOT EXISTS idx_duplicate_detection_enhanced ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_age_analysis ON fichiers(last_modified, creation_time) WHERE status='completed'",
-            "CREATE INDEX IF NOT EXISTS idx_size_analysis ON fichiers(file_size, extension) WHERE file_size > 0",
+    @staticmethod
+    def get_specialized_index_definitions() -> List[Tuple[str, str]]:
+        """Return SQL definitions for specialized indexes."""
+        return [
+            (
+                "CREATE INDEX IF NOT EXISTS idx_gui_analytics_composite ON fichiers(status, file_size, last_modified, fast_hash, extension)",
+                "idx_gui_analytics_composite",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_duplicate_detection_enhanced ON fichiers(fast_hash, file_size) WHERE fast_hash IS NOT NULL",
+                "idx_duplicate_detection_enhanced",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_age_analysis ON fichiers(last_modified, creation_time) WHERE status='completed'",
+                "idx_age_analysis",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_size_analysis ON fichiers(file_size, extension) WHERE file_size > 0",
+                "idx_size_analysis",
+            ),
         ]
-        for sql in specialized_indexes:
-            try:
-                conn.execute(sql)
-            except sqlite3.OperationalError:
-                # Ignore errors to keep backward compatibility
-                pass
 
     # ------------------------------------------------------------------
     def execute_chunked_query(

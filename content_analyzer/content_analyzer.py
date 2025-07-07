@@ -33,8 +33,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Lock global pour parsing JSON thread-safe
-_json_parsing_lock = threading.Lock()
 
 
 class ContentAnalyzer:
@@ -168,9 +166,8 @@ class ContentAnalyzer:
     def _thread_safe_parse_api_response(
         self, api_result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Parse la réponse API de manière thread-safe."""
-        with _json_parsing_lock:
-            return self._parse_api_response(api_result)
+        """Parse la réponse API."""
+        return self._parse_api_response(api_result)
 
     def _extract_json_from_content(self, content: str) -> Optional[Dict[str, Any]]:
         import json
