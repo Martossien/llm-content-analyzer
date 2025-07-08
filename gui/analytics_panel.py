@@ -19,6 +19,502 @@ from content_analyzer.modules.duplicate_detector import DuplicateDetector, FileI
 from content_analyzer.modules.db_manager import SafeDBManager as DBManager
 
 
+class AnalyticsDrillDownViewer:
+    """Comprehensive drill-down system for all Analytics tabs exploration."""
+
+    def __init__(self, parent_analytics_panel: "AnalyticsPanel") -> None:
+        self.analytics_panel = parent_analytics_panel
+        self.db_manager = parent_analytics_panel.db_manager
+
+    # ------------------------------------------------------------------
+    # Base modal creation helpers
+    # ------------------------------------------------------------------
+    def _create_base_modal(self, title: str, subtitle: str) -> tk.Toplevel:
+        """Create base modal window with common elements."""
+
+        modal = tk.Toplevel(self.analytics_panel.parent)
+        modal.title(title)
+        modal.geometry("1200x700")
+        modal.transient(self.analytics_panel.parent)
+        modal.grab_set()
+
+        modal.update_idletasks()
+        x = (modal.winfo_screenwidth() // 2) - (1200 // 2)
+        y = (modal.winfo_screenheight() // 2) - (700 // 2)
+        modal.geometry(f"1200x700+{x}+{y}")
+
+        header_frame = ttk.Frame(modal)
+        header_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Label(header_frame, text=subtitle, font=("Arial", 11, "bold")).pack(
+            anchor="w"
+        )
+
+        self._build_drill_down_treeview(modal)
+
+        buttons_frame = ttk.Frame(modal)
+        buttons_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Button(buttons_frame, text="📊 Export Liste", command=self._export_filtered_files).pack(
+            side="left", padx=5
+        )
+        ttk.Button(buttons_frame, text="❌ Fermer", command=modal.destroy).pack(
+            side="right", padx=5
+        )
+
+        return modal
+
+    def _build_drill_down_treeview(self, parent_window: tk.Toplevel) -> None:
+        """Build treeview for file exploration."""
+
+        tree_frame = ttk.Frame(parent_window)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        columns = (
+            "Name",
+            "Path",
+            "Size",
+            "Modified",
+            "Classification",
+            "RGPD",
+            "Type",
+            "Owner",
+        )
+
+        self.drill_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
+        column_configs = {
+            "Name": {"width": 200, "text": "Nom"},
+            "Path": {"width": 250, "text": "Chemin"},
+            "Size": {"width": 100, "text": "Taille"},
+            "Modified": {"width": 120, "text": "Modifié"},
+            "Classification": {"width": 100, "text": "Sécurité"},
+            "RGPD": {"width": 80, "text": "RGPD"},
+            "Type": {"width": 80, "text": "Type"},
+            "Owner": {"width": 150, "text": "Propriétaire"},
+        }
+        for col, config in column_configs.items():
+            self.drill_tree.heading(col, text=config["text"])
+            self.drill_tree.column(col, width=config["width"])
+
+        v_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.drill_tree.yview)
+        h_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.drill_tree.xview)
+        self.drill_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+
+        self.drill_tree.grid(row=0, column=0, sticky="nsew")
+        v_scrollbar.grid(row=0, column=1, sticky="ns")
+        h_scrollbar.grid(row=1, column=0, sticky="ew")
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        self.drill_tree.bind("<Double-1>", self._on_file_double_click)
+        self.drill_tree.bind("<Button-3>", self._show_file_context_menu)
+
+    # ------------------------------------------------------------------
+    # Helper utilities
+    # ------------------------------------------------------------------
+    def _format_file_size(self, size_bytes: int) -> str:
+        if not size_bytes:
+            return "0B"
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} PB"
+
+    def _get_file_type(self, filename: str) -> str:
+        if not filename:
+            return "Unknown"
+        ext = filename.lower().split(".")[-1] if "." in filename else ""
+        type_map = {
+            "pdf": "PDF",
+            "doc": "DOC",
+            "docx": "DOC",
+            "xls": "XLS",
+            "xlsx": "XLS",
+            "ppt": "PPT",
+            "pptx": "PPT",
+            "jpg": "IMG",
+            "jpeg": "IMG",
+            "png": "IMG",
+            "gif": "IMG",
+            "txt": "TXT",
+            "csv": "CSV",
+            "json": "JSON",
+            "xml": "XML",
+        }
+        return type_map.get(ext, "Autres")
+
+    def _export_filtered_files(self) -> None:  # pragma: no cover - UI
+        messagebox.showinfo("Export", "Export des fichiers filtrés (à implémenter)")
+
+    def _on_file_double_click(self, event):  # pragma: no cover - UI
+        selection = self.drill_tree.selection()
+        if selection:
+            item = self.drill_tree.item(selection[0])
+            filename = item["values"][0]
+            messagebox.showinfo("Fichier", f"Ouverture de: {filename}")
+
+    def _show_file_context_menu(self, event):  # pragma: no cover - UI
+        pass
+
+    # ------------------------------------------------------------------
+    # Data loading helpers for each tab type
+    # ------------------------------------------------------------------
+    def _load_filtered_files(self, modal: tk.Toplevel, query: str, params: tuple, category: str) -> None:
+        try:
+            if not self.db_manager:
+                logger.error("No database manager for filtered files")
+                return
+
+            progress_label = ttk.Label(modal, text="🔄 Chargement des données...")
+            progress_label.pack(pady=10)
+
+            with self.db_manager._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+                for item in self.drill_tree.get_children():
+                    self.drill_tree.delete(item)
+
+                for row in rows:
+                    file_id, name, path, size, modified, owner = row[:6]
+                    classification = row[6] if len(row) > 6 else "none"
+                    rgpd = row[7] if len(row) > 7 else "none"
+                    size_str = self._format_file_size(size) if size else "0B"
+                    modified_str = modified[:10] if modified else "Unknown"
+                    file_type = self._get_file_type(name)
+                    owner_str = owner or "Unknown"
+                    self.drill_tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            name or "Unknown",
+                            path or "Unknown",
+                            size_str,
+                            modified_str,
+                            classification,
+                            rgpd,
+                            file_type,
+                            owner_str,
+                        ),
+                    )
+
+                progress_label.config(text=f"✅ {len(rows)} fichiers chargés - {category}")
+                modal.after(2000, progress_label.destroy)
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to load filtered files: %s", e)
+            if "progress_label" in locals():
+                progress_label.config(text=f"❌ Erreur: {str(e)}")
+
+    # ------------------------------------------------------------------
+    # Public modal entry points
+    # ------------------------------------------------------------------
+    def show_classification_files_modal(self, classification: str, title: str, click_info: Dict[str, Any]) -> None:
+        try:
+            modal = self._create_base_modal(title, f"🔒 Classification: {classification}")
+            query = """
+            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE f.status = 'completed' AND r.security_classification_cached = ?
+            ORDER BY f.file_size DESC
+            """
+            self._load_filtered_files(modal, query, (classification,), f"Classification {classification}")
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to show classification modal: %s", e)
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}")
+
+    def show_rgpd_files_modal(self, risk_level: str, title: str, click_info: Dict[str, Any]) -> None:
+        try:
+            modal = self._create_base_modal(title, f"⚠️ Risque RGPD: {risk_level}")
+            query = """
+            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE f.status = 'completed' AND r.rgpd_risk_cached = ?
+            ORDER BY f.file_size DESC
+            """
+            self._load_filtered_files(modal, query, (risk_level,), f"RGPD {risk_level}")
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to show RGPD modal: %s", e)
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue RGPD.\nErreur: {str(e)}")
+
+    def show_age_files_modal(self, age_type: str, title: str, click_info: Dict[str, Any]) -> None:
+        try:
+            modal = self._create_base_modal(title, f"📅 Analyse d'âge: {age_type}")
+            threshold_years = getattr(self.analytics_panel, "threshold_age_years", tk.StringVar(value="2")).get()
+            date_field = "last_modified" if age_type == "old_files_modification" else "creation_time"
+            query = f"""
+            SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE f.status = 'completed' AND date(f.{date_field}) < date('now', '-{threshold_years} years')
+            ORDER BY f.{date_field} ASC
+            """
+            self._load_filtered_files(modal, query, (), f"Fichiers anciens ({age_type})")
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to show age analysis modal: %s", e)
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Analyse d'âge.\nErreur: {str(e)}")
+
+    def show_size_files_modal(self, size_type: str, title: str, click_info: Dict[str, Any]) -> None:
+        try:
+            modal = self._create_base_modal(title, f"📊 Analyse de taille: {size_type}")
+            threshold_mb = getattr(self.analytics_panel, "threshold_size_mb", tk.StringVar(value="100")).get()
+            threshold_bytes = int(threshold_mb) * 1024 * 1024
+            query = """
+            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE f.status = 'completed' AND f.file_size > ?
+            ORDER BY f.file_size DESC
+            """
+            self._load_filtered_files(modal, query, (threshold_bytes,), f"Gros fichiers (>{threshold_mb}MB)")
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to show size analysis modal: %s", e)
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Analyse de taille.\nErreur: {str(e)}")
+
+    def show_duplicates_modal(self, title: str, click_info: Dict[str, Any]) -> None:
+        try:
+            modal = self._create_base_modal(title, "🔄 Fichiers dupliqués par groupe")
+            query = """
+            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                   (
+                       SELECT COUNT(*) FROM fichiers f2
+                       WHERE f2.file_size = f.file_size AND f2.name = f.name AND f2.status = 'completed'
+                   ) AS duplicate_count
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE f.status = 'completed'
+            AND (
+                SELECT COUNT(*) FROM fichiers f2
+                WHERE f2.file_size = f.file_size AND f2.name = f.name AND f2.status = 'completed'
+            ) > 1
+            ORDER BY duplicate_count DESC, f.file_size DESC
+            """
+            self._load_filtered_files(modal, query, (), "Groupes de fichiers dupliqués")
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to show duplicates modal: %s", e)
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Doublons.\nErreur: {str(e)}")
+
+    def show_temporal_files_modal(self, temporal_type: str, title: str, click_info: Dict[str, Any]) -> None:
+        try:
+            modal = self._create_base_modal(title, f"📅 Analyse temporelle: {temporal_type}")
+            if temporal_type == "modification":
+                date_field = "last_modified"
+                order = "f.last_modified DESC"
+            else:
+                date_field = "creation_time"
+                order = "f.creation_time DESC"
+            query = f"""
+            SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE f.status = 'completed' AND f.{date_field} IS NOT NULL
+            ORDER BY {order}
+            """
+            self._load_filtered_files(modal, query, (), f"Analyse temporelle ({temporal_type})")
+        except Exception as e:  # pragma: no cover - UI
+            logger.error("Failed to show temporal modal: %s", e)
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Temporelle.\nErreur: {str(e)}")
+
+
+class AnalyticsTabClickManager:
+    """Manage click functionality across all Analytics tabs."""
+
+    def __init__(self, parent_analytics_panel: "AnalyticsPanel") -> None:
+        self.analytics_panel = parent_analytics_panel
+        self.db_manager = parent_analytics_panel.db_manager
+        self.drill_down_viewer = AnalyticsDrillDownViewer(parent_analytics_panel)
+
+    # ------------------------------------------------------------------
+    def add_click_handlers_to_all_tabs(self) -> None:
+        """Add click handlers to all analytics result displays."""
+
+        self._add_security_click_handlers()
+        self._add_rgpd_click_handlers()
+        self._add_age_analysis_click_handlers()
+        self._add_size_analysis_click_handlers()
+        self._add_duplicates_click_handlers()
+        self._add_temporal_click_handlers()
+
+    # ------------------------------------------------------------------
+    def _add_security_click_handlers(self) -> None:
+        if not hasattr(self.analytics_panel, "security_labels"):
+            return
+        for level, label in self.analytics_panel.security_labels.items():
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "classification",
+                "classification": level,
+                "category": "security_classification",
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_classification_click(lbl),
+            )
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline")),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal")),
+            )
+
+    def _add_rgpd_click_handlers(self) -> None:
+        if not hasattr(self.analytics_panel, "rgpd_labels"):
+            return
+        for level, label in self.analytics_panel.rgpd_labels.items():
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "rgpd_risk",
+                "risk_level": level,
+                "category": "rgpd_risk",
+            }
+            label.bind(
+                "<Button-1>", lambda e, lbl=label: self._handle_rgpd_click(lbl)
+            )
+            label.bind(
+                "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+            )
+            label.bind(
+                "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+            )
+
+    def _add_age_analysis_click_handlers(self) -> None:
+        for attr in ["modification_labels", "creation_labels"]:
+            if hasattr(self.analytics_panel, attr):
+                labels = getattr(self.analytics_panel, attr)
+                for key, label in labels.items():
+                    label.configure(cursor="hand2")
+                    label.click_info = {
+                        "type": "age_analysis",
+                        "age_type": f"{attr.split('_')[0]}_{key}",
+                        "category": "age_analysis",
+                    }
+                    label.bind(
+                        "<Button-1>", lambda e, lbl=label: self._handle_age_click(lbl)
+                    )
+                    label.bind(
+                        "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+                    )
+                    label.bind(
+                        "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                    )
+
+    def _add_size_analysis_click_handlers(self) -> None:
+        if not hasattr(self.analytics_panel, "file_size_labels"):
+            return
+        for level, label in self.analytics_panel.file_size_labels.items():
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "size_analysis",
+                "size_type": level,
+                "category": "size_analysis",
+            }
+            label.bind(
+                "<Button-1>", lambda e, lbl=label: self._handle_size_click(lbl)
+            )
+            label.bind(
+                "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+            )
+            label.bind(
+                "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+            )
+
+    def _add_duplicates_click_handlers(self) -> None:
+        if hasattr(self.analytics_panel, "duplicates_label"):
+            label = self.analytics_panel.duplicates_label
+            label.configure(cursor="hand2")
+            label.click_info = {"type": "duplicates", "category": "duplicate_files"}
+            label.bind(
+                "<Button-1>", lambda e, lbl=label: self._handle_duplicates_click(lbl)
+            )
+            label.bind(
+                "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+            )
+            label.bind(
+                "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+            )
+
+    def _add_temporal_click_handlers(self) -> None:
+        for attr in ["modification_labels", "creation_labels"]:
+            if hasattr(self.analytics_panel, attr):
+                labels = getattr(self.analytics_panel, attr)
+                for key, label in labels.items():
+                    label.configure(cursor="hand2")
+                    label.click_info = {
+                        "type": "temporal_analysis",
+                        "temporal_type": attr.split("_")[0],
+                        "category": key,
+                    }
+                    label.bind(
+                        "<Button-1>", lambda e, lbl=label: self._handle_temporal_click(lbl)
+                    )
+                    label.bind(
+                        "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+                    )
+                    label.bind(
+                        "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                    )
+
+    # ------------------------------------------------------------------
+    # Click handlers
+    # ------------------------------------------------------------------
+    def _handle_classification_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        classification = click_info.get("classification", "")
+        self.drill_down_viewer.show_classification_files_modal(
+            classification, f"Fichiers de Classification {classification}", click_info
+        )
+
+    def _handle_rgpd_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        risk_level = click_info.get("risk_level", "")
+        self.drill_down_viewer.show_rgpd_files_modal(
+            risk_level, f"Fichiers RGPD - Risque {risk_level}", click_info
+        )
+
+    def _handle_age_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        age_type = click_info.get("age_type", "")
+        self.drill_down_viewer.show_age_files_modal(
+            age_type, f"Fichiers - Analyse d'Âge ({age_type})", click_info
+        )
+
+    def _handle_size_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        size_type = click_info.get("size_type", "")
+        self.drill_down_viewer.show_size_files_modal(
+            size_type, f"Fichiers - Analyse de Taille ({size_type})", click_info
+        )
+
+    def _handle_duplicates_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        self.drill_down_viewer.show_duplicates_modal(
+            "Fichiers Dupliqués - Groupes", click_info
+        )
+
+    def _handle_temporal_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        temporal_type = click_info.get("temporal_type", "")
+        self.drill_down_viewer.show_temporal_files_modal(
+            temporal_type, f"Fichiers - Analyse Temporelle ({temporal_type})", click_info
+        )
+
+
 class UserDrillDownViewer:
     """Interactive drill-down system for user file exploration."""
 
@@ -366,6 +862,7 @@ class AnalyticsPanel:
         self._calculation_thread: Optional[threading.Thread] = None
         self._result_queue: queue.Queue = queue.Queue()
         self._calculation_in_progress = False
+        self.click_manager = AnalyticsTabClickManager(self)
 
         self._build_ui()
         self.tabs: Dict[str, ttk.Frame] = {}
@@ -566,6 +1063,17 @@ class AnalyticsPanel:
             text="📥 Restaurer Préférences",
             command=self.load_user_preferences,
         ).pack(side="right", padx=5)
+
+        self._initialize_click_functionality()
+
+    def _initialize_click_functionality(self) -> None:
+        """Initialize click functionality for all analytics tabs."""
+        try:
+            if hasattr(self, "click_manager"):
+                self.click_manager.add_click_handlers_to_all_tabs()
+                logger.info("Click functionality initialized for all analytics tabs")
+        except Exception as e:  # pragma: no cover - init
+            logger.error("Failed to initialize click functionality: %s", e)
 
     def _validate_database_schema(self) -> bool:
         """Validate database schema before analytics calculations."""
