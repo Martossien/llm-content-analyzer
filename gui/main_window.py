@@ -5001,7 +5001,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
         # Test basic connectivity to the database
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM fichiers")
                 file_count = cursor.fetchone()[0]
@@ -5070,7 +5070,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             diagnostic_results: list[str] = []
 
             try:
-                with self.db_manager._connect() as conn:
+                with self.db_manager._connect().get() as conn:
                     cursor = conn.cursor()
 
                     cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
