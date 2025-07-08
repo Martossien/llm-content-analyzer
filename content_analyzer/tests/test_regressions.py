@@ -78,7 +78,7 @@ def test_concurrent_json_parsing():
 def test_index_consolidation(tmp_path):
     db_file = tmp_path / "test.db"
     with DBManager(db_file) as db:
-        with db._connect() as conn:
+        with db._connect().get() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS fichiers ("
                 "id INTEGER PRIMARY KEY,"

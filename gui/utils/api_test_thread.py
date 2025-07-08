@@ -115,7 +115,17 @@ class APITestThread(threading.Thread):
     # ------------------------------------------------------------------
     def _test_api_worker(self, iteration: int, worker_id: int) -> Dict[str, Any]:
         start = time.time()
-        analyzer = ContentAnalyzer(self.config_path)
+        if self.should_stop.is_set():
+            return {
+                "status": "cancelled",
+                "error": "stopped_before_start",
+                "iteration": iteration,
+                "worker_id": worker_id,
+                "api_duration": 0,
+                "total_duration": 0,
+            }
+
+        analyzer = ContentAnalyzer(self.config_path, stop_event=self.should_stop)
         file_row = {
             "id": f"test_{iteration}_{worker_id}",
             "path": str(self.test_file_path),
@@ -141,6 +151,16 @@ class APITestThread(threading.Thread):
         api_start = time.time()
         result = analyzer.analyze_single_file(file_row, force_analysis=True)
         api_duration = time.time() - api_start
+
+        if self.should_stop.is_set():
+            return {
+                "status": "cancelled",
+                "error": "stopped_during_analysis",
+                "iteration": iteration,
+                "worker_id": worker_id,
+                "api_duration": api_duration,
+                "total_duration": time.time() - start,
+            }
         raw_content = result.get("raw_response", "")
         quality = self._analyze_response_quality(result, raw_content)
         total_duration = time.time() - start

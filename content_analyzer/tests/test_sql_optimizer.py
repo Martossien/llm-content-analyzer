@@ -46,3 +46,27 @@ def test_execute_chunked(tmp_path):
     query = "SELECT id FROM fichiers ORDER BY id"
     chunks = list(opt.execute_chunked_query(query, [], chunk_size=7))
     assert len(chunks) > 1
+
+
+def test_sql_injection_prevention(tmp_path):
+    db = setup_db(tmp_path)
+    opt = SQLQueryOptimizer(db)
+    malicious_filters = {
+        "status = 1; --": "any",
+        "id > 0) OR (1=1": "x",
+        "'; DROP TABLE fichiers; --": "y",
+    }
+    rows = opt.get_paginated_files_optimized(malicious_filters, cursor_id=0, limit=5)
+    assert rows
+    conn = sqlite3.connect(db)
+    count = conn.execute("SELECT COUNT(*) FROM fichiers").fetchone()[0]
+    conn.close()
+    assert count == 20
+
+
+def test_column_whitelist_enforcement(tmp_path):
+    db = setup_db(tmp_path)
+    opt = SQLQueryOptimizer(db)
+    invalid_filters = {"malicious_col": "x", "../etc/passwd": "y"}
+    rows = opt.get_paginated_files_optimized(invalid_filters, cursor_id=0, limit=10)
+    assert len(rows) == 10
