@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 from content_analyzer.modules.age_analyzer import AgeAnalyzer
 from content_analyzer.modules.size_analyzer import SizeAnalyzer
 from content_analyzer.modules.duplicate_detector import DuplicateDetector, FileInfo
-from content_analyzer.modules.db_manager import DBManager
+from content_analyzer.modules.db_manager import SafeDBManager as DBManager
 
 
 class AnalyticsPanel:

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import threading
 from threading import Timer
+import time
 import logging
 
 from content_analyzer.utils import SQLiteConnectionManager, SQLiteConnectionPool
@@ -490,3 +491,77 @@ class DBManager:
                 logger.warning("Index manquants détectés: %s", missing)
 
             return health_report
+
+
+class SafeDBManager(DBManager):
+    """Production-grade database manager with corruption prevention."""
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        self._checkpoint_interval = 1000
+        self._operations_count = 0
+        self._last_checkpoint = time.time()
+
+    def _force_wal_checkpoint(self) -> bool:
+        """Force WAL checkpoint with error handling."""
+        try:
+            with self._connect().get() as conn:
+                result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                checkpoint_info = result.fetchone()
+            if checkpoint_info and checkpoint_info[0] == 0:
+                logger.info("WAL checkpoint completed: %s", checkpoint_info)
+                return True
+            logger.warning("WAL checkpoint partial: %s", checkpoint_info)
+            return False
+        except sqlite3.Error as e:
+            logger.error("WAL checkpoint failed: %s", e)
+            return False
+
+    def _periodic_checkpoint(self) -> None:
+        self._operations_count += 1
+        current_time = time.time()
+        if (
+            self._operations_count >= self._checkpoint_interval
+            or current_time - self._last_checkpoint > 300
+        ):
+            if self._force_wal_checkpoint():
+                self._operations_count = 0
+                self._last_checkpoint = current_time
+
+    def store_analysis_result(
+        self,
+        file_id: int,
+        task_id: str,
+        llm_response: Dict[str, Any],
+        document_resume: str,
+        llm_response_complete: str,
+    ) -> None:
+        super().store_analysis_result(
+            file_id,
+            task_id,
+            llm_response,
+            document_resume,
+            llm_response_complete,
+        )
+        self._periodic_checkpoint()
+
+    def update_file_status(
+        self, file_id: int, status: str, error_message: Optional[str] = None
+    ) -> None:
+        super().update_file_status(file_id, status, error_message)
+        self._periodic_checkpoint()
+
+    def close(self) -> None:
+        if hasattr(self, "_pool") and self._pool:
+            try:
+                self._force_wal_checkpoint()
+            except Exception as e:  # pragma: no cover - close errors
+                logger.error("Error during WAL checkpoint: %s", e)
+            finally:
+                super().close()
+
+    def __enter__(self) -> "SafeDBManager":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
