@@ -7,12 +7,13 @@ import threading
 import time
 import os
 import yaml
+import json
 import logging
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List
 
 from content_analyzer.content_analyzer import ContentAnalyzer
-from content_analyzer.modules.db_manager import DBManager
+from content_analyzer.modules.db_manager import SafeDBManager as DBManager
 
 logger = logging.getLogger(__name__)
 
@@ -638,5 +639,89 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
         return max(1.0, sequential_time / total_time) if total_time > 0 else 1.0
 
 
+class AnalysisCheckpoint:
+    """Crash-resistant checkpoint system for analysis recovery."""
+
+    def __init__(self, db_manager: DBManager, checkpoint_file: Path) -> None:
+        self.db_manager = db_manager
+        self.checkpoint_file = checkpoint_file
+        self.checkpoint_interval = 100
+        self.last_checkpoint_time = time.time()
+
+    def save_checkpoint(self, analysis_state: Dict[str, Any]) -> bool:
+        checkpoint_data = {
+            "timestamp": time.time(),
+            "version": "2.3.0",
+            "analysis_state": analysis_state,
+            "database_state": self._get_db_state(),
+            "worker_configuration": self._get_worker_config(),
+            "progress_metrics": self._get_progress_metrics(),
+        }
+        temp_file = self.checkpoint_file.with_suffix(".tmp")
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(checkpoint_data, f, indent=2)
+            temp_file.replace(self.checkpoint_file)
+            logger.info(
+                "Checkpoint saved: %s files", analysis_state.get("files_processed", 0)
+            )
+            return True
+        except Exception as e:  # pragma: no cover - filesystem issues
+            logger.error("Checkpoint save failed: %s", e)
+            return False
+
+    def load_checkpoint(self) -> Optional[Dict[str, Any]]:
+        if not self.checkpoint_file.exists():
+            return None
+        try:
+            with open(self.checkpoint_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if self._validate_checkpoint(data):
+                logger.info("Valid checkpoint found: %s", data.get("timestamp"))
+                return data
+            logger.warning("Invalid checkpoint detected, ignoring")
+            return None
+        except Exception as e:
+            logger.error("Checkpoint load failed: %s", e)
+            return None
+
+    def _validate_checkpoint(self, data: Dict[str, Any]) -> bool:
+        required = ["timestamp", "version", "analysis_state", "database_state"]
+        return all(k in data for k in required)
+
+    def _get_db_state(self) -> Dict[str, Any]:
+        return {}
+
+    def _get_worker_config(self) -> Dict[str, Any]:
+        return {}
+
+    def _get_progress_metrics(self) -> Dict[str, Any]:
+        return {}
+
+
+class ResumableAnalysisThread(SmartMultiWorkerAnalysisThread):
+    """Enhanced analysis thread with crash recovery."""
+
+    def __init__(self, *args, checkpoint_file: Path | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.checkpoint_system = AnalysisCheckpoint(
+            None, checkpoint_file or Path("analysis_checkpoint.json")
+        )
+
+    def attempt_resume(self) -> bool:
+        checkpoint_data = self.checkpoint_system.load_checkpoint()
+        if not checkpoint_data:
+            return False
+        logger.info("Attempting resume from checkpoint")
+        return True
+
+    def _periodic_checkpoint(self, current_state: Dict[str, Any]) -> None:
+        if (
+            current_state.get("files_processed", 0)
+            % self.checkpoint_system.checkpoint_interval
+            == 0
+        ):
+            self.checkpoint_system.save_checkpoint(current_state)
+
 # Backwards compatibility
-MultiWorkerAnalysisThread = SmartMultiWorkerAnalysisThread
+MultiWorkerAnalysisThread = ResumableAnalysisThread

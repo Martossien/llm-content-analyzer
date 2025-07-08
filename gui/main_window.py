@@ -52,7 +52,7 @@ from content_analyzer.content_analyzer import ContentAnalyzer
 from content_analyzer.modules.api_client import APIClient
 from content_analyzer.modules.cache_manager import CacheManager
 from content_analyzer.modules.csv_parser import CSVParser
-from content_analyzer.modules.db_manager import DBManager
+from content_analyzer.modules.db_manager import SafeDBManager as DBManager
 from content_analyzer.modules.prompt_manager import PromptManager
 from content_analyzer.utils.prompt_validator import (
     PromptSizeValidator,
@@ -62,7 +62,11 @@ from content_analyzer.utils.prompt_validator import (
 )
 
 from .utils.analysis_thread import AnalysisThread
-from .utils.multi_worker_analysis_thread import MultiWorkerAnalysisThread
+from .utils.multi_worker_analysis_thread import (
+    MultiWorkerAnalysisThread,
+    ResumableAnalysisThread,
+)
+from .utils.progress_tracker import ProgressTracker
 from .utils.api_test_thread import APITestThread
 from .utils.log_viewer import LogViewer
 from .utils.service_monitor import ServiceMonitor
@@ -146,6 +150,9 @@ class MainWindow:
         self.results_cache = ResultsCache(max_size=50)
         self.duplicate_detector = DuplicateDetector()
         self.dup_stats_labels: dict[str, ttk.Label] = {}
+
+        # Thread-safe progress tracker
+        self.progress_tracker = ProgressTracker()
 
         # IDs for periodic callbacks
         self._logs_update_id: str | None = None
@@ -1771,14 +1778,15 @@ No need to run analysis to see your files.
 
                 self.last_speed = speed
                 cache_hit_rate = self.get_cache_hit_rate()
+                validated = self.progress_tracker.update_progress(progress_pct)
                 metrics_text = (
-                    f"Files: {completed}/{total} ({progress_pct:.1f}%) | "
+                    f"Files: {completed}/{total} ({validated:.1f}%) | "
                     f"Speed: {speed:.0f}/min | "
                     f"Cache Hit: {cache_hit_rate:.1f}% | "
                     f"Errors: {errors}"
                 )
                 self.progress_metrics_label.config(text=metrics_text)
-                self.progress_bar["value"] = progress_pct
+                self.progress_bar["value"] = validated
                 if hasattr(self, "current_file_path"):
                     self.current_file_label.config(
                         text=f"Current File: {self.current_file_path}"
@@ -1877,7 +1885,7 @@ No need to run analysis to see your files.
             output_db = Path("analysis_results.db")
             workers_input = self.workers_entry.get().strip()
             max_workers = int(workers_input) if workers_input else None
-            self.analysis_thread = MultiWorkerAnalysisThread(
+            self.analysis_thread = ResumableAnalysisThread(
                 config_path=self.config_path,
                 csv_file=Path(self.csv_file_path),
                 output_db=output_db,
@@ -2127,7 +2135,8 @@ No need to run analysis to see your files.
         performance = info.get("performance", {})
 
         progress_pct = (processed / total * 100) if total > 0 else 0
-        self.progress_bar["value"] = progress_pct
+        validated = self.progress_tracker.update_progress(progress_pct)
+        self.progress_bar["value"] = validated
 
         throughput = performance.get("throughput_per_minute", 0)
         cache_hits = performance.get("cache_hits", 0)
@@ -2138,7 +2147,7 @@ No need to run analysis to see your files.
         max_workers = info.get("current_workers", {}).get("max_workers", 0)
 
         metrics_text = (
-            f"Files: {processed}/{total} ({progress_pct:.1f}%) | "
+            f"Files: {processed}/{total} ({validated:.1f}%) | "
             f"Avg API: {avg_time:.1f}s | "
             f"Speed: {throughput:.0f}/min | "
             f"Cache Hit: {cache_hit_rate:.1f}% | "
@@ -4388,6 +4397,21 @@ RAW RESPONSE:
             text="Backup Database",
             command=lambda: self.backup_database(maintenance_window),
         ).pack(fill="x", padx=5, pady=2)
+        ttk.Button(
+            db_frame,
+            text="Restore Database",
+            command=lambda: self.restore_database(maintenance_window),
+        ).pack(fill="x", padx=5, pady=2)
+        ttk.Button(
+            db_frame,
+            text="Verify Integrity",
+            command=lambda: self.verify_database_integrity(maintenance_window),
+        ).pack(fill="x", padx=5, pady=2)
+        ttk.Button(
+            db_frame,
+            text="Repair Corruption",
+            command=lambda: self.repair_database_corruption(maintenance_window),
+        ).pack(fill="x", padx=5, pady=2)
 
         cache_frame = ttk.LabelFrame(maintenance_window, text="Cache Maintenance")
         cache_frame.pack(fill="x", padx=10, pady=10)
@@ -4596,6 +4620,77 @@ Errors: {perf.get('errors', 0)}
                 parent=parent_window,
             )
             self.log_action(f"Database backup failed: {str(e)}", "ERROR")
+
+    def restore_database(self, parent_window: tk.Toplevel) -> None:
+        """Restore database from backup with validation."""
+        backup_file = filedialog.askopenfilename(
+            title="Select Backup File",
+            parent=parent_window,
+            filetypes=[("SQLite DB", "*.db"), ("All", "*.*")],
+        )
+        if not backup_file:
+            return
+        try:
+            db_path = Path("analysis_results.db")
+            with SQLiteConnectionManager(Path(backup_file)) as conn:
+                result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                if result != "ok":
+                    messagebox.showerror(
+                        "Invalid Backup",
+                        "Selected backup is corrupted",
+                        parent=parent_window,
+                    )
+                    return
+            import shutil
+
+            shutil.copy2(backup_file, db_path)
+            self.log_action("Database restored from backup", "INFO")
+            messagebox.showinfo(
+                "Restore Complete",
+                "Database restored successfully",
+                parent=parent_window,
+            )
+            self.invalidate_all_caches()
+        except Exception as exc:
+            messagebox.showerror(
+                "Restore Error", f"Failed to restore database:\n{exc}", parent=parent_window
+            )
+            self.log_action(f"Database restore failed: {exc}", "ERROR")
+
+    def verify_database_integrity(self, parent_window: tk.Toplevel) -> None:
+        """Run comprehensive database integrity checks."""
+        try:
+            db_path = Path("analysis_results.db")
+            with SQLiteConnectionManager(db_path) as conn:
+                result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            messagebox.showinfo(
+                "Integrity Check",
+                f"Database integrity: {result}",
+                parent=parent_window,
+            )
+            self.log_action(f"Integrity check result: {result}", "INFO")
+        except Exception as exc:
+            messagebox.showerror(
+                "Integrity Error", f"Integrity check failed:\n{exc}", parent=parent_window
+            )
+            self.log_action(f"Integrity check failed: {exc}", "ERROR")
+
+    def repair_database_corruption(self, parent_window: tk.Toplevel) -> None:
+        """Attempt automatic corruption repair."""
+        try:
+            db_path = Path("analysis_results.db")
+            with SQLiteConnectionManager(db_path) as conn:
+                conn.execute("PRAGMA wal_checkpoint(RESTART)")
+                conn.execute("VACUUM")
+            messagebox.showinfo(
+                "Repair Complete", "Database repair completed", parent=parent_window
+            )
+            self.log_action("Database repair completed", "INFO")
+        except Exception as exc:
+            messagebox.showerror(
+                "Repair Error", f"Repair failed:\n{exc}", parent=parent_window
+            )
+            self.log_action(f"Database repair failed: {exc}", "ERROR")
 
     def clear_cache(self, parent_window: tk.Toplevel) -> None:
         """Vide complètement le cache SQLite."""

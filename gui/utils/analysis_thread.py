@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Callable, Optional, Dict, Any
 
 from content_analyzer.content_analyzer import ContentAnalyzer
-from content_analyzer.modules.db_manager import DBManager
+from content_analyzer.modules.db_manager import SafeDBManager as DBManager
 
 
 class AnalysisThread(threading.Thread):
