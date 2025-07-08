@@ -4981,33 +4981,137 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
         ).pack(side="left", padx=5)
 
     def open_analytics_dashboard(self) -> None:
-        """Open analytics dashboard in a modal window."""
+        """Open analytics dashboard in a modal window with robust DB validation."""
+
+        # Prevent multiple dashboard windows
         if hasattr(self, "analytics_window") and self.analytics_window.winfo_exists():
             self.analytics_window.focus_set()
             return
 
+        # Validate availability of the database manager
+        if not hasattr(self, "db_manager") or self.db_manager is None:
+            logger.error("Database manager not available for analytics dashboard")
+            messagebox.showerror(
+                "Erreur Database",
+                "Gestionnaire de base de données non disponible.\n"
+                "Veuillez relancer l'application ou contacter le support technique.",
+                parent=self.root,
+            )
+            return
+
+        # Test basic connectivity to the database
+        try:
+            with self.db_manager._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM fichiers")
+                file_count = cursor.fetchone()[0]
+                logger.info("Database validation successful: %d files found", file_count)
+        except Exception as exc:
+            logger.error("Database connection test failed: %s", exc)
+            messagebox.showerror(
+                "Erreur Database",
+                "Impossible de se connecter à la base de données.\n"
+                f"Erreur: {str(exc)}\n\n"
+                "Veuillez vérifier que l'analyse a été lancée au moins une fois.",
+                parent=self.root,
+            )
+            return
+
+        # Create modal window only after successful validation
         self.analytics_window = self.create_dialog_window(
             self.root,
             "📊 Analytics Dashboard",
             "1200x800",
         )
+
         analytics_frame = ttk.Frame(self.analytics_window)
         analytics_frame.pack(fill="both", expand=True)
+
         from .analytics_panel import AnalyticsPanel
 
         self.analytics_panel = AnalyticsPanel(analytics_frame, self.db_manager)
 
         controls = ttk.Frame(self.analytics_window)
         controls.pack(fill="x", padx=5, pady=5)
+
         ttk.Button(
-            controls, text="🔄 Actualiser Tout", command=self.refresh_all_analytics
+            controls,
+            text="🔄 Actualiser Tout",
+            command=self.refresh_all_analytics,
         ).pack(side="left", padx=5)
+
         ttk.Button(
-            controls, text="📊 Export Analytics", command=self.export_analytics_report
+            controls,
+            text="📊 Export Analytics",
+            command=self.export_analytics_report,
         ).pack(side="left", padx=5)
-        ttk.Button(controls, text="Fermer", command=self.analytics_window.destroy).pack(
-            side="right", padx=5
-        )
+
+        ttk.Button(
+            controls,
+            text="🔧 Diagnostic DB",
+            command=self._run_database_diagnostic,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            controls,
+            text="Fermer",
+            command=self.analytics_window.destroy,
+        ).pack(side="right", padx=5)
+
+        logger.info("Analytics dashboard opened successfully with validated database")
+
+    def _run_database_diagnostic(self) -> None:
+        """Run comprehensive database diagnostic for analytics troubleshooting."""
+        try:
+            if not self.db_manager:
+                messagebox.showerror("Diagnostic", "Database manager not available")
+                return
+
+            diagnostic_results: list[str] = []
+
+            try:
+                with self.db_manager._connect() as conn:
+                    cursor = conn.cursor()
+
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    diagnostic_results.append(f"✅ Tables found: {', '.join(tables)}")
+
+                    if "fichiers" in tables:
+                        cursor.execute("SELECT COUNT(*) FROM fichiers")
+                        file_count = cursor.fetchone()[0]
+                        diagnostic_results.append(
+                            f"✅ Files in database: {file_count}"
+                        )
+
+                    if "reponses_llm" in tables:
+                        cursor.execute("SELECT COUNT(*) FROM reponses_llm")
+                        response_count = cursor.fetchone()[0]
+                        diagnostic_results.append(
+                            f"✅ Analysis responses: {response_count}"
+                        )
+
+                    cursor.execute("PRAGMA integrity_check")
+                    integrity = cursor.fetchone()[0]
+                    diagnostic_results.append(
+                        f"✅ Database integrity: {integrity}"
+                    )
+
+            except Exception as e:
+                diagnostic_results.append(f"❌ Database error: {str(e)}")
+
+            result_text = "\n".join(diagnostic_results)
+            messagebox.showinfo(
+                "Diagnostic Database",
+                f"Résultats du diagnostic:\n\n{result_text}",
+                parent=self.analytics_window if hasattr(self, "analytics_window") else self.root,
+            )
+
+        except Exception as exc:  # pragma: no cover - runtime safety
+            messagebox.showerror(
+                "Erreur Diagnostic",
+                f"Impossible d'exécuter le diagnostic: {str(exc)}",
+            )
 
     def refresh_all_analytics(self) -> None:
         if hasattr(self, "analytics_panel"):

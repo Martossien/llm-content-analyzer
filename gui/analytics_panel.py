@@ -838,11 +838,12 @@ class UserDrillDownViewer:
 class AnalyticsPanel:
     """Dashboard de supervision business."""
 
-    def __init__(
-        self, parent_frame: tk.Widget, db_manager: DBManager | None = None
-    ) -> None:
-        self.parent = parent_frame
+    def __init__(self, parent, db_manager) -> None:
+        """Initialize Analytics Panel with robust database validation."""
+
+        self.parent = parent
         self.db_manager = db_manager
+
         self.age_analyzer = AgeAnalyzer()
         self.size_analyzer = SizeAnalyzer()
         self.duplicate_detector = DuplicateDetector()
@@ -864,14 +865,30 @@ class AnalyticsPanel:
         self._calculation_in_progress = False
         self.click_manager = AnalyticsTabClickManager(self)
 
-        self._build_ui()
-        self.tabs: Dict[str, ttk.Frame] = {}
-        self.update_alert_cards()
-        self.update_thematic_tabs()
-        self._start_result_polling()
+        if not self.db_manager:
+            logger.error("AnalyticsPanel initialized with None database manager")
+            self._show_database_error()
+            return
+
+        if not self._validate_database_schema():
+            logger.error("Database schema validation failed during initialization")
+            self._show_schema_error()
+            return
+
+        try:
+            self._build_interface()
+            self._initialize_click_functionality()
+            logger.info("Analytics Panel initialized successfully")
+        except Exception as e:
+            logger.error("Failed to build Analytics Panel interface: %s", e)
+            self._show_initialization_error(e)
 
     def set_db_manager(self, db_manager: DBManager | None) -> None:
         self.db_manager = db_manager
+
+    def _build_interface(self) -> None:
+        """Wrapper to build the analytics UI."""
+        self._build_ui()
 
     def _build_ui(self) -> None:
         params_frame = ttk.LabelFrame(self.parent, text="⚙️ PARAMÈTRES UTILISATEUR")
@@ -1076,7 +1093,7 @@ class AnalyticsPanel:
             logger.error("Failed to initialize click functionality: %s", e)
 
     def _validate_database_schema(self) -> bool:
-        """Validate database schema before analytics calculations."""
+        """Validate database schema before analytics calculations with comprehensive checks."""
         if not self.db_manager:
             logger.error("No database manager available for analytics")
             return False
@@ -1084,10 +1101,12 @@ class AnalyticsPanel:
         try:
             with self.db_manager._connect() as conn:
                 cursor = conn.cursor()
+
                 cursor.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('fichiers', 'reponses_llm')"
                 )
                 tables = [row[0] for row in cursor.fetchall()]
+
                 if "fichiers" not in tables or "reponses_llm" not in tables:
                     logger.error("Missing required tables. Found: %s", tables)
                     return False
@@ -1102,31 +1121,115 @@ class AnalyticsPanel:
                     "status",
                     "last_modified",
                 ]
-                missing_fields = [
-                    f for f in required_fields if f not in fichiers_fields
-                ]
+                missing_fields = [field for field in required_fields if field not in fichiers_fields]
                 if missing_fields:
-                    logger.error(
-                        "Missing required fields in fichiers: %s", missing_fields
-                    )
+                    logger.error("Missing required fields in fichiers: %s", missing_fields)
                     return False
 
                 cursor.execute("PRAGMA table_info(reponses_llm)")
                 reponses_fields = [row[1] for row in cursor.fetchall()]
-                required_resp = [
+                required_reponses = [
                     "fichier_id",
                     "security_classification_cached",
                     "rgpd_risk_cached",
                 ]
-                missing_resp = [f for f in required_resp if f not in reponses_fields]
-                if missing_resp:
-                    logger.warning("Missing fields in reponses_llm: %s", missing_resp)
+                missing_reponses = [field for field in required_reponses if field not in reponses_fields]
+                if missing_reponses:
+                    logger.warning("Missing fields in reponses_llm: %s", missing_reponses)
 
-                logger.info("Database schema validation passed")
+                cursor.execute("SELECT COUNT(*) FROM fichiers WHERE status = 'completed'")
+                completed_files = cursor.fetchone()[0]
+
+                if completed_files == 0:
+                    logger.warning("No completed files found for analytics")
+
+                logger.info(
+                    "Database schema validation passed: %d completed files available", completed_files
+                )
                 return True
-        except Exception as e:  # pragma: no cover - db issues
+
+        except Exception as e:
             logger.error("Schema validation failed: %s", e)
             return False
+
+    def _show_database_error(self) -> None:
+        """Display database connection error to user."""
+        error_frame = ttk.Frame(self.parent)
+        error_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ttk.Label(
+            error_frame,
+            text="❌ Erreur Database Manager",
+            font=("Arial", 16, "bold"),
+        ).pack(pady=10)
+
+        ttk.Label(
+            error_frame,
+            text="Le gestionnaire de base de données n'est pas disponible.\n"
+                 "Veuillez relancer l'application ou vérifier la configuration.",
+            font=("Arial", 12),
+        ).pack(pady=5)
+
+        ttk.Button(
+            error_frame,
+            text="🔄 Réessayer",
+            command=self._retry_initialization,
+        ).pack(pady=10)
+
+    def _show_schema_error(self) -> None:
+        """Display schema validation error to user."""
+        error_frame = ttk.Frame(self.parent)
+        error_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ttk.Label(
+            error_frame,
+            text="❌ Erreur Schema Database",
+            font=("Arial", 16, "bold"),
+        ).pack(pady=10)
+
+        ttk.Label(
+            error_frame,
+            text="Le schéma de la base de données est incompatible.\n"
+                 "Veuillez lancer une analyse complète pour mettre à jour la base.",
+            font=("Arial", 12),
+        ).pack(pady=5)
+
+    def _show_initialization_error(self, error: Exception) -> None:
+        """Display initialization error to user."""
+        error_frame = ttk.Frame(self.parent)
+        error_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ttk.Label(
+            error_frame,
+            text="❌ Erreur Initialisation Analytics",
+            font=("Arial", 16, "bold"),
+        ).pack(pady=10)
+
+        ttk.Label(
+            error_frame,
+            text=(
+                "Impossible d'initialiser le dashboard Analytics.\n"
+                f"Erreur: {str(error)[:100]}"
+                + ("..." if len(str(error)) > 100 else "")
+            ),
+            font=("Arial", 12),
+        ).pack(pady=5)
+
+    def _retry_initialization(self) -> None:
+        """Retry analytics panel initialization."""
+        try:
+            for widget in self.parent.winfo_children():
+                widget.destroy()
+
+            if self.db_manager and self._validate_database_schema():
+                self._build_interface()
+                self._initialize_click_functionality()
+                logger.info("Analytics Panel retry initialization successful")
+            else:
+                self._show_database_error()
+        except Exception as e:
+            logger.error("Retry initialization failed: %s", e)
+            self._show_initialization_error(e)
 
     def _connect_files(self) -> List[FileInfo]:
         if self.db_manager is None:
@@ -2896,7 +2999,8 @@ class AnalyticsPanel:
             self.progress_label.config(text="❌ Erreur actualisation")
 
     def _handle_analytics_error(self, operation: str, error: Exception) -> None:
-        """Enhanced error handling with detailed diagnostics."""
+        """Enhanced error handling with detailed logging and recovery options."""
+
         error_msg = f"Analytics {operation}: {str(error)}"
 
         if hasattr(self, "progress_label"):
@@ -2917,58 +3021,145 @@ class AnalyticsPanel:
                     file_count = cursor.fetchone()[0]
                     logger.info("Database accessible: %d files found", file_count)
             except Exception as db_e:
-                logger.error("Database connection failed: %s", db_e)
+                logger.error("Database connection failed during error handling: %s", db_e)
 
         try:
-            error_detail = str(error)
-            if len(error_detail) > 200:
-                error_detail = error_detail[:200] + "..."
-            response = messagebox.askyesno(
-                f"Erreur Analytics - {operation}",
-                (
+            error_detail = str(error)[:200] + ("..." if len(str(error)) > 200 else "")
+
+            if "schema_validation" in operation.lower():
+                response = messagebox.askyesnocancel(
+                    f"Erreur Analytics - {operation}",
+                    "Erreur de validation du schéma de base de données.\n\n"
+                    f"Détails: {error_detail}\n\n"
+                    "Solutions proposées:\n"
+                    "• OUI: Réessayer avec validation allégée\n"
+                    "• NON: Fermer et relancer une analyse complète\n"
+                    "• ANNULER: Revenir au dashboard",
+                    parent=self.parent,
+                )
+
+                if response is True:
+                    self._attempt_recovery_calculation()
+                elif response is False:
+                    self._suggest_full_analysis()
+            else:
+                response = messagebox.askyesno(
+                    f"Erreur Analytics - {operation}",
                     "Une erreur est survenue lors du calcul des analytics.\n\n"
-                    f"Détails: {error_detail}\n\nVoulez-vous réessayer avec les données disponibles ?"
-                ),
-                parent=self.parent,
-            )
-            if response:
-                self._attempt_recovery_calculation()
-        except Exception:
-            logger.critical("Critical error: cannot display error dialog")
+                    f"Détails: {error_detail}\n\nVoulez-vous réessayer avec les données disponibles ?",
+                    parent=self.parent,
+                )
+                if response:
+                    self._attempt_recovery_calculation()
+
+        except Exception as dialog_error:
+            logger.critical("Critical error: cannot display error dialog: %s", dialog_error)
+            if hasattr(self, "progress_label"):
+                self.progress_label.config(text=f"❌ Erreur critique: {operation}")
 
     def _attempt_recovery_calculation(self) -> None:
         """Attempt simplified calculation with available data only."""
-        try:
-            if hasattr(self, "progress_label"):
-                self.progress_label.config(
-                    text="\U0001F504 Tentative de récupération..."
-                )
+        logger.info("Attempting analytics recovery calculation")
 
-            if self.db_manager:
-                with self.db_manager._connect() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT COUNT(*), SUM(COALESCE(file_size, 0)) FROM fichiers WHERE status = 'completed'"
-                    )
-                    result = cursor.fetchone()
-                    if result:
-                        file_count, total_size = result
-                        recovery_metrics = {
-                            "global": {
-                                "total_files": file_count or 0,
-                                "total_size_gb": (total_size or 0) / (1024**3),
-                            },
-                            "_recovery_mode": True,
-                        }
-                        self._update_ui_with_metrics(recovery_metrics)
-                        if hasattr(self, "progress_label"):
-                            self.progress_label.config(
-                                text="\u26A0\uFE0F Mode récupération activé"
-                            )
-                        return
+        try:
+            if not self.db_manager:
+                logger.error("Cannot attempt recovery: no database manager")
+                self._show_database_error()
+                return
+
             if hasattr(self, "progress_label"):
-                self.progress_label.config(text="❌ Récupération échouée")
+                self.progress_label.config(text="🔄 Tentative de récupération...")
+
+            recovery_metrics = self._calculate_basic_metrics()
+
+            if recovery_metrics and recovery_metrics.get("total_files", 0) > 0:
+                self._update_basic_metrics_display(recovery_metrics)
+
+                if hasattr(self, "progress_label"):
+                    self.progress_label.config(text="✅ Récupération partielle réussie")
+
+                messagebox.showinfo(
+                    "Récupération Réussie",
+                    "Analytics partiellement récupérés!\n\n"
+                    f"Fichiers traités: {recovery_metrics.get('total_files', 0)}\n"
+                    "Certaines fonctionnalités avancées peuvent être indisponibles.",
+                    parent=self.parent,
+                )
+                logger.info("Analytics recovery successful")
+            else:
+                logger.warning("Recovery calculation yielded no usable data")
+                self._suggest_full_analysis()
+
         except Exception as e:
             logger.error("Recovery calculation failed: %s", e)
             if hasattr(self, "progress_label"):
-                self.progress_label.config(text="❌ Données indisponibles")
+                self.progress_label.config(text="❌ Échec de récupération")
+
+            messagebox.showerror(
+                "Échec de Récupération",
+                "Impossible de récupérer les analytics.\n"
+                "Veuillez relancer une analyse complète.\n\n"
+                f"Erreur: {str(e)}",
+                parent=self.parent,
+            )
+
+    def _calculate_basic_metrics(self) -> Dict[str, Any]:
+        """Calculate basic metrics with minimal schema requirements."""
+        basic_metrics = {
+            "total_files": 0,
+            "completed_files": 0,
+            "error_files": 0,
+            "pending_files": 0,
+            "total_size": 0,
+        }
+
+        try:
+            with self.db_manager._connect() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT status, COUNT(*), COALESCE(SUM(file_size), 0) FROM fichiers GROUP BY status"
+                )
+                for status, count, size in cursor.fetchall():
+                    basic_metrics[f"{status}_files"] = count
+                    basic_metrics["total_files"] += count
+                    basic_metrics["total_size"] += size or 0
+
+            logger.info("Basic metrics calculated: %s", basic_metrics)
+            return basic_metrics
+
+        except Exception as e:
+            logger.error("Basic metrics calculation failed: %s", e)
+            return {}
+
+    def _update_basic_metrics_display(self, metrics: Dict[str, Any]) -> None:
+        """Update UI with basic recovered metrics."""
+        try:
+            if hasattr(self, "stats_labels"):
+                for key, value in metrics.items():
+                    if key in self.stats_labels:
+                        if "size" in key and isinstance(value, (int, float)):
+                            size_gb = value / (1024 ** 3)
+                            display_value = f"{size_gb:.1f} GB"
+                        else:
+                            display_value = str(value)
+                        self.stats_labels[key].config(text=display_value)
+
+            logger.info("Basic metrics display updated")
+
+        except Exception as e:
+            logger.warning("Failed to update basic metrics display: %s", e)
+
+    def _suggest_full_analysis(self) -> None:
+        """Suggest running a full analysis to fix database issues."""
+        messagebox.showinfo(
+            "Analyse Complète Recommandée",
+            "Pour résoudre les problèmes d'analytics, il est recommandé de:\n\n"
+            "1. Fermer cette fenêtre\n"
+            "2. Retourner à l'écran principal\n"
+            "3. Lancer une analyse complète des fichiers\n"
+            "4. Attendre la fin de l'analyse\n"
+            "5. Rouvrir le dashboard Analytics\n\n"
+            "Ceci permettra de reconstruire la base de données correctement.",
+            parent=self.parent,
+        )
