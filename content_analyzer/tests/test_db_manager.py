@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from pathlib import Path
 import logging
 import sys
@@ -175,3 +176,64 @@ def test_error_logging_captured(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     DBManager(db_file)
     assert any("idx_fast_hash" in r.message for r in caplog.records)
+
+
+def test_concurrent_database_access(tmp_path):
+    db_file = tmp_path / "concurrent.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute(
+        "CREATE TABLE fichiers (id INTEGER PRIMARY KEY, status TEXT, exclusion_reason TEXT, priority_score INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO fichiers (id, status, exclusion_reason, priority_score) VALUES (?, 'pending', '', 0)",
+        [(i,) for i in range(1, 21)],
+    )
+    conn.commit()
+    conn.close()
+
+    db = DBManager(db_file)
+
+    def worker(fid: int) -> None:
+        for _ in range(5):
+            db.update_file_status(fid, "completed")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(1, 21)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    conn = sqlite3.connect(db_file)
+    count = conn.execute("SELECT COUNT(*) FROM fichiers WHERE status='completed'").fetchone()[0]
+    conn.close()
+    assert count == 20
+
+
+def test_connection_pool_exhaustion(tmp_path):
+    db_file = tmp_path / "pool.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute(
+        "CREATE TABLE fichiers (id INTEGER PRIMARY KEY, status TEXT, exclusion_reason TEXT, priority_score INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO fichiers (id, status, exclusion_reason, priority_score) VALUES (?, 'pending', '', 0)",
+        [(i,) for i in range(1, 8)],
+    )
+    conn.commit()
+    conn.close()
+
+    db = DBManager(db_file)
+
+    def worker(fid: int) -> None:
+        db.update_file_status(fid, "completed")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(1, 8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    conn = sqlite3.connect(db_file)
+    count = conn.execute("SELECT COUNT(*) FROM fichiers WHERE status='completed'").fetchone()[0]
+    conn.close()
+    assert count == 7

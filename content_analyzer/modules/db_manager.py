@@ -6,7 +6,7 @@ import threading
 from threading import Timer
 import logging
 
-from content_analyzer.utils import SQLiteConnectionManager
+from content_analyzer.utils import SQLiteConnectionManager, SQLiteConnectionPool
 from .duplicate_detector import FileInfo
 from .sql_optimizer import SQLQueryOptimizer
 
@@ -18,6 +18,7 @@ class DBManager:
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self._pool = SQLiteConnectionPool(db_path, pool_size=5)
         self._ensure_schema()
         self._maintenance_timer: Optional[Timer] = None
         # Schedule periodic maintenance without blocking
@@ -34,9 +35,11 @@ class DBManager:
         if self._maintenance_timer:
             self._maintenance_timer.cancel()
             self._maintenance_timer = None
+        if hasattr(self, "_pool"):
+            self._pool.close()
 
-    def _connect(self) -> SQLiteConnectionManager:
-        return SQLiteConnectionManager(self.db_path, check_same_thread=False)
+    def _connect(self) -> SQLiteConnectionPool:
+        return self._pool
 
     def __enter__(self) -> "DBManager":
         return self
@@ -171,7 +174,7 @@ class DBManager:
             self._create_index_safely(conn, sql, name)
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
+        with self._connect().get() as conn:
             cursor = conn.cursor()
 
             cursor.execute(
@@ -270,7 +273,8 @@ class DBManager:
         document_resume: str,
         llm_response_complete: str,
     ) -> None:
-        with self._connect() as conn:
+        with self._connect().get() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             if "confidence_global" not in llm_response:
                 confs = [
                     llm_response.get("security_confidence", 0),
@@ -324,7 +328,7 @@ class DBManager:
             priority_threshold: Minimum priority score required.
             offset: Row offset for pagination.
         """
-        with self._connect() as conn:
+        with self._connect().get() as conn:
             cursor = conn.cursor()
             query = (
                 "SELECT * FROM fichiers\n"
@@ -348,7 +352,8 @@ class DBManager:
     def update_file_status(
         self, file_id: int, status: str, error_message: Optional[str] = None
     ) -> None:
-        with self._connect() as conn:
+        with self._connect().get() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "UPDATE fichiers SET status = ?, exclusion_reason = ? WHERE id = ?",
                 (status, error_message, file_id),
@@ -356,7 +361,7 @@ class DBManager:
             conn.commit()
 
     def get_processing_stats(self) -> Dict[str, Any]:
-        with self._connect() as conn:
+        with self._connect().get() as conn:
             cursor = conn.cursor()
             total = cursor.execute("SELECT COUNT(*) FROM fichiers").fetchone()[0]
             pending = cursor.execute(
@@ -385,7 +390,7 @@ class DBManager:
 
     def get_all_files_basic(self) -> List[FileInfo]:
         """Return basic file information for analytics."""
-        with self._connect() as conn:
+        with self._connect().get() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT id, path, fast_hash, file_size, creation_time, last_modified, owner FROM fichiers"
@@ -428,7 +433,7 @@ class DBManager:
 
     def optimize_database_performance(self) -> Dict[str, Any]:
         """Run periodic maintenance and return basic stats."""
-        with self._connect() as conn:
+        with self._connect().get() as conn:
             conn.execute("ANALYZE")
             conn.execute("PRAGMA optimize")
             conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -459,7 +464,7 @@ class DBManager:
 
     def verify_index_health(self) -> Dict[str, Any]:
         """Check index health after initialization."""
-        with self._connect() as conn:
+        with self._connect().get() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='index'")
             existing_indexes = {row[0] for row in cursor.fetchall()}

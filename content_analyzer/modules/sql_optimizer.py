@@ -1,18 +1,41 @@
 from __future__ import annotations
 
 import sqlite3
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Tuple
 
 from content_analyzer.utils.sqlite_utils import SQLiteConnectionManager
 
+logger = logging.getLogger(__name__)
+
 
 class SQLQueryOptimizer:
     """Optimiseur de requêtes SQLite avec techniques avancées 2024"""
 
+    # Colonnes autorisées pour les filtres afin d'empêcher les injections SQL
+    ALLOWED_FILTER_COLUMNS = {
+        "status",
+        "owner",
+        "extension",
+        "file_size",
+        "priority_score",
+        "path",
+        "creation_time",
+        "last_modified",
+        "fast_hash",
+    }
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
         self.chunk_size = 10000
+
+    @staticmethod
+    def _is_valid_column_name(column_name: str) -> bool:
+        """Validate allowed column name format."""
+        import re
+
+        return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", column_name))
 
     def _connect(self) -> SQLiteConnectionManager:
         return SQLiteConnectionManager(self.db_path, check_same_thread=False)
@@ -25,7 +48,16 @@ class SQLQueryOptimizer:
         query = "SELECT * FROM fichiers WHERE id > ?"
         params: List[Any] = [cursor_id]
         for key, value in filters.items():
-            query += f" AND {key} = ?"
+            if key not in self.ALLOWED_FILTER_COLUMNS:
+                logger.warning(
+                    "Colonne de filtre non autorisée '%s' ignorée dans get_paginated_files_optimized",
+                    key,
+                )
+                continue
+            if not self._is_valid_column_name(key):
+                logger.error("Nom de colonne invalide '%s' détecté", key)
+                continue
+            query += f' AND "{key}" = ?'
             params.append(value)
         query += " ORDER BY id LIMIT ?"
         params.append(limit)
@@ -46,7 +78,16 @@ class SQLQueryOptimizer:
         )
         params: List[Any] = []
         for key, value in filters.items():
-            base_query += f" AND {key} = ?"
+            if key not in self.ALLOWED_FILTER_COLUMNS:
+                logger.warning(
+                    "Colonne de filtre non autorisée '%s' ignorée dans get_duplicate_files_chunked",
+                    key,
+                )
+                continue
+            if not self._is_valid_column_name(key):
+                logger.error("Nom de colonne invalide '%s' détecté", key)
+                continue
+            base_query += f' AND "{key}" = ?'
             params.append(value)
         base_query += " ORDER BY id"
 

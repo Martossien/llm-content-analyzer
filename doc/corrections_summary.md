@@ -14,3 +14,13 @@ These changes fix missing methods and allow proper processing of SMBeagle CSV fi
 ## Extension Normalization
 - Extensions from CSV rows are now normalized with a leading dot before filtering
   to ensure blocked extensions like `.zip` are excluded correctly.
+
+## Threading and Security Fixes
+- Implemented interruptible waiting in `SmartMultiWorkerAnalysisThread` for fast
+  stop responsiveness.
+- Propagated stop events in `APITestThread` ensuring API tests can be cancelled
+  promptly.
+- Replaced `SQLiteConnectionManager` with `SQLiteConnectionPool` in `DBManager`
+  to prevent cross-thread corruption.
+- Hardened `SQLQueryOptimizer` against SQL injection with column whitelisting
+  and strict validation.

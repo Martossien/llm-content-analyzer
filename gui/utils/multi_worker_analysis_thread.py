@@ -495,7 +495,8 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                 for future, file_row in future_to_file.items():
                     if self.should_stop.is_set():
                         logger.info("Stop requested - cancelling remaining tasks")
-                        future.cancel()
+                        if not future.done():
+                            future.cancel()
                         continue
                     try:
                         current_spacing = getattr(
@@ -507,7 +508,38 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                             adaptive_timeout,
                             current_spacing,
                         )
-                        result = future.result(timeout=adaptive_timeout)
+
+                        result = None
+                        start_wait = time.time()
+                        while not future.done():
+                            if self.should_stop.is_set():
+                                if not future.done():
+                                    future.cancel()
+                                logger.info(
+                                    "Stop requested during wait for: %s",
+                                    file_row.get("path", "unknown"),
+                                )
+                                break
+                            try:
+                                result = future.result(timeout=0.5)
+                                break
+                            except concurrent.futures.TimeoutError:
+                                if time.time() - start_wait > adaptive_timeout:
+                                    raise
+                                continue
+
+                        if self.should_stop.is_set() and result is None:
+                            logger.info(
+                                "Processing skipped for %s due to stop request",
+                                file_row.get("path", "unknown"),
+                            )
+                            continue
+
+                        if result is None and future.done() and not future.cancelled():
+                            result = future.result()
+
+                        if not result:
+                            continue
                         status = result.get("status")
                         if status in {"completed", "cached"}:
                             llm_data = result.get("result", {})
@@ -555,6 +587,15 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                             adaptive_timeout, current_spacing
                         )
                         total_errors += 1
+                    except concurrent.futures.CancelledError:
+                        logger.info(
+                            "Future cancelled for %s",
+                            file_row.get("path", "unknown"),
+                        )
+                        if self.db_manager:
+                            self.db_manager.update_file_status(
+                                file_row["id"], "cancelled", "User requested stop"
+                            )
                     except Exception as exc:  # pragma: no cover - result errors
                         total_errors += 1
                         self.db_manager.update_file_status(
