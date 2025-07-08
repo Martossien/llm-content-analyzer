@@ -82,7 +82,7 @@ class AnalysisThread(threading.Thread):
                         break
             try:
                 stats = db_mgr.get_processing_stats()
-                with db_mgr._connect() as conn:
+                with db_mgr._connect().get() as conn:
                     cursor = conn.cursor()
                     total_time_ms = cursor.execute(
                         "SELECT SUM(processing_time_ms) FROM reponses_llm"
