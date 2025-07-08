@@ -1137,10 +1137,10 @@ class AnalyticsPanel:
             return False
 
     def _validate_database_schema(self) -> bool:
-        """Validate database schema with enhanced error handling and recovery."""
+        """Validate database schema compatibility."""
 
         if not self._ensure_database_manager():
-            logger.error("Cannot validate schema: database manager unavailable")
+            logger.error("No database manager available for analytics")
             return False
 
         try:
@@ -1148,45 +1148,30 @@ class AnalyticsPanel:
                 cursor = conn.cursor()
 
                 cursor.execute(
-                    """
-                    SELECT name FROM sqlite_master
-                    WHERE type='table' AND name IN ('fichiers', 'reponses_llm')
-                    """
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('fichiers', 'reponses_llm')"
                 )
                 tables = [row[0] for row in cursor.fetchall()]
 
                 if 'fichiers' not in tables:
-                    logger.error("Critical table 'fichiers' missing from database")
+                    logger.error("Table 'fichiers' not found in database")
                     return False
-
-                if 'reponses_llm' not in tables:
-                    logger.warning("Table 'reponses_llm' missing - analytics will be limited")
 
                 cursor.execute("PRAGMA table_info(fichiers)")
-                fichiers_fields = [row[1] for row in cursor.fetchall()]
-                critical_fields = ['id', 'name', 'file_size', 'status']
-                missing_critical = [f for f in critical_fields if f not in fichiers_fields]
-                if missing_critical:
-                    logger.error("Critical fields missing from fichiers table: %s", missing_critical)
+                columns = [row[1] for row in cursor.fetchall()]
+                required_columns = ['id', 'path', 'file_size', 'status', 'owner']
+                missing_columns = [col for col in required_columns if col not in columns]
+                if missing_columns:
+                    logger.error(f"Missing required columns in fichiers table: {missing_columns}")
                     return False
 
-                cursor.execute("SELECT COUNT(*) FROM fichiers")
-                total_files = cursor.fetchone()[0]
-                if total_files == 0:
-                    logger.warning("No files found in database - analytics will show empty results")
-
                 cursor.execute("SELECT COUNT(*) FROM fichiers WHERE status = 'completed'")
-                completed_files = cursor.fetchone()[0]
+                file_count = cursor.fetchone()[0]
+                logger.info(f"Found {file_count} completed files in database")
 
-                logger.info(
-                    "Schema validation passed: %d total files, %d completed",
-                    total_files,
-                    completed_files,
-                )
-                return True
+                return file_count > 0
 
         except Exception as e:
-            logger.error("Schema validation failed with exception: %s", e)
+            logger.error(f"Database schema validation failed: {e}")
             return False
 
     def _show_database_manager_error(self) -> None:
@@ -1402,11 +1387,48 @@ class AnalyticsPanel:
             self._show_initialization_error(e)
 
     def _connect_files(self) -> List[FileInfo]:
-        if self.db_manager is None:
-            return []
+        """Retrieve files using correct FileInfo constructor."""
         try:
-            return self.db_manager.get_all_files_basic()
-        except Exception:
+            if not self.db_manager:
+                logger.error("No database manager for file retrieval")
+                return []
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                query = """
+                SELECT f.id, f.path, f.fast_hash, COALESCE(f.file_size, 0),
+                       f.creation_time, f.last_modified, COALESCE(f.owner, 'Unknown')
+                FROM fichiers f
+                WHERE f.status = 'completed'
+                ORDER BY f.id
+                """
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                files: List[FileInfo] = []
+
+                for row in rows:
+                    try:
+                        file_info = FileInfo(
+                            id=row[0],
+                            path=row[1] or "",
+                            fast_hash=row[2],
+                            file_size=int(row[3]) if row[3] else 0,
+                            creation_time=row[4],
+                            last_modified=row[5],
+                            owner=row[6] or "Unknown",
+                        )
+                        files.append(file_info)
+                    except Exception as e:
+                        logger.warning(
+                            "Skipping malformed file record %s: %s", row[0], e
+                        )
+                        continue
+
+                logger.info("Retrieved %d valid files from database", len(files))
+                return files
+
+        except Exception as e:
+            logger.error("Failed to retrieve files: %s", e)
             return []
 
     def _filter_files_by_classification(
@@ -1681,15 +1703,17 @@ class AnalyticsPanel:
         }
 
     def _get_empty_metrics(self) -> Dict[str, Any]:
-        """Provide empty metrics when no data available."""
+        """Return empty metrics structure as fallback."""
         return {
-            "global": {"total_files": 0, "total_size_gb": 0},
-            "security": {"C0": 0, "C1": 0, "C2": 0, "C3": 0},
-            "rgpd": {"high": 0, "medium": 0, "low": 0, "none": 0},
-            "duplicates": {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0},
-            "top_users": {},
-            "_empty": True,
-            "_message": "No data available for analytics",
+            "total_files": 0,
+            "total_size": 0,
+            "classifications": {"C0": 0, "C1": 0, "C2": 0, "C3": 0},
+            "rgpd_risks": {"none": 0, "low": 0, "medium": 0, "high": 0, "critical": 0},
+            "file_ages": {"recent": 0, "old": 0, "very_old": 0},
+            "file_sizes": {"small": 0, "medium": 0, "large": 0, "very_large": 0},
+            "duplicates": {"families": 0, "duplicate_files": 0, "wasted_space": 0},
+            "temporal": {"last_week": 0, "last_month": 0, "last_year": 0},
+            "users": []
         }
 
     # ------------------------------------------------------------------
@@ -1986,29 +2010,19 @@ class AnalyticsPanel:
         return metrics
 
     def calculate_business_metrics(self) -> Dict[str, Any]:
-        """Calculate business metrics with bulletproof error handling."""
-
-        logger.info("Starting business metrics calculation")
-
-        if not self._ensure_database_manager():
-            error_msg = "Database manager unavailable for metrics calculation"
-            logger.error(error_msg)
-            self._handle_analytics_error("database_manager_check", Exception(error_msg))
-            return self._get_fallback_metrics()
-
-        if not self._validate_database_schema():
-            error_msg = "Database schema validation failed"
-            logger.error(error_msg)
-            self._handle_analytics_error("schema_validation", Exception(error_msg))
-            return self._get_fallback_metrics()
+        """Calculate comprehensive business metrics with robust error handling."""
 
         try:
-            files = self._get_all_files_safe()
+            if not self._validate_database_schema():
+                logger.error("Database schema validation failed")
+                return self._get_empty_metrics()
+
+            files = self._connect_files()
             if not files:
                 logger.warning("No files available for metrics calculation")
                 return self._get_empty_metrics()
 
-            logger.info("Processing %d files for business metrics", len(files))
+            logger.info(f"Successfully retrieved {len(files)} files for analytics")
 
             metrics = {
                 "global": {
