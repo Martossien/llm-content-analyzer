@@ -218,7 +218,7 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE f.status = 'completed' AND r.security_classification_cached = ?
+            WHERE (f.status IS NULL OR f.status != 'error') AND r.security_classification_cached = ?
             ORDER BY f.file_size DESC
             """
             self._load_filtered_files(modal, query, (classification,), f"Classification {classification}")
@@ -235,7 +235,7 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE f.status = 'completed' AND r.rgpd_risk_cached = ?
+            WHERE (f.status IS NULL OR f.status != 'error') AND r.rgpd_risk_cached = ?
             ORDER BY f.file_size DESC
             """
             self._load_filtered_files(modal, query, (risk_level,), f"RGPD {risk_level}")
@@ -254,7 +254,7 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE f.status = 'completed' AND date(f.{date_field}) < date('now', '-{threshold_years} years')
+            WHERE (f.status IS NULL OR f.status != 'error') AND date(f.{date_field}) < date('now', '-{threshold_years} years')
             ORDER BY f.{date_field} ASC
             """
             self._load_filtered_files(modal, query, (), f"Fichiers anciens ({age_type})")
@@ -273,7 +273,7 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE f.status = 'completed' AND f.file_size > ?
+            WHERE (f.status IS NULL OR f.status != 'error') AND f.file_size > ?
             ORDER BY f.file_size DESC
             """
             self._load_filtered_files(modal, query, (threshold_bytes,), f"Gros fichiers (>{threshold_mb}MB)")
@@ -290,14 +290,18 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
                    (
                        SELECT COUNT(*) FROM fichiers f2
-                       WHERE f2.file_size = f.file_size AND f2.name = f.name AND f2.status = 'completed'
+                       WHERE f2.file_size = f.file_size
+                         AND f2.name = f.name
+                         AND (f2.status IS NULL OR f2.status != 'error')
                    ) AS duplicate_count
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE f.status = 'completed'
+            WHERE (f.status IS NULL OR f.status != 'error')
             AND (
                 SELECT COUNT(*) FROM fichiers f2
-                WHERE f2.file_size = f.file_size AND f2.name = f.name AND f2.status = 'completed'
+                WHERE f2.file_size = f.file_size
+                  AND f2.name = f.name
+                  AND (f2.status IS NULL OR f2.status != 'error')
             ) > 1
             ORDER BY duplicate_count DESC, f.file_size DESC
             """
@@ -321,7 +325,7 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE f.status = 'completed' AND f.{date_field} IS NOT NULL
+            WHERE (f.status IS NULL OR f.status != 'error') AND f.{date_field} IS NOT NULL
             ORDER BY {order}
             """
             self._load_filtered_files(modal, query, (), f"Analyse temporelle ({temporal_type})")
@@ -799,7 +803,7 @@ class UserDrillDownViewer:
                        r.finance_type_cached, r.legal_type_cached, r.document_resume
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.owner = ? AND f.status = 'completed' AND {filter_condition}
+                WHERE f.owner = ? AND (f.status IS NULL OR f.status != 'error') AND {filter_condition}
                 ORDER BY f.file_size DESC, f.last_modified DESC
                 LIMIT 1000
                 """
@@ -1164,9 +1168,9 @@ class AnalyticsPanel:
                     logger.error(f"Missing required columns in fichiers table: {missing_columns}")
                     return False
 
-                cursor.execute("SELECT COUNT(*) FROM fichiers WHERE status = 'completed'")
+                cursor.execute("SELECT COUNT(*) FROM fichiers WHERE (status IS NULL OR status != 'error')")
                 file_count = cursor.fetchone()[0]
-                logger.info(f"Found {file_count} completed files in database")
+                logger.info(f"Found {file_count} available files in database")
 
                 return file_count > 0
 
@@ -1399,7 +1403,7 @@ class AnalyticsPanel:
                 SELECT f.id, f.path, f.fast_hash, COALESCE(f.file_size, 0),
                        f.creation_time, f.last_modified, COALESCE(f.owner, 'Unknown')
                 FROM fichiers f
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 ORDER BY f.id
                 """
                 cursor.execute(query)
@@ -1504,7 +1508,7 @@ class AnalyticsPanel:
                     SUM(f.file_size) as total_size
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 GROUP BY r.security_classification_cached, r.rgpd_risk_cached,
                          r.finance_type_cached, r.legal_type_cached
                 ORDER BY count DESC
@@ -1525,7 +1529,7 @@ class AnalyticsPanel:
                 WHERE r.security_classification_cached = 'C3'
                   AND r.rgpd_risk_cached = 'critical'
                   AND r.legal_type_cached IN ('nda', 'litigation')
-                  AND f.status = 'completed'
+                  AND (f.status IS NULL OR f.status != 'error')
                 """
             )
             return [row[0] for row in cursor.fetchall()]
@@ -1591,7 +1595,7 @@ class AnalyticsPanel:
                 SELECT id, name, COALESCE(file_size, 0), COALESCE(owner, 'Unknown'),
                        status, last_modified, creation_time, path
                 FROM fichiers
-                WHERE status = 'completed'
+                WHERE (status IS NULL OR status != 'error')
                 ORDER BY id
                 """
                 cursor.execute(query)
@@ -3186,10 +3190,11 @@ class AnalyticsPanel:
         return "\n".join(f"  {rec}" for rec in recommendations[:5])
 
     def refresh_all(self) -> None:
-        """Actualise toutes les métriques analytics."""
+        """Actualise toutes les métriques analytics avec vérifications de sécurité."""
         try:
-            self.progress_label.config(text="🔄 Actualisation complète...")
-            self.parent.update_idletasks()
+            if hasattr(self, "progress_label"):
+                self.progress_label.config(text="🔄 Actualisation complète...")
+                self.parent.update_idletasks()
 
             # Invalider le cache pour forcer le recalcul
             self._invalidate_cache()
@@ -3200,14 +3205,16 @@ class AnalyticsPanel:
             # Optionnel: actualiser aussi les onglets thématiques
             self.update_thematic_tabs()
 
-            self.progress_label.config(text="✅ Actualisation terminée")
+            if hasattr(self, "progress_label"):
+                self.progress_label.config(text="✅ Actualisation terminée")
 
-            if hasattr(self, "log_action"):
-                self.log_action("Analytics refreshed via refresh_all()", "INFO")
+            logger.info("Analytics refreshed via refresh_all()")
 
         except Exception as e:
+            logger.error(f"Analytics refresh_all failed: {e}")
             self._handle_analytics_error("refresh_all", e)
-            self.progress_label.config(text="❌ Erreur actualisation")
+            if hasattr(self, "progress_label"):
+                self.progress_label.config(text="❌ Erreur actualisation")
 
     def _handle_analytics_error(self, operation: str, error: Exception) -> None:
         """Enhanced error handling with detailed logging and recovery options."""
