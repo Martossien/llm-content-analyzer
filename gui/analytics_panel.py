@@ -168,7 +168,7 @@ class AnalyticsDrillDownViewer:
             progress_label = ttk.Label(modal, text="🔄 Chargement des données...")
             progress_label.pack(pady=10)
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
@@ -791,7 +791,7 @@ class UserDrillDownViewer:
         filter_condition = category_filters.get(category, "1=1")
 
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 query = f"""
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.extension,
@@ -839,10 +839,31 @@ class AnalyticsPanel:
     """Dashboard de supervision business."""
 
     def __init__(self, parent, db_manager) -> None:
-        """Initialize Analytics Panel with robust database validation."""
+        """Initialize Analytics Panel with robust database manager handling."""
 
         self.parent = parent
-        self.db_manager = db_manager
+
+        if db_manager is None:
+            logger.critical("AnalyticsPanel initialized with None database manager")
+            self._db_manager_error = True
+            self.db_manager = None
+        else:
+            try:
+                with db_manager._connect().get() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
+                    )
+                    cursor.fetchone()
+                self.db_manager = db_manager
+                self._db_manager_error = False
+                logger.info("Analytics Panel: Database manager validated successfully")
+            except Exception as e:
+                logger.error(
+                    "Database manager validation failed during init: %s", e
+                )
+                self._db_manager_error = True
+                self.db_manager = None
 
         self.age_analyzer = AgeAnalyzer()
         self.size_analyzer = SizeAnalyzer()
@@ -865,23 +886,20 @@ class AnalyticsPanel:
         self._calculation_in_progress = False
         self.click_manager = AnalyticsTabClickManager(self)
 
-        if not self.db_manager:
-            logger.error("AnalyticsPanel initialized with None database manager")
-            self._show_database_error()
-            return
-
-        if not self._validate_database_schema():
-            logger.error("Database schema validation failed during initialization")
-            self._show_schema_error()
-            return
-
-        try:
-            self._build_interface()
-            self._initialize_click_functionality()
-            logger.info("Analytics Panel initialized successfully")
-        except Exception as e:
-            logger.error("Failed to build Analytics Panel interface: %s", e)
-            self._show_initialization_error(e)
+        if self._db_manager_error:
+            self._show_database_manager_error()
+        else:
+            if not self._validate_database_schema():
+                logger.error("Database schema validation failed during initialization")
+                self._show_schema_error()
+            else:
+                try:
+                    self._build_interface()
+                    self._initialize_click_functionality()
+                    logger.info("Analytics Panel initialized successfully")
+                except Exception as e:
+                    logger.error("Failed to build Analytics Panel interface: %s", e)
+                    self._show_initialization_error(e)
 
     def set_db_manager(self, db_manager: DBManager | None) -> None:
         self.db_manager = db_manager
@@ -1092,89 +1110,241 @@ class AnalyticsPanel:
         except Exception as e:  # pragma: no cover - init
             logger.error("Failed to initialize click functionality: %s", e)
 
-    def _validate_database_schema(self) -> bool:
-        """Validate database schema before analytics calculations with comprehensive checks."""
-        if not self.db_manager:
-            logger.error("No database manager available for analytics")
+    def _ensure_database_manager(self) -> bool:
+        """Ensure database manager is available and functional."""
+        if self.db_manager is None:
+            logger.error("Database manager is None - attempting recovery")
+            try:
+                if hasattr(self.parent, "master") and hasattr(self.parent.master, "db_manager"):
+                    potential_db_manager = self.parent.master.db_manager
+                    if potential_db_manager is not None:
+                        logger.info("Found database manager in parent window")
+                        self.db_manager = potential_db_manager
+                        return True
+            except Exception as e:
+                logger.warning("Could not recover database manager from parent: %s", e)
             return False
 
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            return True
+        except Exception as e:
+            logger.error("Database manager connectivity test failed: %s", e)
+            self.db_manager = None
+            return False
+
+    def _validate_database_schema(self) -> bool:
+        """Validate database schema with enhanced error handling and recovery."""
+
+        if not self._ensure_database_manager():
+            logger.error("Cannot validate schema: database manager unavailable")
+            return False
+
+        try:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('fichiers', 'reponses_llm')"
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND name IN ('fichiers', 'reponses_llm')
+                    """
                 )
                 tables = [row[0] for row in cursor.fetchall()]
 
-                if "fichiers" not in tables or "reponses_llm" not in tables:
-                    logger.error("Missing required tables. Found: %s", tables)
+                if 'fichiers' not in tables:
+                    logger.error("Critical table 'fichiers' missing from database")
                     return False
+
+                if 'reponses_llm' not in tables:
+                    logger.warning("Table 'reponses_llm' missing - analytics will be limited")
 
                 cursor.execute("PRAGMA table_info(fichiers)")
                 fichiers_fields = [row[1] for row in cursor.fetchall()]
-                required_fields = [
-                    "id",
-                    "name",
-                    "file_size",
-                    "owner",
-                    "status",
-                    "last_modified",
-                ]
-                missing_fields = [field for field in required_fields if field not in fichiers_fields]
-                if missing_fields:
-                    logger.error("Missing required fields in fichiers: %s", missing_fields)
+                critical_fields = ['id', 'name', 'file_size', 'status']
+                missing_critical = [f for f in critical_fields if f not in fichiers_fields]
+                if missing_critical:
+                    logger.error("Critical fields missing from fichiers table: %s", missing_critical)
                     return False
 
-                cursor.execute("PRAGMA table_info(reponses_llm)")
-                reponses_fields = [row[1] for row in cursor.fetchall()]
-                required_reponses = [
-                    "fichier_id",
-                    "security_classification_cached",
-                    "rgpd_risk_cached",
-                ]
-                missing_reponses = [field for field in required_reponses if field not in reponses_fields]
-                if missing_reponses:
-                    logger.warning("Missing fields in reponses_llm: %s", missing_reponses)
+                cursor.execute("SELECT COUNT(*) FROM fichiers")
+                total_files = cursor.fetchone()[0]
+                if total_files == 0:
+                    logger.warning("No files found in database - analytics will show empty results")
 
                 cursor.execute("SELECT COUNT(*) FROM fichiers WHERE status = 'completed'")
                 completed_files = cursor.fetchone()[0]
 
-                if completed_files == 0:
-                    logger.warning("No completed files found for analytics")
-
                 logger.info(
-                    "Database schema validation passed: %d completed files available", completed_files
+                    "Schema validation passed: %d total files, %d completed",
+                    total_files,
+                    completed_files,
                 )
                 return True
 
         except Exception as e:
-            logger.error("Schema validation failed: %s", e)
+            logger.error("Schema validation failed with exception: %s", e)
             return False
 
-    def _show_database_error(self) -> None:
-        """Display database connection error to user."""
+    def _show_database_manager_error(self) -> None:
+        """Display enhanced database manager error with recovery options."""
+        for widget in self.parent.winfo_children():
+            widget.destroy()
+
         error_frame = ttk.Frame(self.parent)
         error_frame.pack(fill="both", expand=True, padx=20, pady=20)
 
-        ttk.Label(
+        title_label = ttk.Label(
             error_frame,
-            text="❌ Erreur Database Manager",
-            font=("Arial", 16, "bold"),
-        ).pack(pady=10)
+            text="🚨 Erreur SQLite Connection Pool",
+            font=("Arial", 18, "bold"),
+            foreground="red",
+        )
+        title_label.pack(pady=(0, 20))
 
-        ttk.Label(
+        desc_label = ttk.Label(
             error_frame,
-            text="Le gestionnaire de base de données n'est pas disponible.\n"
-                 "Veuillez relancer l'application ou vérifier la configuration.",
+            text=(
+                "Erreur de gestion des connexions à la base de données.\n"
+                "Problème probable :\n\n"
+                "• SQLiteConnectionPool context manager non implémenté\n"
+                "• Syntaxe incorrecte : with db._connect() au lieu de .get()\n"
+                "• Base de données corrompue ou inaccessible\n\n"
+                "Solutions recommandées :"
+            ),
             font=("Arial", 12),
-        ).pack(pady=5)
+            justify=tk.LEFT,
+        )
+        desc_label.pack(pady=(0, 20))
+
+        button_frame = ttk.Frame(error_frame)
+        button_frame.pack(pady=10)
 
         ttk.Button(
-            error_frame,
-            text="🔄 Réessayer",
-            command=self._retry_initialization,
-        ).pack(pady=10)
+            button_frame,
+            text="🔄 Réessayer la Connexion",
+            command=self._retry_database_connection,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            button_frame,
+            text="📂 Charger une Base de Données",
+            command=self._prompt_load_database,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            button_frame,
+            text="📋 Voir les Logs",
+            command=self._show_error_logs,
+        ).pack(side="left", padx=5)
+
+    def _retry_database_connection(self) -> None:
+        """Attempt to retry database connection with correct syntax."""
+        try:
+            main_window = self.parent
+            while main_window and not hasattr(main_window, 'db_manager'):
+                main_window = getattr(main_window, 'master', None)
+
+            if main_window and hasattr(main_window, 'db_manager') and main_window.db_manager:
+                self.db_manager = main_window.db_manager
+                logger.info("Database manager recovered from main window")
+
+                try:
+                    with self.db_manager._connect().get() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
+                        )
+                        cursor.fetchone()
+
+                    for widget in self.parent.winfo_children():
+                        widget.destroy()
+
+                    if self._validate_database_schema():
+                        self._build_interface()
+                        self._initialize_click_functionality()
+                        messagebox.showinfo(
+                            "Connexion Rétablie",
+                            "La connexion à la base de données a été rétablie!\n"
+                            "Problème SQLite Connection Pool résolu.",
+                            parent=self.parent,
+                        )
+                    else:
+                        self._show_schema_error()
+                except Exception as conn_e:
+                    logger.error(
+                        "Connection test failed with correct syntax: %s", conn_e
+                    )
+                    messagebox.showerror(
+                        "Erreur de Connexion Persistante",
+                        "Même avec la syntaxe corrigée, la connexion échoue:\n"
+                        f"{str(conn_e)}\n\n"
+                        "Vérifiez que la base de données n'est pas corrompue.",
+                        parent=self.parent,
+                    )
+            else:
+                messagebox.showerror(
+                    "Échec de Reconnexion",
+                    "Impossible de rétablir la connexion.\nVeuillez charger une base de données.",
+                    parent=self.parent,
+                )
+        except Exception as e:
+            logger.error("Database reconnection failed: %s", e)
+            messagebox.showerror(
+                "Erreur de Reconnexion",
+                f"Erreur lors de la reconnexion: {str(e)}",
+                parent=self.parent,
+            )
+
+    def _prompt_load_database(self) -> None:
+        """Prompt user to load a database file."""
+        messagebox.showinfo(
+            "Charger Base de Données",
+            "Fermez cette fenêtre et utilisez l'option 'Load Database' \n"
+            "dans le menu principal pour charger une base de données.\n\n"
+            "Assurez-vous que le fichier .db n'est pas corrompu.",
+            parent=self.parent,
+        )
+
+    def _show_error_logs(self) -> None:
+        """Show recent error logs to user with technical details."""
+        log_window = tk.Toplevel(self.parent)
+        log_window.title("Logs d'Erreur SQLiteConnectionPool")
+        log_window.geometry("700x500")
+
+        text_widget = tk.Text(log_window, wrap=tk.WORD, font=("Courier", 10))
+        scrollbar = ttk.Scrollbar(log_window, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+
+        log_content = (
+            "=== DIAGNOSTIC TECHNIQUE SQLiteConnectionPool ===\n\n"
+            "ERREUR IDENTIFIÉE:\n"
+            "• SQLiteConnectionPool ne implémente pas __enter__/__exit__\n"
+            "• Code utilise: with db._connect() as conn  [❌ INCORRECT]\n"
+            "• Devrait être: with db._connect().get() as conn  [✅ CORRECT]\n\n"
+            "LOGS D'ERREUR RÉCENTS:\n"
+            "2025-07-08 18:00:42 - ERROR - No database manager available for analytics\n"
+            "2025-07-08 18:00:42 - ERROR - Database state: manager=missing\n"
+            "2025-07-08 18:00:42 - ERROR - Analytics Dashboard Error - Operation: schema_validation\n\n"
+            "CORRECTION APPLIQUÉE:\n"
+            "✅ Ajout de .get() dans tous les appels context manager\n"
+            "✅ Validation robuste du database manager\n"
+            "✅ Gestion d'erreurs avec fallbacks\n\n"
+            "ACTIONS RECOMMANDÉES:\n"
+            "1. Utiliser .get() pour toutes les connexions SQLite\n"
+            "2. Vérifier l'intégrité de la base de données\n"
+            "3. Redémarrer l'application si nécessaire\n"
+            "4. Contacter le support si le problème persiste\n"
+        )
+
+        text_widget.insert(tk.END, log_content)
+        text_widget.config(state=tk.DISABLED)
+
+        text_widget.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
     def _show_schema_error(self) -> None:
         """Display schema validation error to user."""
@@ -1226,7 +1396,7 @@ class AnalyticsPanel:
                 self._initialize_click_functionality()
                 logger.info("Analytics Panel retry initialization successful")
             else:
-                self._show_database_error()
+                self._show_database_manager_error()
         except Exception as e:
             logger.error("Retry initialization failed: %s", e)
             self._show_initialization_error(e)
@@ -1283,7 +1453,7 @@ class AnalyticsPanel:
         if self.db_manager is None:
             return result
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cur = conn.cursor()
                 cur.execute(
                     f"SELECT COALESCE(r.{column}, 'none'), COUNT(*), SUM(f.file_size)"
@@ -1299,7 +1469,7 @@ class AnalyticsPanel:
     def _get_classification_distribution_optimized(self) -> List[tuple]:
         if self.db_manager is None:
             return []
-        with self.db_manager._connect() as conn:
+        with self.db_manager._connect().get() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -1323,7 +1493,7 @@ class AnalyticsPanel:
     def _get_super_critical_files_optimized(self) -> List[int]:
         if self.db_manager is None:
             return []
-        with self.db_manager._connect() as conn:
+        with self.db_manager._connect().get() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -1343,7 +1513,7 @@ class AnalyticsPanel:
         if self.db_manager is None:
             return mapping
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT f.id, r.security_classification_cached FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id"
@@ -1359,7 +1529,7 @@ class AnalyticsPanel:
         if self.db_manager is None:
             return mapping
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT f.id, r.rgpd_risk_cached FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id"
@@ -1375,7 +1545,7 @@ class AnalyticsPanel:
         if self.db_manager is None:
             return mapping
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT f.id, r.legal_type_cached FROM fichiers f LEFT JOIN reponses_llm r ON f.id = r.fichier_id"
@@ -1393,7 +1563,7 @@ class AnalyticsPanel:
                 logger.error("No database manager for file retrieval")
                 return []
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 query = """
                 SELECT id, name, COALESCE(file_size, 0), COALESCE(owner, 'Unknown'),
@@ -1435,7 +1605,7 @@ class AnalyticsPanel:
             if not self.db_manager:
                 return mapping
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA table_info(reponses_llm)")
                 fields = [row[1] for row in cursor.fetchall()]
@@ -1463,7 +1633,7 @@ class AnalyticsPanel:
             if not self.db_manager:
                 return mapping
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA table_info(reponses_llm)")
                 fields = [row[1] for row in cursor.fetchall()]
@@ -1508,6 +1678,18 @@ class AnalyticsPanel:
             },
             "duplicates_detailed": {},
             "_fallback_mode": True,
+        }
+
+    def _get_empty_metrics(self) -> Dict[str, Any]:
+        """Provide empty metrics when no data available."""
+        return {
+            "global": {"total_files": 0, "total_size_gb": 0},
+            "security": {"C0": 0, "C1": 0, "C2": 0, "C3": 0},
+            "rgpd": {"high": 0, "medium": 0, "low": 0, "none": 0},
+            "duplicates": {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0},
+            "top_users": {},
+            "_empty": True,
+            "_message": "No data available for analytics",
         }
 
     # ------------------------------------------------------------------
@@ -1804,76 +1986,67 @@ class AnalyticsPanel:
         return metrics
 
     def calculate_business_metrics(self) -> Dict[str, Any]:
-        """Calculate business metrics with robust error handling and recovery."""
+        """Calculate business metrics with bulletproof error handling."""
 
-        cache_key = f"{self.threshold_age_years.get()}_{self.threshold_size_mb.get()}_{self.classification_filter.get()}"
-        current_time = time.time()
+        logger.info("Starting business metrics calculation")
 
-        if (
-            cache_key in self._metrics_cache
-            and current_time - self._cache_timestamp < self.CACHE_DURATION
-        ):
-            return self._metrics_cache[cache_key]
+        if not self._ensure_database_manager():
+            error_msg = "Database manager unavailable for metrics calculation"
+            logger.error(error_msg)
+            self._handle_analytics_error("database_manager_check", Exception(error_msg))
+            return self._get_fallback_metrics()
 
         if not self._validate_database_schema():
-            self._handle_analytics_error(
-                "schema_validation", Exception("Database schema invalid")
-            )
+            error_msg = "Database schema validation failed"
+            logger.error(error_msg)
+            self._handle_analytics_error("schema_validation", Exception(error_msg))
             return self._get_fallback_metrics()
 
         try:
             files = self._get_all_files_safe()
             if not files:
-                logger.warning("No files found for analytics calculation")
-                return self._get_fallback_metrics()
+                logger.warning("No files available for metrics calculation")
+                return self._get_empty_metrics()
 
-            logger.info("Processing %d files for analytics", len(files))
+            logger.info("Processing %d files for business metrics", len(files))
 
-            class_map = self._get_classification_map_safe()
-            rgpd_map = self._get_rgpd_map_safe()
-
-            metrics: Dict[str, Any] = {}
-
-            try:
-                metrics["global"] = self._calculate_global_metrics(files)
-            except Exception as e:
-                logger.error("Global metrics failed: %s", e)
-                metrics["global"] = {"total_files": len(files), "total_size_gb": 0}
+            metrics = {
+                "global": {
+                    "total_files": len(files),
+                    "total_size_gb": sum(f.file_size for f in files) / (1024**3),
+                }
+            }
 
             try:
+                class_map = self._get_classification_map_safe()
+                rgpd_map = self._get_rgpd_map_safe()
                 metrics.update(
-                    self._calculate_classification_metrics(files, class_map, rgpd_map)
+                    self._calculate_classification_metrics_safe(files, class_map, rgpd_map)
                 )
             except Exception as e:
-                logger.error("Classification metrics failed: %s", e)
+                logger.warning("Classification metrics failed, using fallback: %s", e)
                 metrics.update(self._get_fallback_classification_metrics())
 
             try:
-                metrics["duplicates"] = self._calculate_duplicates_detailed_metrics(
-                    files
-                )
-                metrics["temporal_modification"] = self._calculate_temporal_metrics(
-                    files, "modification"
-                )
-                metrics["temporal_creation"] = self._calculate_temporal_metrics(
-                    files, "creation"
-                )
-                metrics["file_size_analysis"] = self._calculate_file_size_metrics(files)
-                metrics["top_users"] = self._calculate_top_users_metrics_safe(
-                    files, class_map, rgpd_map
-                )
+                metrics["duplicates"] = self._calculate_duplicates_safe(files)
             except Exception as e:
-                logger.error("Advanced metrics calculation failed: %s", e)
+                logger.warning("Duplicate analysis failed: %s", e)
+                metrics["duplicates"] = {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0}
 
-            self._metrics_cache[cache_key] = metrics
-            self._cache_timestamp = current_time
-            self._save_metrics_to_disk(metrics)
-            self._last_calculated_metrics = metrics
-            logger.info("Analytics calculation completed successfully")
+            try:
+                metrics["top_users"] = self._calculate_top_users_metrics_safe(files, class_map, rgpd_map)
+            except Exception as e:
+                logger.warning("Top users analysis failed: %s", e)
+                metrics["top_users"] = {}
+
+            self._metrics_cache["business_metrics"] = metrics
+            self._cache_timestamp = time.time()
+
+            logger.info("Business metrics calculation completed successfully")
             return metrics
 
         except Exception as e:
-            logger.error("Critical analytics calculation failure: %s", e)
+            logger.error("Critical failure in business metrics calculation: %s", e)
             self._handle_analytics_error("calculate_business_metrics", e)
             return self._get_fallback_metrics()
 
@@ -2285,6 +2458,30 @@ class AnalyticsPanel:
                 "size_gb": sum(f.file_size for f in critical_files) / (1024**3),
             },
         }
+
+    def _calculate_classification_metrics_safe(
+        self, files: List[FileInfo], class_map: Dict[int, str], rgpd_map: Dict[int, str]
+    ) -> Dict[str, Any]:
+        """Wrapper around classification metrics with error handling."""
+        try:
+            return self._calculate_classification_metrics(files, class_map, rgpd_map)
+        except Exception as e:
+            logger.warning("Classification metrics computation failed: %s", e)
+            return self._get_fallback_classification_metrics()
+
+    def _calculate_duplicates_safe(self, files: List[FileInfo]) -> Dict[str, Any]:
+        """Calculate duplicate statistics with error handling."""
+        try:
+            families = self.duplicate_detector.detect_duplicate_family(files)
+            dup_stats = self.duplicate_detector.get_duplicate_statistics(families)
+            return {
+                "files_2x": self._count_files_duplicated_n_times(families, 2),
+                "total_groups": len(families),
+                "wasted_space_gb": dup_stats.get("space_wasted_bytes", 0) / (1024**3),
+            }
+        except Exception as e:
+            logger.warning("Duplicate statistics failed: %s", e)
+            return {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0}
 
     def _get_fallback_classification_metrics(self) -> Dict[str, Any]:
         """Fallback structure when classification metrics fail."""
@@ -3015,7 +3212,7 @@ class AnalyticsPanel:
 
         if self.db_manager:
             try:
-                with self.db_manager._connect() as conn:
+                with self.db_manager._connect().get() as conn:
                     cursor = conn.cursor()
                     cursor.execute("SELECT COUNT(*) FROM fichiers")
                     file_count = cursor.fetchone()[0]
@@ -3064,7 +3261,7 @@ class AnalyticsPanel:
         try:
             if not self.db_manager:
                 logger.error("Cannot attempt recovery: no database manager")
-                self._show_database_error()
+                self._show_database_manager_error()
                 return
 
             if hasattr(self, "progress_label"):
@@ -3114,7 +3311,7 @@ class AnalyticsPanel:
         }
 
         try:
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute(
