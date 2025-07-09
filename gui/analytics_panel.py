@@ -1747,8 +1747,10 @@ class AnalyticsPanel:
         self.parent.after(100, poll_results)
 
     def _start_async_calculation(self) -> None:
-        self.progress_label.config(text="⏳ Calcul en cours...")
-        self.parent.update_idletasks()
+        if hasattr(self, "progress_label"):
+            self.progress_label.config(text="⏳ Calcul en cours...")
+            self.parent.update_idletasks()
+
         self._disable_calculation_controls()
         self._calculation_in_progress = True
         self._calculation_thread = threading.Thread(
@@ -1756,6 +1758,8 @@ class AnalyticsPanel:
             daemon=True,
         )
         self._calculation_thread.start()
+        # Start polling the results so the UI updates when ready
+        self._start_result_polling()
 
     def _async_calculate_metrics(self) -> None:
         try:
@@ -1765,9 +1769,11 @@ class AnalyticsPanel:
             self._result_queue.put(exc)
 
     def _update_ui_with_metrics(self, metrics: Dict[str, Any]) -> None:
+        logger.info(f"Updating UI with metrics: {len(metrics)} sections")
         try:
             if not metrics:
-                self.progress_label.config(text="❌ Erreur calcul")
+                if hasattr(self, "progress_label"):
+                    self.progress_label.config(text="❌ Erreur calcul")
                 return
             # reuse existing update_alert_cards UI logic
             global_metrics = metrics.get("global", {})
@@ -1848,30 +1854,39 @@ class AnalyticsPanel:
                 self.update_extended_tabs(metrics)
             except Exception as e:  # pragma: no cover - UI issues
                 logger.error("Erreur mise à jour onglets: %s", e)
-            self.progress_label.config(text="✅ Métriques à jour")
+            if hasattr(self, "progress_label"):
+                self.progress_label.config(text="✅ Métriques à jour")
+        finally:
+            self._enable_calculation_controls()
+            self._calculation_in_progress = False
+            self.parent.update_idletasks()
+
+    def _update_ui_with_error(self, error: Exception) -> None:
+        try:
+            self._handle_analytics_error("calcul asynchrone", error)
+            if hasattr(self, "progress_label"):
+                self.progress_label.config(text="❌ Erreur de calcul")
         finally:
             self._enable_calculation_controls()
             self._calculation_in_progress = False
 
-    def _update_ui_with_error(self, error: Exception) -> None:
-        self._handle_analytics_error("calcul asynchrone", error)
-        self.progress_label.config(text="❌ Erreur calcul")
-        self._enable_calculation_controls()
-        self._calculation_in_progress = False
-
     def _disable_calculation_controls(self) -> None:
-        if hasattr(self, "recalculate_button"):
-            try:
+        try:
+            if hasattr(self, "recalculate_button"):
                 self.recalculate_button.config(state="disabled")
-            except Exception:
-                pass
+            if hasattr(self, "refresh_button"):
+                self.refresh_button.config(state="disabled")
+        except Exception as exc:
+            logger.warning(f"Failed to disable controls: {exc}")
 
     def _enable_calculation_controls(self) -> None:
-        if hasattr(self, "recalculate_button"):
-            try:
+        try:
+            if hasattr(self, "recalculate_button"):
                 self.recalculate_button.config(state="normal")
-            except Exception:
-                pass
+            if hasattr(self, "refresh_button"):
+                self.refresh_button.config(state="normal")
+        except Exception as exc:
+            logger.warning(f"Failed to enable controls: {exc}")
 
     def _save_metrics_to_disk(self, metrics: Dict[str, Any]) -> None:
         try:
