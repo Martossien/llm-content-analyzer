@@ -53,9 +53,9 @@ class AnalyticsDrillDownViewer:
 
         buttons_frame = ttk.Frame(modal)
         buttons_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Button(buttons_frame, text="📊 Export Liste", command=self._export_filtered_files).pack(
-            side="left", padx=5
-        )
+        ttk.Button(
+            buttons_frame, text="📊 Export Liste", command=self._export_filtered_files
+        ).pack(side="left", padx=5)
         ttk.Button(buttons_frame, text="❌ Fermer", command=modal.destroy).pack(
             side="right", padx=5
         )
@@ -79,7 +79,9 @@ class AnalyticsDrillDownViewer:
             "Owner",
         )
 
-        self.drill_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
+        self.drill_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", height=20
+        )
         column_configs = {
             "Name": {"width": 200, "text": "Nom"},
             "Path": {"width": 250, "text": "Chemin"},
@@ -94,9 +96,15 @@ class AnalyticsDrillDownViewer:
             self.drill_tree.heading(col, text=config["text"])
             self.drill_tree.column(col, width=config["width"])
 
-        v_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.drill_tree.yview)
-        h_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.drill_tree.xview)
-        self.drill_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        v_scrollbar = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=self.drill_tree.yview
+        )
+        h_scrollbar = ttk.Scrollbar(
+            tree_frame, orient="horizontal", command=self.drill_tree.xview
+        )
+        self.drill_tree.configure(
+            yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set
+        )
 
         self.drill_tree.grid(row=0, column=0, sticky="nsew")
         v_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -159,7 +167,9 @@ class AnalyticsDrillDownViewer:
     # ------------------------------------------------------------------
     # Data loading helpers for each tab type
     # ------------------------------------------------------------------
-    def _load_filtered_files(self, modal: tk.Toplevel, query: str, params: tuple, category: str) -> None:
+    def _load_filtered_files(
+        self, modal: tk.Toplevel, query: str, params: tuple, category: str
+    ) -> None:
         try:
             if not self.db_manager:
                 logger.error("No database manager for filtered files")
@@ -199,7 +209,9 @@ class AnalyticsDrillDownViewer:
                         ),
                     )
 
-                progress_label.config(text=f"✅ {len(rows)} fichiers chargés - {category}")
+                progress_label.config(
+                    text=f"✅ {len(rows)} fichiers chargés - {category}"
+                )
                 modal.after(2000, progress_label.destroy)
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to load filtered files: %s", e)
@@ -209,9 +221,13 @@ class AnalyticsDrillDownViewer:
     # ------------------------------------------------------------------
     # Public modal entry points
     # ------------------------------------------------------------------
-    def show_classification_files_modal(self, classification: str, title: str, click_info: Dict[str, Any]) -> None:
+    def show_classification_files_modal(
+        self, classification: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
         try:
-            modal = self._create_base_modal(title, f"🔒 Classification: {classification}")
+            modal = self._create_base_modal(
+                title, f"🔒 Classification: {classification}"
+            )
             query = """
             SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                    COALESCE(r.security_classification_cached, 'none') AS classif,
@@ -221,12 +237,19 @@ class AnalyticsDrillDownViewer:
             WHERE (f.status IS NULL OR f.status != 'error') AND r.security_classification_cached = ?
             ORDER BY f.file_size DESC
             """
-            self._load_filtered_files(modal, query, (classification,), f"Classification {classification}")
+            self._load_filtered_files(
+                modal, query, (classification,), f"Classification {classification}"
+            )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show classification modal: %s", e)
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur",
+                f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}",
+            )
 
-    def show_rgpd_files_modal(self, risk_level: str, title: str, click_info: Dict[str, Any]) -> None:
+    def show_rgpd_files_modal(
+        self, risk_level: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
         try:
             modal = self._create_base_modal(title, f"⚠️ Risque RGPD: {risk_level}")
             query = """
@@ -241,13 +264,23 @@ class AnalyticsDrillDownViewer:
             self._load_filtered_files(modal, query, (risk_level,), f"RGPD {risk_level}")
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show RGPD modal: %s", e)
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue RGPD.\nErreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur", f"Impossible d'ouvrir la vue RGPD.\nErreur: {str(e)}"
+            )
 
-    def show_age_files_modal(self, age_type: str, title: str, click_info: Dict[str, Any]) -> None:
+    def show_age_files_modal(
+        self, age_type: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
         try:
             modal = self._create_base_modal(title, f"📅 Analyse d'âge: {age_type}")
-            threshold_years = getattr(self.analytics_panel, "threshold_age_years", tk.StringVar(value="2")).get()
-            date_field = "last_modified" if age_type == "old_files_modification" else "creation_time"
+            threshold_years = getattr(
+                self.analytics_panel, "threshold_age_years", tk.StringVar(value="2")
+            ).get()
+            date_field = (
+                "last_modified"
+                if age_type == "old_files_modification"
+                else "creation_time"
+            )
             query = f"""
             SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
                    COALESCE(r.security_classification_cached, 'none') AS classif,
@@ -257,15 +290,23 @@ class AnalyticsDrillDownViewer:
             WHERE (f.status IS NULL OR f.status != 'error') AND date(f.{date_field}) < date('now', '-{threshold_years} years')
             ORDER BY f.{date_field} ASC
             """
-            self._load_filtered_files(modal, query, (), f"Fichiers anciens ({age_type})")
+            self._load_filtered_files(
+                modal, query, (), f"Fichiers anciens ({age_type})"
+            )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show age analysis modal: %s", e)
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Analyse d'âge.\nErreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur", f"Impossible d'ouvrir la vue Analyse d'âge.\nErreur: {str(e)}"
+            )
 
-    def show_size_files_modal(self, size_type: str, title: str, click_info: Dict[str, Any]) -> None:
+    def show_size_files_modal(
+        self, size_type: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
         try:
             modal = self._create_base_modal(title, f"📊 Analyse de taille: {size_type}")
-            threshold_mb = getattr(self.analytics_panel, "threshold_size_mb", tk.StringVar(value="100")).get()
+            threshold_mb = getattr(
+                self.analytics_panel, "threshold_size_mb", tk.StringVar(value="100")
+            ).get()
             threshold_bytes = int(threshold_mb) * 1024 * 1024
             query = """
             SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -276,10 +317,15 @@ class AnalyticsDrillDownViewer:
             WHERE (f.status IS NULL OR f.status != 'error') AND f.file_size > ?
             ORDER BY f.file_size DESC
             """
-            self._load_filtered_files(modal, query, (threshold_bytes,), f"Gros fichiers (>{threshold_mb}MB)")
+            self._load_filtered_files(
+                modal, query, (threshold_bytes,), f"Gros fichiers (>{threshold_mb}MB)"
+            )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show size analysis modal: %s", e)
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Analyse de taille.\nErreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur",
+                f"Impossible d'ouvrir la vue Analyse de taille.\nErreur: {str(e)}",
+            )
 
     def show_duplicates_modal(self, title: str, click_info: Dict[str, Any]) -> None:
         try:
@@ -308,11 +354,17 @@ class AnalyticsDrillDownViewer:
             self._load_filtered_files(modal, query, (), "Groupes de fichiers dupliqués")
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show duplicates modal: %s", e)
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Doublons.\nErreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur", f"Impossible d'ouvrir la vue Doublons.\nErreur: {str(e)}"
+            )
 
-    def show_temporal_files_modal(self, temporal_type: str, title: str, click_info: Dict[str, Any]) -> None:
+    def show_temporal_files_modal(
+        self, temporal_type: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
         try:
-            modal = self._create_base_modal(title, f"📅 Analyse temporelle: {temporal_type}")
+            modal = self._create_base_modal(
+                title, f"📅 Analyse temporelle: {temporal_type}"
+            )
             if temporal_type == "modification":
                 date_field = "last_modified"
                 order = "f.last_modified DESC"
@@ -328,10 +380,117 @@ class AnalyticsDrillDownViewer:
             WHERE (f.status IS NULL OR f.status != 'error') AND f.{date_field} IS NOT NULL
             ORDER BY {order}
             """
-            self._load_filtered_files(modal, query, (), f"Analyse temporelle ({temporal_type})")
+            self._load_filtered_files(
+                modal, query, (), f"Analyse temporelle ({temporal_type})"
+            )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show temporal modal: %s", e)
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la vue Temporelle.\nErreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur", f"Impossible d'ouvrir la vue Temporelle.\nErreur: {str(e)}"
+            )
+
+    def show_combined_files_modal(
+        self, title: str, subtitle: str, click_info: Dict[str, Any]
+    ) -> None:
+        """Show modal for combined classification + RGPD/Legal files."""
+        try:
+            modal = self._create_base_modal(title, subtitle)
+
+            category = click_info.get("category", "")
+            if category == "c3_rgpd":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND COALESCE(r.security_classification_cached, 'none') = 'C3'
+                AND COALESCE(r.rgpd_risk_cached, 'none') = 'critical'
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+            elif category == "c3_legal":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.legal_type_cached, 'none') AS legal
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND COALESCE(r.security_classification_cached, 'none') = 'C3'
+                AND COALESCE(r.legal_type_cached, 'none') IN ('nda', 'litigation')
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+            elif category == "c3_total":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND COALESCE(r.security_classification_cached, 'none') = 'C3'
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+            else:
+                return
+
+            self._load_filtered_files(modal, query, params, subtitle)
+
+        except Exception as e:
+            logger.error("Failed to show combined modal: %s", e)
+            messagebox.showerror(
+                "Erreur", f"Impossible d'ouvrir la vue combinée.\nErreur: {str(e)}"
+            )
+
+    def show_duplicates_detailed_modal(
+        self, level: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
+        """Show modal for specific duplicate level (1x, 2x, 3x, etc.)."""
+        try:
+            modal = self._create_base_modal(title, f"🔄 Fichiers dupliqués - {level}")
+
+            if level == "7x+":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       (SELECT COUNT(*) FROM fichiers f2 
+                        WHERE f2.file_size = f.file_size AND f2.name = f.name 
+                        AND (f2.status IS NULL OR f2.status != 'error')) as copy_count
+                FROM fichiers f
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND (SELECT COUNT(*) FROM fichiers f2 
+                     WHERE f2.file_size = f.file_size AND f2.name = f.name 
+                     AND (f2.status IS NULL OR f2.status != 'error')) >= 7
+                ORDER BY copy_count DESC, f.file_size DESC
+                """
+                params = ()
+            else:
+                target_count = int(level.replace("x", ""))
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       (SELECT COUNT(*) FROM fichiers f2 
+                        WHERE f2.file_size = f.file_size AND f2.name = f.name 
+                        AND (f2.status IS NULL OR f2.status != 'error')) as copy_count
+                FROM fichiers f
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND (SELECT COUNT(*) FROM fichiers f2 
+                     WHERE f2.file_size = f.file_size AND f2.name = f.name 
+                     AND (f2.status IS NULL OR f2.status != 'error')) = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (target_count,)
+
+            self._load_filtered_files(modal, query, params, f"Groupes avec {level}")
+
+        except Exception as e:
+            logger.error("Failed to show duplicates detailed modal: %s", e)
+            messagebox.showerror(
+                "Erreur",
+                f"Impossible d'ouvrir la vue doublons détaillée.\nErreur: {str(e)}",
+            )
 
 
 class AnalyticsTabClickManager:
@@ -348,9 +507,11 @@ class AnalyticsTabClickManager:
 
         self._add_security_click_handlers()
         self._add_rgpd_click_handlers()
+        self._add_security_focus_click_handlers()
         self._add_age_analysis_click_handlers()
         self._add_size_analysis_click_handlers()
         self._add_duplicates_click_handlers()
+        self._add_duplicates_detailed_click_handlers()
         self._add_temporal_click_handlers()
 
     # ------------------------------------------------------------------
@@ -370,11 +531,15 @@ class AnalyticsTabClickManager:
             )
             label.bind(
                 "<Enter>",
-                lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline")),
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 10, "underline")
+                ),
             )
             label.bind(
                 "<Leave>",
-                lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal")),
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 10, "normal")
+                ),
             )
 
     def _add_rgpd_click_handlers(self) -> None:
@@ -387,14 +552,102 @@ class AnalyticsTabClickManager:
                 "risk_level": level,
                 "category": "rgpd_risk",
             }
+            label.bind("<Button-1>", lambda e, lbl=label: self._handle_rgpd_click(lbl))
             label.bind(
-                "<Button-1>", lambda e, lbl=label: self._handle_rgpd_click(lbl)
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 10, "underline")
+                ),
             )
             label.bind(
-                "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 10, "normal")
+                ),
+            )
+
+    def _add_security_focus_click_handlers(self) -> None:
+        """Add click handlers for security focus labels."""
+        if not hasattr(self.analytics_panel, "security_focus_labels"):
+            return
+
+        labels = self.analytics_panel.security_focus_labels
+
+        if "C3 Total" in labels:
+            label = labels["C3 Total"]
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "security_focus",
+                "category": "c3_total",
+                "classification": "C3",
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_security_focus_click(lbl),
             )
             label.bind(
-                "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 11, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 11, "normal")
+                ),
+            )
+
+        if "C3 + RGPD" in labels:
+            label = labels["C3 + RGPD"]
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "security_focus",
+                "category": "c3_rgpd",
+                "classification": "C3",
+                "rgpd_risk": "critical",
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_security_focus_click(lbl),
+            )
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 11, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 11, "normal")
+                ),
+            )
+
+        if "C3 + Legal" in labels:
+            label = labels["C3 + Legal"]
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "security_focus",
+                "category": "c3_legal",
+                "classification": "C3",
+                "legal_types": ["nda", "litigation"],
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_security_focus_click(lbl),
+            )
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 11, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 11, "normal")
+                ),
             )
 
     def _add_age_analysis_click_handlers(self) -> None:
@@ -412,10 +665,16 @@ class AnalyticsTabClickManager:
                         "<Button-1>", lambda e, lbl=label: self._handle_age_click(lbl)
                     )
                     label.bind(
-                        "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+                        "<Enter>",
+                        lambda e, l=label: l.configure(
+                            foreground="blue", font=("Arial", 10, "underline")
+                        ),
                     )
                     label.bind(
-                        "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                        "<Leave>",
+                        lambda e, l=label: l.configure(
+                            foreground="black", font=("Arial", 10, "normal")
+                        ),
                     )
 
     def _add_size_analysis_click_handlers(self) -> None:
@@ -428,14 +687,18 @@ class AnalyticsTabClickManager:
                 "size_type": level,
                 "category": "size_analysis",
             }
+            label.bind("<Button-1>", lambda e, lbl=label: self._handle_size_click(lbl))
             label.bind(
-                "<Button-1>", lambda e, lbl=label: self._handle_size_click(lbl)
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 10, "underline")
+                ),
             )
             label.bind(
-                "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
-            )
-            label.bind(
-                "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 10, "normal")
+                ),
             )
 
     def _add_duplicates_click_handlers(self) -> None:
@@ -447,10 +710,44 @@ class AnalyticsTabClickManager:
                 "<Button-1>", lambda e, lbl=label: self._handle_duplicates_click(lbl)
             )
             label.bind(
-                "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 10, "underline")
+                ),
             )
             label.bind(
-                "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 10, "normal")
+                ),
+            )
+
+    def _add_duplicates_detailed_click_handlers(self) -> None:
+        """Add click handlers for detailed duplicates labels."""
+        if not hasattr(self.analytics_panel, "duplicates_detailed_labels"):
+            return
+        for level, label in self.analytics_panel.duplicates_detailed_labels.items():
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "duplicates_detailed",
+                "level": level,
+                "category": f"duplicates_{level}",
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_duplicates_detailed_click(lbl),
+            )
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 11, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 11, "normal")
+                ),
             )
 
     def _add_temporal_click_handlers(self) -> None:
@@ -465,13 +762,20 @@ class AnalyticsTabClickManager:
                         "category": key,
                     }
                     label.bind(
-                        "<Button-1>", lambda e, lbl=label: self._handle_temporal_click(lbl)
+                        "<Button-1>",
+                        lambda e, lbl=label: self._handle_temporal_click(lbl),
                     )
                     label.bind(
-                        "<Enter>", lambda e, l=label: l.configure(foreground="blue", font=("Arial", 10, "underline"))
+                        "<Enter>",
+                        lambda e, l=label: l.configure(
+                            foreground="blue", font=("Arial", 10, "underline")
+                        ),
                     )
                     label.bind(
-                        "<Leave>", lambda e, l=label: l.configure(foreground="black", font=("Arial", 10, "normal"))
+                        "<Leave>",
+                        lambda e, l=label: l.configure(
+                            foreground="black", font=("Arial", 10, "normal")
+                        ),
                     )
 
     # ------------------------------------------------------------------
@@ -511,12 +815,38 @@ class AnalyticsTabClickManager:
             "Fichiers Dupliqués - Groupes", click_info
         )
 
+    def _handle_duplicates_detailed_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        level = click_info.get("level", "")
+        self.drill_down_viewer.show_duplicates_detailed_modal(
+            level, f"Fichiers Dupliqués - {level}", click_info
+        )
+
     def _handle_temporal_click(self, label_widget) -> None:
         click_info = getattr(label_widget, "click_info", {})
         temporal_type = click_info.get("temporal_type", "")
         self.drill_down_viewer.show_temporal_files_modal(
-            temporal_type, f"Fichiers - Analyse Temporelle ({temporal_type})", click_info
+            temporal_type,
+            f"Fichiers - Analyse Temporelle ({temporal_type})",
+            click_info,
         )
+
+    def _handle_security_focus_click(self, label_widget) -> None:
+        click_info = getattr(label_widget, "click_info", {})
+        category = click_info.get("category", "")
+
+        if category == "c3_total":
+            self.drill_down_viewer.show_classification_files_modal(
+                "C3", "Fichiers Classification C3 (Critique)", click_info
+            )
+        elif category == "c3_rgpd":
+            self.drill_down_viewer.show_combined_files_modal(
+                "C3 + RGPD Critique", "Fichiers C3 avec RGPD Critique", click_info
+            )
+        elif category == "c3_legal":
+            self.drill_down_viewer.show_combined_files_modal(
+                "C3 + Legal", "Fichiers C3 avec Contenu Juridique", click_info
+            )
 
 
 class UserDrillDownViewer:
@@ -533,7 +863,7 @@ class UserDrillDownViewer:
 
         try:
             drill_window = tk.Toplevel(self.analytics_panel.parent)
-            drill_window.title(f"\U0001F4C1 Fichiers de {username} - {category}")
+            drill_window.title(f"\U0001f4c1 Fichiers de {username} - {category}")
             drill_window.geometry("1400x800")
             drill_window.transient(self.analytics_panel.parent)
             drill_window.lift()
@@ -590,7 +920,7 @@ class UserDrillDownViewer:
 
             ttk.Button(
                 filter_frame,
-                text="\U0001F501 Appliquer Filtres",
+                text="\U0001f501 Appliquer Filtres",
                 command=lambda: self._refresh_drill_down_data(
                     drill_window,
                     username,
@@ -615,13 +945,13 @@ class UserDrillDownViewer:
             controls_frame.pack(fill="x", padx=10, pady=5)
             ttk.Button(
                 controls_frame,
-                text="\U0001F4CA Export Utilisateur",
+                text="\U0001f4ca Export Utilisateur",
                 command=lambda: self._export_user_data(username, category),
             ).pack(side="left", padx=5)
 
             ttk.Button(
                 controls_frame,
-                text="\U0001F4E7 Ouvrir Dossier",
+                text="\U0001f4e7 Ouvrir Dossier",
                 command=lambda: self._open_user_directory(username),
             ).pack(side="left", padx=5)
 
@@ -863,9 +1193,7 @@ class AnalyticsPanel:
                 self._db_manager_error = False
                 logger.info("Analytics Panel: Database manager validated successfully")
             except Exception as e:
-                logger.error(
-                    "Database manager validation failed during init: %s", e
-                )
+                logger.error("Database manager validation failed during init: %s", e)
                 self._db_manager_error = True
                 self.db_manager = None
 
@@ -1119,7 +1447,9 @@ class AnalyticsPanel:
         if self.db_manager is None:
             logger.error("Database manager is None - attempting recovery")
             try:
-                if hasattr(self.parent, "master") and hasattr(self.parent.master, "db_manager"):
+                if hasattr(self.parent, "master") and hasattr(
+                    self.parent.master, "db_manager"
+                ):
                     potential_db_manager = self.parent.master.db_manager
                     if potential_db_manager is not None:
                         logger.info("Found database manager in parent window")
@@ -1156,19 +1486,25 @@ class AnalyticsPanel:
                 )
                 tables = [row[0] for row in cursor.fetchall()]
 
-                if 'fichiers' not in tables:
+                if "fichiers" not in tables:
                     logger.error("Table 'fichiers' not found in database")
                     return False
 
                 cursor.execute("PRAGMA table_info(fichiers)")
                 columns = [row[1] for row in cursor.fetchall()]
-                required_columns = ['id', 'path', 'file_size', 'status', 'owner']
-                missing_columns = [col for col in required_columns if col not in columns]
+                required_columns = ["id", "path", "file_size", "status", "owner"]
+                missing_columns = [
+                    col for col in required_columns if col not in columns
+                ]
                 if missing_columns:
-                    logger.error(f"Missing required columns in fichiers table: {missing_columns}")
+                    logger.error(
+                        f"Missing required columns in fichiers table: {missing_columns}"
+                    )
                     return False
 
-                cursor.execute("SELECT COUNT(*) FROM fichiers WHERE (status IS NULL OR status != 'error')")
+                cursor.execute(
+                    "SELECT COUNT(*) FROM fichiers WHERE (status IS NULL OR status != 'error')"
+                )
                 file_count = cursor.fetchone()[0]
                 logger.info(f"Found {file_count} available files in database")
 
@@ -1234,10 +1570,14 @@ class AnalyticsPanel:
         """Attempt to retry database connection with correct syntax."""
         try:
             main_window = self.parent
-            while main_window and not hasattr(main_window, 'db_manager'):
-                main_window = getattr(main_window, 'master', None)
+            while main_window and not hasattr(main_window, "db_manager"):
+                main_window = getattr(main_window, "master", None)
 
-            if main_window and hasattr(main_window, 'db_manager') and main_window.db_manager:
+            if (
+                main_window
+                and hasattr(main_window, "db_manager")
+                and main_window.db_manager
+            ):
                 self.db_manager = main_window.db_manager
                 logger.info("Database manager recovered from main window")
 
@@ -1305,7 +1645,9 @@ class AnalyticsPanel:
         log_window.geometry("700x500")
 
         text_widget = tk.Text(log_window, wrap=tk.WORD, font=("Courier", 10))
-        scrollbar = ttk.Scrollbar(log_window, orient="vertical", command=text_widget.yview)
+        scrollbar = ttk.Scrollbar(
+            log_window, orient="vertical", command=text_widget.yview
+        )
         text_widget.configure(yscrollcommand=scrollbar.set)
 
         log_content = (
@@ -1349,7 +1691,7 @@ class AnalyticsPanel:
         ttk.Label(
             error_frame,
             text="Le schéma de la base de données est incompatible.\n"
-                 "Veuillez lancer une analyse complète pour mettre à jour la base.",
+            "Veuillez lancer une analyse complète pour mettre à jour la base.",
             font=("Arial", 12),
         ).pack(pady=5)
 
@@ -1368,8 +1710,7 @@ class AnalyticsPanel:
             error_frame,
             text=(
                 "Impossible d'initialiser le dashboard Analytics.\n"
-                f"Erreur: {str(error)[:100]}"
-                + ("..." if len(str(error)) > 100 else "")
+                f"Erreur: {str(error)[:100]}" + ("..." if len(str(error)) > 100 else "")
             ),
             font=("Arial", 12),
         ).pack(pady=5)
@@ -1454,14 +1795,31 @@ class AnalyticsPanel:
         return sum(len(fam) for fam in families.values() if len(fam) == copies)
 
     def _parse_time(self, value: str | None) -> datetime:
-        if not value:
-            return datetime.max
-        for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        if not value or value == "None":
+            return datetime.min
+
+        try:
+            formats = [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d",
+                "%d/%m/%Y %H:%M:%S",
+                "%d/%m/%Y",
+            ]
+            for fmt in formats:
+                try:
+                    return datetime.strptime(str(value), fmt)
+                except ValueError:
+                    continue
+
             try:
-                return datetime.strptime(value.strip(), fmt)
-            except ValueError:
-                continue
-        return datetime.max
+                return datetime.fromtimestamp(float(value))
+            except (ValueError, TypeError):
+                logger.warning(f"Could not parse time: {value}")
+                return datetime.min
+        except Exception as e:
+            logger.warning(f"Time parsing error for '{value}': {e}")
+            return datetime.min
 
     def _get_old_files_creation(
         self, files: List[FileInfo], threshold_days: int
@@ -1717,7 +2075,7 @@ class AnalyticsPanel:
             "file_sizes": {"small": 0, "medium": 0, "large": 0, "very_large": 0},
             "duplicates": {"families": 0, "duplicate_files": 0, "wasted_space": 0},
             "temporal": {"last_week": 0, "last_month": 0, "last_year": 0},
-            "users": []
+            "users": [],
         }
 
     # ------------------------------------------------------------------
@@ -2054,7 +2412,9 @@ class AnalyticsPanel:
                 class_map = self._get_classification_map_safe()
                 rgpd_map = self._get_rgpd_map_safe()
                 metrics.update(
-                    self._calculate_classification_metrics_safe(files, class_map, rgpd_map)
+                    self._calculate_classification_metrics_safe(
+                        files, class_map, rgpd_map
+                    )
                 )
             except Exception as e:
                 logger.warning("Classification metrics failed, using fallback: %s", e)
@@ -2062,18 +2422,31 @@ class AnalyticsPanel:
 
             try:
                 metrics["duplicates"] = self._calculate_duplicates_safe(files)
+                metrics["duplicates"]["detailed"] = (
+                    self._calculate_duplicates_detailed_metrics(files)
+                )
             except Exception as e:
                 logger.warning("Duplicate analysis failed: %s", e)
-                metrics["duplicates"] = {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0}
+                metrics["duplicates"] = {
+                    "files_2x": 0,
+                    "total_groups": 0,
+                    "wasted_space_gb": 0,
+                    "detailed": {},
+                }
 
             try:
                 metrics["duplicates_analysis"] = self._calculate_duplicates_analysis()
             except Exception as e:
                 logger.warning("Detailed duplicate analysis failed: %s", e)
-                metrics["duplicates_analysis"] = {"duplicates_by_count": {}, "total_duplicates": 0}
+                metrics["duplicates_analysis"] = {
+                    "duplicates_by_count": {},
+                    "total_duplicates": 0,
+                }
 
             try:
-                metrics["top_users"] = self._calculate_top_users_metrics_safe(files, class_map, rgpd_map)
+                metrics["top_users"] = self._calculate_top_users_metrics_safe(
+                    files, class_map, rgpd_map
+                )
             except Exception as e:
                 logger.warning("Top users analysis failed: %s", e)
                 metrics["top_users"] = {}
@@ -2081,14 +2454,18 @@ class AnalyticsPanel:
             try:
                 temporal = self._calculate_temporal_analysis()
                 metrics["temporal_creation"] = temporal.get("creation_dates", {})
-                metrics["temporal_modification"] = temporal.get("modification_dates", {})
+                metrics["temporal_modification"] = temporal.get(
+                    "modification_dates", {}
+                )
             except Exception as e:
                 logger.warning("Temporal analysis failed: %s", e)
                 metrics["temporal_creation"] = {}
                 metrics["temporal_modification"] = {}
 
             try:
-                metrics["file_size_analysis"] = self._calculate_size_analysis().get("size_distribution", {})
+                metrics["file_size_analysis"] = self._calculate_size_analysis().get(
+                    "size_distribution", {}
+                )
             except Exception as e:
                 logger.warning("Size analysis failed: %s", e)
                 metrics["file_size_analysis"] = {}
@@ -2188,11 +2565,13 @@ class AnalyticsPanel:
                 cursor="hand2",
             )
             label.pack(pady=2, anchor="w", padx=20)
-            label.bind("<Button-1>", lambda e, ft=finance_type: self._show_finance_details(ft))
+            label.bind(
+                "<Button-1>", lambda e, ft=finance_type: self._show_finance_details(ft)
+            )
             label.bind("<Enter>", lambda e, l=label: l.configure(foreground="blue"))
             label.bind("<Leave>", lambda e, l=label: l.configure(foreground="black"))
 
-            if not hasattr(self, 'finance_labels'):
+            if not hasattr(self, "finance_labels"):
                 self.finance_labels = {}
             self.finance_labels[finance_type] = label
 
@@ -2223,7 +2602,9 @@ class AnalyticsPanel:
 
         except Exception as e:
             logger.error(f"Error showing finance details: {e}")
-            messagebox.showerror("Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent)
+            messagebox.showerror(
+                "Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent
+            )
 
     def _build_legal_tab(self, parent_frame: ttk.Frame) -> None:
         title_label = ttk.Label(
@@ -2257,7 +2638,9 @@ class AnalyticsPanel:
                 cursor="hand2",
             )
             label.pack(pady=2, anchor="w", padx=20)
-            label.bind("<Button-1>", lambda e, lt=legal_type: self._show_legal_details(lt))
+            label.bind(
+                "<Button-1>", lambda e, lt=legal_type: self._show_legal_details(lt)
+            )
             label.bind("<Enter>", lambda e, l=label: l.configure(foreground="blue"))
             label.bind("<Leave>", lambda e, l=label: l.configure(foreground="black"))
 
@@ -2290,7 +2673,9 @@ class AnalyticsPanel:
 
         except Exception as e:
             logger.error(f"Error showing legal details: {e}")
-            messagebox.showerror("Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent)
+            messagebox.showerror(
+                "Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent
+            )
 
     def _show_detailed_modal(self, title: str, data: List, headers: List[str]) -> None:
         """Show detailed data in a modal window."""
@@ -2326,7 +2711,11 @@ class AnalyticsPanel:
             v_scroll.pack(side="right", fill="y")
             h_scroll.pack(side="bottom", fill="x")
 
-            ttk.Button(modal, text="Fermer", command=lambda: [modal.grab_release(), modal.destroy()]).pack(pady=5)
+            ttk.Button(
+                modal,
+                text="Fermer",
+                command=lambda: [modal.grab_release(), modal.destroy()],
+            ).pack(pady=5)
 
         except Exception as e:
             logger.error(f"Error showing detailed modal: {e}")
@@ -2512,51 +2901,23 @@ class AnalyticsPanel:
         return temporal_metrics
 
     def _calculate_temporal_analysis(self) -> Dict[str, Any]:
-        """Fix temporal analysis - currently returning zeros."""
+        """Calculate temporal analysis with proper data retrieval."""
         try:
-            if not self._ensure_database_manager():
+            files = self._connect_files()
+            if not files:
                 return {"creation_dates": {}, "modification_dates": {}}
 
-            with self.db_manager._connect().get() as conn:
-                cursor = conn.cursor()
-
-                creation_query = """
-                SELECT 
-                    strftime('%Y-%m', f.creation_date) as period,
-                    COUNT(*) as count
-                FROM fichiers f
-                WHERE (f.status IS NULL OR f.status != 'error') 
-                    AND f.creation_date IS NOT NULL
-                GROUP BY strftime('%Y-%m', f.creation_date)
-                ORDER BY period DESC
-                LIMIT 12
-                """
-                cursor.execute(creation_query)
-                creation_data = dict(cursor.fetchall())
-
-                modification_query = """
-                SELECT 
-                    strftime('%Y-%m', f.last_modified) as period,
-                    COUNT(*) as count
-                FROM fichiers f
-                WHERE (f.status IS NULL OR f.status != 'error') 
-                    AND f.last_modified IS NOT NULL
-                GROUP BY strftime('%Y-%m', f.last_modified)
-                ORDER BY period DESC
-                LIMIT 12
-                """
-                cursor.execute(modification_query)
-                modification_data = dict(cursor.fetchall())
+            modification_data = self._calculate_temporal_metrics(files, "modification")
+            creation_data = self._calculate_temporal_metrics(files, "creation")
 
             logger.info(
-                f"Temporal analysis: {len(creation_data)} creation periods, {len(modification_data)} modification periods"
+                f"Temporal analysis calculated: modification={len(modification_data)}, creation={len(creation_data)}"
             )
 
             return {
                 "creation_dates": creation_data,
                 "modification_dates": modification_data,
             }
-
         except Exception as e:
             logger.error(f"Error calculating temporal analysis: {e}")
             return {"creation_dates": {}, "modification_dates": {}}
@@ -2640,41 +3001,46 @@ class AnalyticsPanel:
         return size_metrics
 
     def _calculate_size_analysis(self) -> Dict[str, Any]:
-        """Fix size analysis - currently returning zeros."""
+        """Calculate file size distribution analysis."""
         try:
-            if not self._ensure_database_manager():
+            files = self._connect_files()
+            if not files:
                 return {"size_distribution": {}}
 
-            with self.db_manager._connect().get() as conn:
-                cursor = conn.cursor()
-                query = """
-                SELECT 
-                    CASE 
-                        WHEN f.file_size < 1024 THEN '< 1 KB'
-                        WHEN f.file_size < 1024*1024 THEN '1 KB - 1 MB'
-                        WHEN f.file_size < 1024*1024*10 THEN '1 MB - 10 MB'
-                        WHEN f.file_size < 1024*1024*100 THEN '10 MB - 100 MB'
-                        WHEN f.file_size < 1024*1024*1024 THEN '100 MB - 1 GB'
-                        ELSE '> 1 GB'
-                    END as size_category,
-                    COUNT(*) as count,
-                    SUM(f.file_size) as total_size
-                FROM fichiers f
-                WHERE (f.status IS NULL OR f.status != 'error')
-                    AND f.file_size IS NOT NULL
-                GROUP BY size_category
-                ORDER BY MIN(f.file_size)
-                """
-                cursor.execute(query)
-                size_data = {}
-                for category, count, total_size in cursor.fetchall():
-                    size_data[category] = {
-                        "count": count,
-                        "total_size": total_size,
-                    }
+            total_files = len(files)
+            size_distribution: Dict[str, Dict[str, Any]] = {}
 
-            logger.info(f"Size analysis: {len(size_data)} size categories")
-            return {"size_distribution": size_data}
+            size_ranges = [
+                ("<50MB", 0, 50 * 1024 * 1024),
+                ("50-100MB", 50 * 1024 * 1024, 100 * 1024 * 1024),
+                ("100-150MB", 100 * 1024 * 1024, 150 * 1024 * 1024),
+                ("150-200MB", 150 * 1024 * 1024, 200 * 1024 * 1024),
+                ("200-300MB", 200 * 1024 * 1024, 300 * 1024 * 1024),
+                ("300-500MB", 300 * 1024 * 1024, 500 * 1024 * 1024),
+                (">500MB", 500 * 1024 * 1024, float("inf")),
+            ]
+
+            for range_label, min_size, max_size in size_ranges:
+                if max_size == float("inf"):
+                    matching_files = [f for f in files if f.file_size >= min_size]
+                else:
+                    matching_files = [
+                        f for f in files if min_size <= f.file_size < max_size
+                    ]
+
+                total_size = sum(f.file_size for f in matching_files)
+                size_distribution[range_label] = {
+                    "count": len(matching_files),
+                    "percentage": (
+                        round(len(matching_files) / total_files * 100, 1)
+                        if total_files
+                        else 0
+                    ),
+                    "size_gb": total_size / (1024**3),
+                }
+
+            logger.info(f"Size analysis calculated for {total_files} files")
+            return {"size_distribution": size_distribution}
 
         except Exception as e:
             logger.error(f"Error calculating size analysis: {e}")
@@ -2800,7 +3166,7 @@ class AnalyticsPanel:
         header_frame.pack(fill="x", padx=10, pady=5)
         ttk.Label(
             header_frame,
-            text="\U0001F3C6 TOP 10 UTILISATEURS - INTELLIGENCE BUSINESS",
+            text="\U0001f3c6 TOP 10 UTILISATEURS - INTELLIGENCE BUSINESS",
             font=("Arial", 12, "bold"),
         ).pack(anchor="w")
 
@@ -2834,9 +3200,9 @@ class AnalyticsPanel:
         self.top_users_canvas.bind("<MouseWheel>", _on_mousewheel)
 
         top_categories = [
-            ("\U0001F5C2️ Top 10 Gros Fichiers", "top_large_files"),
-            ("\U0001F512 Top 10 Fichiers C3", "top_c3_files"),
-            ("\u26A0\uFE0F Top 10 RGPD Critical", "top_rgpd_critical"),
+            ("\U0001f5c2️ Top 10 Gros Fichiers", "top_large_files"),
+            ("\U0001f512 Top 10 Fichiers C3", "top_c3_files"),
+            ("\u26a0\ufe0f Top 10 RGPD Critical", "top_rgpd_critical"),
         ]
 
         for i, (title, key) in enumerate(top_categories):
@@ -3524,7 +3890,9 @@ class AnalyticsPanel:
                     file_count = cursor.fetchone()[0]
                     logger.info("Database accessible: %d files found", file_count)
             except Exception as db_e:
-                logger.error("Database connection failed during error handling: %s", db_e)
+                logger.error(
+                    "Database connection failed during error handling: %s", db_e
+                )
 
         try:
             error_detail = str(error)[:200] + ("..." if len(str(error)) > 200 else "")
@@ -3556,7 +3924,9 @@ class AnalyticsPanel:
                     self._attempt_recovery_calculation()
 
         except Exception as dialog_error:
-            logger.critical("Critical error: cannot display error dialog: %s", dialog_error)
+            logger.critical(
+                "Critical error: cannot display error dialog: %s", dialog_error
+            )
             if hasattr(self, "progress_label"):
                 self.progress_label.config(text=f"❌ Erreur critique: {operation}")
 
@@ -3642,7 +4012,7 @@ class AnalyticsPanel:
                 for key, value in metrics.items():
                     if key in self.stats_labels:
                         if "size" in key and isinstance(value, (int, float)):
-                            size_gb = value / (1024 ** 3)
+                            size_gb = value / (1024**3)
                             display_value = f"{size_gb:.1f} GB"
                         else:
                             display_value = str(value)
