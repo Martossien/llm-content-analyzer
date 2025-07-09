@@ -4988,48 +4988,60 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             self.analytics_window.focus_set()
             return
 
-        # Validate availability of the database manager
         if not hasattr(self, "db_manager") or self.db_manager is None:
             logger.error("Database manager not available for analytics dashboard")
             messagebox.showerror(
                 "Erreur Database",
                 "Gestionnaire de base de données non disponible.\n"
-                "Veuillez relancer l'application ou contacter le support technique.",
+                "Veuillez charger un fichier CSV d'abord.",
                 parent=self.root,
             )
             return
 
-        # Test basic connectivity to the database
         try:
             with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM fichiers")
                 file_count = cursor.fetchone()[0]
-                logger.info("Database validation successful: %d files found", file_count)
-        except Exception as exc:
-            logger.error("Database connection test failed: %s", exc)
+                if file_count == 0:
+                    messagebox.showwarning(
+                        "Aucune Donnée",
+                        "Aucun fichier trouvé dans la base de données.\n"
+                        "Veuillez analyser des fichiers d'abord.",
+                        parent=self.root,
+                    )
+                    return
+        except Exception as e:
+            logger.error(f"Database connectivity test failed: {e}")
             messagebox.showerror(
-                "Erreur Database",
-                "Impossible de se connecter à la base de données.\n"
-                f"Erreur: {str(exc)}\n\n"
-                "Veuillez vérifier que l'analyse a été lancée au moins une fois.",
+                "Erreur de Connexion",
+                f"Impossible de se connecter à la base de données:\n{e}\n\n"
+                "Veuillez recharger votre fichier CSV.",
                 parent=self.root,
             )
             return
 
-        # Create modal window only after successful validation
-        self.analytics_window = self.create_dialog_window(
-            self.root,
-            "📊 Analytics Dashboard",
-            "1200x800",
-        )
-
-        analytics_frame = ttk.Frame(self.analytics_window)
-        analytics_frame.pack(fill="both", expand=True)
+        self.analytics_window = tk.Toplevel(self.root)
+        self.analytics_window.title("📊 Analytics Dashboard - Business Intelligence")
+        self.analytics_window.geometry("1400x900")
+        self.analytics_window.transient(self.root)
+        self.analytics_window.grab_set()
 
         from .analytics_panel import AnalyticsPanel
+        analytics_panel = AnalyticsPanel(self.analytics_window, self.db_manager)
+        self.analytics_panel = analytics_panel
 
-        self.analytics_panel = AnalyticsPanel(analytics_frame, self.db_manager)
+        def on_analytics_close():
+            try:
+                self.analytics_window.grab_release()
+                self.analytics_window.destroy()
+                if hasattr(self, 'analytics_window'):
+                    delattr(self, 'analytics_window')
+                logger.info("Analytics window closed properly")
+            except Exception as e:
+                logger.warning(f"Error during analytics window cleanup: {e}")
+
+        self.analytics_window.protocol("WM_DELETE_WINDOW", on_analytics_close)
 
         controls = ttk.Frame(self.analytics_window)
         controls.pack(fill="x", padx=5, pady=5)

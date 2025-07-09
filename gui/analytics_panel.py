@@ -2067,10 +2067,31 @@ class AnalyticsPanel:
                 metrics["duplicates"] = {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0}
 
             try:
+                metrics["duplicates_analysis"] = self._calculate_duplicates_analysis()
+            except Exception as e:
+                logger.warning("Detailed duplicate analysis failed: %s", e)
+                metrics["duplicates_analysis"] = {"duplicates_by_count": {}, "total_duplicates": 0}
+
+            try:
                 metrics["top_users"] = self._calculate_top_users_metrics_safe(files, class_map, rgpd_map)
             except Exception as e:
                 logger.warning("Top users analysis failed: %s", e)
                 metrics["top_users"] = {}
+
+            try:
+                temporal = self._calculate_temporal_analysis()
+                metrics["temporal_creation"] = temporal.get("creation_dates", {})
+                metrics["temporal_modification"] = temporal.get("modification_dates", {})
+            except Exception as e:
+                logger.warning("Temporal analysis failed: %s", e)
+                metrics["temporal_creation"] = {}
+                metrics["temporal_modification"] = {}
+
+            try:
+                metrics["file_size_analysis"] = self._calculate_size_analysis().get("size_distribution", {})
+            except Exception as e:
+                logger.warning("Size analysis failed: %s", e)
+                metrics["file_size_analysis"] = {}
 
             self._metrics_cache["business_metrics"] = metrics
             self._cache_timestamp = time.time()
@@ -2147,21 +2168,62 @@ class AnalyticsPanel:
         help_label.pack(pady=5)
         container = ttk.LabelFrame(parent_frame, text="TYPES FINANCIERS")
         container.pack(fill="both", expand=True, padx=10, pady=10)
+
         self.finance_labels = {}
-        for doc_type in [
-            "none",
-            "invoice",
-            "contract",
-            "budget",
-            "accounting",
-            "payment",
-            "Autres",
-        ]:
+        finance_data = {
+            "none": 0,
+            "invoice": 0,
+            "contract": 0,
+            "budget": 0,
+            "accounting": 0,
+            "payment": 0,
+            "Autres": 0,
+        }
+
+        for i, (finance_type, count) in enumerate(finance_data.items()):
             label = ttk.Label(
-                container, text=f"{doc_type}: 0% | 0 fichiers | 0GB", font=("Arial", 12)
+                container,
+                text=f"{finance_type}: {count} fichiers",
+                font=("Arial", 11),
+                cursor="hand2",
             )
-            label.pack(anchor="w", pady=3, padx=10)
-            self.finance_labels[doc_type] = label
+            label.pack(pady=2, anchor="w", padx=20)
+            label.bind("<Button-1>", lambda e, ft=finance_type: self._show_finance_details(ft))
+            label.bind("<Enter>", lambda e, l=label: l.configure(foreground="blue"))
+            label.bind("<Leave>", lambda e, l=label: l.configure(foreground="black"))
+
+            if not hasattr(self, 'finance_labels'):
+                self.finance_labels = {}
+            self.finance_labels[finance_type] = label
+
+    def _show_finance_details(self, finance_type: str) -> None:
+        """Show detailed view for finance type."""
+        try:
+            if not self._ensure_database_manager():
+                return
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                query = """
+                SELECT f.name, f.path, f.file_size, f.owner, r.finance_type_cached
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE r.finance_type_cached = ? AND (f.status IS NULL OR f.status != 'error')
+                ORDER BY f.file_size DESC
+                LIMIT 100
+                """
+                cursor.execute(query, (finance_type,))
+                files = cursor.fetchall()
+
+            self._show_detailed_modal(
+                f"Finance: {finance_type}",
+                files,
+                ["Nom", "Chemin", "Taille", "Propriétaire", "Type Finance"],
+            )
+
+        except Exception as e:
+            logger.error(f"Error showing finance details: {e}")
+            messagebox.showerror("Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent)
 
     def _build_legal_tab(self, parent_frame: ttk.Frame) -> None:
         title_label = ttk.Label(
@@ -2174,22 +2236,100 @@ class AnalyticsPanel:
         help_label.pack(pady=5)
         container = ttk.LabelFrame(parent_frame, text="TYPES LÉGAUX")
         container.pack(fill="both", expand=True, padx=10, pady=10)
+
         self.legal_labels = {}
-        for doc_type in [
-            "none",
-            "employment",
-            "lease",
-            "sale",
-            "nda",
-            "compliance",
-            "litigation",
-            "Autres",
-        ]:
+        legal_data = {
+            "none": 0,
+            "employment": 0,
+            "lease": 0,
+            "sale": 0,
+            "nda": 0,
+            "compliance": 0,
+            "litigation": 0,
+            "Autres": 0,
+        }
+
+        for i, (legal_type, count) in enumerate(legal_data.items()):
             label = ttk.Label(
-                container, text=f"{doc_type}: 0% | 0 fichiers | 0GB", font=("Arial", 12)
+                container,
+                text=f"{legal_type}: {count} fichiers",
+                font=("Arial", 11),
+                cursor="hand2",
             )
-            label.pack(anchor="w", pady=3, padx=10)
-            self.legal_labels[doc_type] = label
+            label.pack(pady=2, anchor="w", padx=20)
+            label.bind("<Button-1>", lambda e, lt=legal_type: self._show_legal_details(lt))
+            label.bind("<Enter>", lambda e, l=label: l.configure(foreground="blue"))
+            label.bind("<Leave>", lambda e, l=label: l.configure(foreground="black"))
+
+            self.legal_labels[legal_type] = label
+
+    def _show_legal_details(self, legal_type: str) -> None:
+        """Show detailed view for legal type."""
+        try:
+            if not self._ensure_database_manager():
+                return
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                query = """
+                SELECT f.name, f.path, f.file_size, f.owner, r.legal_type_cached
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE r.legal_type_cached = ? AND (f.status IS NULL OR f.status != 'error')
+                ORDER BY f.file_size DESC
+                LIMIT 100
+                """
+                cursor.execute(query, (legal_type,))
+                files = cursor.fetchall()
+
+            self._show_detailed_modal(
+                f"Legal: {legal_type}",
+                files,
+                ["Nom", "Chemin", "Taille", "Propriétaire", "Type Legal"],
+            )
+
+        except Exception as e:
+            logger.error(f"Error showing legal details: {e}")
+            messagebox.showerror("Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent)
+
+    def _show_detailed_modal(self, title: str, data: List, headers: List[str]) -> None:
+        """Show detailed data in a modal window."""
+        try:
+            modal = tk.Toplevel(self.parent)
+            modal.title(title)
+            modal.geometry("800x600")
+            modal.transient(self.parent)
+            modal.grab_set()
+
+            frame = ttk.Frame(modal)
+            frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+            tree = ttk.Treeview(frame, columns=headers, show="headings", height=20)
+            for header in headers:
+                tree.heading(header, text=header)
+                tree.column(header, width=120, anchor="w")
+
+            for row in data:
+                formatted = []
+                for i, value in enumerate(row):
+                    if headers[i] == "Taille" and isinstance(value, (int, float)):
+                        formatted.append(self._format_file_size(value))
+                    else:
+                        formatted.append(str(value) if value is not None else "N/A")
+                tree.insert("", "end", values=formatted)
+
+            v_scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+            h_scroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+
+            tree.pack(side="left", fill="both", expand=True)
+            v_scroll.pack(side="right", fill="y")
+            h_scroll.pack(side="bottom", fill="x")
+
+            ttk.Button(modal, text="Fermer", command=lambda: [modal.grab_release(), modal.destroy()]).pack(pady=5)
+
+        except Exception as e:
+            logger.error(f"Error showing detailed modal: {e}")
 
     # ------------------------------------------------------------------
     # Extended analytics tabs
@@ -2371,6 +2511,56 @@ class AnalyticsPanel:
 
         return temporal_metrics
 
+    def _calculate_temporal_analysis(self) -> Dict[str, Any]:
+        """Fix temporal analysis - currently returning zeros."""
+        try:
+            if not self._ensure_database_manager():
+                return {"creation_dates": {}, "modification_dates": {}}
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+
+                creation_query = """
+                SELECT 
+                    strftime('%Y-%m', f.creation_date) as period,
+                    COUNT(*) as count
+                FROM fichiers f
+                WHERE (f.status IS NULL OR f.status != 'error') 
+                    AND f.creation_date IS NOT NULL
+                GROUP BY strftime('%Y-%m', f.creation_date)
+                ORDER BY period DESC
+                LIMIT 12
+                """
+                cursor.execute(creation_query)
+                creation_data = dict(cursor.fetchall())
+
+                modification_query = """
+                SELECT 
+                    strftime('%Y-%m', f.last_modified) as period,
+                    COUNT(*) as count
+                FROM fichiers f
+                WHERE (f.status IS NULL OR f.status != 'error') 
+                    AND f.last_modified IS NOT NULL
+                GROUP BY strftime('%Y-%m', f.last_modified)
+                ORDER BY period DESC
+                LIMIT 12
+                """
+                cursor.execute(modification_query)
+                modification_data = dict(cursor.fetchall())
+
+            logger.info(
+                f"Temporal analysis: {len(creation_data)} creation periods, {len(modification_data)} modification periods"
+            )
+
+            return {
+                "creation_dates": creation_data,
+                "modification_dates": modification_data,
+            }
+
+        except Exception as e:
+            logger.error(f"Error calculating temporal analysis: {e}")
+            return {"creation_dates": {}, "modification_dates": {}}
+
     def _build_file_size_analysis_tab(self, parent_frame: ttk.Frame) -> None:
         container = ttk.LabelFrame(
             parent_frame, text="RÉPARTITION PAR TAILLE DE FICHIER"
@@ -2449,6 +2639,47 @@ class AnalyticsPanel:
 
         return size_metrics
 
+    def _calculate_size_analysis(self) -> Dict[str, Any]:
+        """Fix size analysis - currently returning zeros."""
+        try:
+            if not self._ensure_database_manager():
+                return {"size_distribution": {}}
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                query = """
+                SELECT 
+                    CASE 
+                        WHEN f.file_size < 1024 THEN '< 1 KB'
+                        WHEN f.file_size < 1024*1024 THEN '1 KB - 1 MB'
+                        WHEN f.file_size < 1024*1024*10 THEN '1 MB - 10 MB'
+                        WHEN f.file_size < 1024*1024*100 THEN '10 MB - 100 MB'
+                        WHEN f.file_size < 1024*1024*1024 THEN '100 MB - 1 GB'
+                        ELSE '> 1 GB'
+                    END as size_category,
+                    COUNT(*) as count,
+                    SUM(f.file_size) as total_size
+                FROM fichiers f
+                WHERE (f.status IS NULL OR f.status != 'error')
+                    AND f.file_size IS NOT NULL
+                GROUP BY size_category
+                ORDER BY MIN(f.file_size)
+                """
+                cursor.execute(query)
+                size_data = {}
+                for category, count, total_size in cursor.fetchall():
+                    size_data[category] = {
+                        "count": count,
+                        "total_size": total_size,
+                    }
+
+            logger.info(f"Size analysis: {len(size_data)} size categories")
+            return {"size_distribution": size_data}
+
+        except Exception as e:
+            logger.error(f"Error calculating size analysis: {e}")
+            return {"size_distribution": {}}
+
     def _calculate_global_metrics(self, files: List[FileInfo]) -> Dict[str, Any]:
         """Compute global metrics for total files and size."""
         total_files = len(files)
@@ -2515,6 +2746,45 @@ class AnalyticsPanel:
         except Exception as e:
             logger.warning("Duplicate statistics failed: %s", e)
             return {"files_2x": 0, "total_groups": 0, "wasted_space_gb": 0}
+
+    def _calculate_duplicates_analysis(self) -> Dict[str, Any]:
+        """Fix duplicate analysis - currently returning zeros."""
+        try:
+            if not self._ensure_database_manager():
+                return {"duplicates_by_count": {}, "total_duplicates": 0}
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                query = """
+                SELECT f.name, COUNT(*) as duplicate_count
+                FROM fichiers f
+                WHERE (f.status IS NULL OR f.status != 'error')
+                GROUP BY f.name
+                HAVING COUNT(*) > 1
+                ORDER BY duplicate_count DESC
+                """
+                cursor.execute(query)
+                duplicates = cursor.fetchall()
+
+            duplicates_by_count: Dict[int, List[str]] = {}
+            total_duplicates = 0
+            for name, count in duplicates:
+                duplicates_by_count.setdefault(count, []).append(name)
+                total_duplicates += count - 1
+
+            logger.info(
+                f"Found {len(duplicates)} duplicate groups, {total_duplicates} excess files"
+            )
+
+            return {
+                "duplicates_by_count": duplicates_by_count,
+                "total_duplicates": total_duplicates,
+                "duplicate_groups": len(duplicates),
+            }
+
+        except Exception as e:
+            logger.error(f"Error calculating duplicates: {e}")
+            return {"duplicates_by_count": {}, "total_duplicates": 0}
 
     def _get_fallback_classification_metrics(self) -> Dict[str, Any]:
         """Fallback structure when classification metrics fail."""
