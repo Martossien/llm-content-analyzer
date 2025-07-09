@@ -206,51 +206,76 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         try:
             if not self.db_manager:
-                logger.error("No database manager for filtered files")
+                logger.warning("No database manager available for filtered files")
+                messagebox.showwarning(
+                    "Base de données",
+                    "Gestionnaire de base de données non disponible",
+                    parent=modal,
+                )
                 return
 
             progress_label = ttk.Label(modal, text="🔄 Chargement des données...")
             progress_label.pack(pady=10)
+            modal.update_idletasks()
 
-            with self.db_manager._connect().get() as conn:
+            with self.db_manager._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
+
+                logger.info(f"Query executed: {query[:100]}... with params: {params}")
+                logger.info(f"Results found: {len(rows)} rows")
+
+                if not rows:
+                    progress_label.config(text="ℹ️ Aucun fichier trouvé pour ces critères")
+                    logger.warning(f"No results for query: {query[:100]}... params: {params}")
+                    return
 
                 for item in self.drill_tree.get_children():
                     self.drill_tree.delete(item)
 
                 for row in rows:
-                    file_id, name, path, size, modified, owner = row[:6]
-                    classification = row[6] if len(row) > 6 else "none"
-                    rgpd = row[7] if len(row) > 7 else "none"
-                    size_str = self._format_file_size(size) if size else "0B"
-                    modified_str = modified[:10] if modified else "Unknown"
-                    file_type = self._get_file_type(name)
-                    owner_str = owner or "Unknown"
-                    self.drill_tree.insert(
-                        "",
-                        "end",
-                        values=(
-                            name or "Unknown",
-                            path or "Unknown",
-                            size_str,
-                            modified_str,
-                            classification,
-                            rgpd,
-                            file_type,
-                            owner_str,
-                        ),
-                    )
+                    try:
+                        if len(row) >= 6:
+                            file_id, name, path, size, modified, owner = row[:6]
+                            classif = row[6] if len(row) > 6 else "N/A"
+                            rgpd = row[7] if len(row) > 7 else "N/A"
 
-                progress_label.config(
-                    text=f"✅ {len(rows)} fichiers chargés - {category}"
-                )
-                modal.after(2000, progress_label.destroy)
-        except Exception as e:  # pragma: no cover - UI
-            logger.error("Failed to load filtered files: %s", e)
+                            size_str = self._format_file_size(size or 0)
+                            modified_str = modified[:19] if modified else "N/A"
+                            name_str = (str(name)[:50] + "..." if len(str(name)) > 50 else str(name))
+                            path_str = (str(path)[:80] + "..." if len(str(path)) > 80 else str(path))
+                            owner_str = str(owner or "Inconnu")
+
+                            self.drill_tree.insert(
+                                "",
+                                "end",
+                                values=(
+                                    name_str,
+                                    path_str,
+                                    size_str,
+                                    modified_str,
+                                    classif,
+                                    rgpd,
+                                    "",
+                                    owner_str,
+                                ),
+                            )
+                    except Exception as row_error:
+                        logger.warning(f"Erreur traitement ligne: {row_error}")
+                        continue
+
+                progress_label.config(text=f"✅ {len(rows)} fichiers chargés - {category}")
+                modal.after(3000, progress_label.destroy)
+        except Exception as e:
+            logger.error(f"Critical error in _load_filtered_files: {e}")
             if "progress_label" in locals():
                 progress_label.config(text=f"❌ Erreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur Chargement",
+                f"Erreur lors du chargement des fichiers:\n{str(e)}",
+                parent=modal,
+            )
 
     # ------------------------------------------------------------------
     # Public modal entry points
@@ -268,7 +293,9 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') AND r.security_classification_cached = ?
+            WHERE (f.status IS NULL OR f.status != 'error') 
+            AND f.file_size > 0
+            AND r.security_classification_cached = ?
             ORDER BY f.file_size DESC
             """
             self._load_filtered_files(
@@ -292,7 +319,9 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') AND r.rgpd_risk_cached = ?
+            WHERE (f.status IS NULL OR f.status != 'error')
+            AND f.file_size > 0
+            AND r.rgpd_risk_cached = ?
             ORDER BY f.file_size DESC
             """
             self._load_filtered_files(modal, query, (risk_level,), f"RGPD {risk_level}")
@@ -321,7 +350,9 @@ class AnalyticsDrillDownViewer:
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') AND date(f.{date_field}) < date('now', '-{threshold_years} years')
+            WHERE (f.status IS NULL OR f.status != 'error')
+            AND f.file_size > 0
+            AND date(f.{date_field}) < date('now', '-{threshold_years} years')
             ORDER BY f.{date_field} ASC
             """
             self._load_filtered_files(
@@ -526,6 +557,64 @@ class AnalyticsDrillDownViewer:
                 f"Impossible d'ouvrir la vue doublons détaillée.\nErreur: {str(e)}",
             )
 
+    def show_finance_modal(
+        self, finance_type: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
+        """Affiche modal pour types financiers avec pattern sécurisé uniforme."""
+        try:
+            modal = self._create_base_modal(title, f"💰 Types Financiers: {finance_type}")
+
+            query = """
+            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                   COALESCE(r.finance_type_cached, 'none') AS finance_type
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE (f.status IS NULL OR f.status != 'error') 
+            AND r.finance_type_cached = ?
+            ORDER BY f.file_size DESC
+            """
+
+            self._load_filtered_files(modal, query, (finance_type,), f"Finance {finance_type}")
+
+        except Exception as e:
+            logger.error(f"Failed to show finance modal: {e}")
+            messagebox.showerror(
+                "Erreur",
+                f"Impossible d'ouvrir la vue Financière.\nErreur: {str(e)}",
+                parent=self.analytics_panel.parent,
+            )
+
+    def show_legal_modal(
+        self, legal_type: str, title: str, click_info: Dict[str, Any]
+    ) -> None:
+        """Affiche modal pour types légaux avec pattern sécurisé uniforme."""
+        try:
+            modal = self._create_base_modal(title, f"⚖️ Types Légaux: {legal_type}")
+
+            query = """
+            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                   COALESCE(r.security_classification_cached, 'none') AS classif,
+                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                   COALESCE(r.legal_type_cached, 'none') AS legal_type
+            FROM fichiers f
+            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+            WHERE (f.status IS NULL OR f.status != 'error') 
+            AND r.legal_type_cached = ?
+            ORDER BY f.file_size DESC
+            """
+
+            self._load_filtered_files(modal, query, (legal_type,), f"Legal {legal_type}")
+
+        except Exception as e:
+            logger.error(f"Failed to show legal modal: {e}")
+            messagebox.showerror(
+                "Erreur",
+                f"Impossible d'ouvrir la vue Légale.\nErreur: {str(e)}",
+                parent=self.analytics_panel.parent,
+            )
+
 
 class AnalyticsTabClickManager:
     """Manage click functionality across all Analytics tabs."""
@@ -547,6 +636,8 @@ class AnalyticsTabClickManager:
         self._add_duplicates_click_handlers()
         self._add_duplicates_detailed_click_handlers()
         self._add_temporal_click_handlers()
+        self._add_finance_click_handlers()
+        self._add_legal_click_handlers()
 
     # ------------------------------------------------------------------
     def _add_security_click_handlers(self) -> None:
@@ -812,9 +903,84 @@ class AnalyticsTabClickManager:
                         ),
                     )
 
+    def _add_finance_click_handlers(self) -> None:
+        """Ajouter gestionnaires de clic pour types financiers."""
+        if not hasattr(self.analytics_panel, "finance_labels"):
+            return
+
+        for finance_type, label in self.analytics_panel.finance_labels.items():
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "finance",
+                "finance_type": finance_type,
+                "category": "finance_type",
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_finance_click(lbl),
+            )
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 10, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 10, "normal")
+                ),
+            )
+
+    def _add_legal_click_handlers(self) -> None:
+        """Ajouter gestionnaires de clic pour types légaux."""
+        if not hasattr(self.analytics_panel, "legal_labels"):
+            return
+
+        for legal_type, label in self.analytics_panel.legal_labels.items():
+            label.configure(cursor="hand2")
+            label.click_info = {
+                "type": "legal",
+                "legal_type": legal_type,
+                "category": "legal_type",
+            }
+            label.bind(
+                "<Button-1>",
+                lambda e, lbl=label: self._handle_legal_click(lbl),
+            )
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 10, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 10, "normal")
+                ),
+            )
+
     # ------------------------------------------------------------------
     # Click handlers
     # ------------------------------------------------------------------
+
+    def _debug_click_info(self, label_widget, handler_name: str) -> None:
+        """Méthode de debug pour validation click_info."""
+        try:
+            click_info = getattr(label_widget, "click_info", {})
+            text = label_widget.cget("text") if hasattr(label_widget, "cget") else "N/A"
+
+            logger.info(f"DEBUG {handler_name}:")
+            logger.info(f"  - Label text: {text}")
+            logger.info(f"  - Click info: {click_info}")
+
+            if not click_info:
+                logger.error(f"  - ERROR: click_info manquant pour {handler_name}")
+
+        except Exception as e:
+            logger.error(f"Debug error in {handler_name}: {e}")
+
     def _handle_classification_click(self, label_widget) -> None:
         click_info = getattr(label_widget, "click_info", {})
         classification = click_info.get("classification", "")
@@ -841,6 +1007,22 @@ class AnalyticsTabClickManager:
         size_type = click_info.get("size_type", "")
         self.drill_down_viewer.show_size_files_modal(
             size_type, f"Fichiers - Analyse de Taille ({size_type})", click_info
+        )
+
+    def _handle_finance_click(self, label_widget) -> None:
+        self._debug_click_info(label_widget, "_handle_finance_click")
+        click_info = getattr(label_widget, "click_info", {})
+        finance_type = click_info.get("finance_type", "")
+        self.drill_down_viewer.show_finance_modal(
+            finance_type, f"Types Financiers - {finance_type}", click_info
+        )
+
+    def _handle_legal_click(self, label_widget) -> None:
+        self._debug_click_info(label_widget, "_handle_legal_click")
+        click_info = getattr(label_widget, "click_info", {})
+        legal_type = click_info.get("legal_type", "")
+        self.drill_down_viewer.show_legal_modal(
+            legal_type, f"Types Légaux - {legal_type}", click_info
         )
 
     def _handle_duplicates_click(self, label_widget) -> None:
@@ -2475,49 +2657,13 @@ class AnalyticsPanel:
                 container,
                 text=f"{finance_type}: {count} fichiers",
                 font=("Arial", 11),
-                cursor="hand2",
             )
             label.pack(pady=2, anchor="w", padx=20)
-            label.bind(
-                "<Button-1>", lambda e, ft=finance_type: self._show_finance_details(ft)
-            )
-            label.bind("<Enter>", lambda e, l=label: l.configure(foreground="blue"))
-            label.bind("<Leave>", lambda e, l=label: l.configure(foreground="black"))
 
             if not hasattr(self, "finance_labels"):
                 self.finance_labels = {}
             self.finance_labels[finance_type] = label
 
-    def _show_finance_details(self, finance_type: str) -> None:
-        """Show detailed view for finance type."""
-        try:
-            if not self._ensure_database_manager():
-                return
-
-            with self.db_manager._connect().get() as conn:
-                cursor = conn.cursor()
-                query = """
-                SELECT f.name, f.path, f.file_size, f.owner, r.finance_type_cached
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE r.finance_type_cached = ? AND (f.status IS NULL OR f.status != 'error')
-                ORDER BY f.file_size DESC
-                LIMIT 100
-                """
-                cursor.execute(query, (finance_type,))
-                files = cursor.fetchall()
-
-            self._show_detailed_modal(
-                f"Finance: {finance_type}",
-                files,
-                ["Nom", "Chemin", "Taille", "Propriétaire", "Type Finance"],
-            )
-
-        except Exception as e:
-            logger.error(f"Error showing finance details: {e}")
-            messagebox.showerror(
-                "Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent
-            )
 
     def _build_legal_tab(self, parent_frame: ttk.Frame) -> None:
         title_label = ttk.Label(
@@ -2548,47 +2694,11 @@ class AnalyticsPanel:
                 container,
                 text=f"{legal_type}: {count} fichiers",
                 font=("Arial", 11),
-                cursor="hand2",
             )
             label.pack(pady=2, anchor="w", padx=20)
-            label.bind(
-                "<Button-1>", lambda e, lt=legal_type: self._show_legal_details(lt)
-            )
-            label.bind("<Enter>", lambda e, l=label: l.configure(foreground="blue"))
-            label.bind("<Leave>", lambda e, l=label: l.configure(foreground="black"))
 
             self.legal_labels[legal_type] = label
 
-    def _show_legal_details(self, legal_type: str) -> None:
-        """Show detailed view for legal type."""
-        try:
-            if not self._ensure_database_manager():
-                return
-
-            with self.db_manager._connect().get() as conn:
-                cursor = conn.cursor()
-                query = """
-                SELECT f.name, f.path, f.file_size, f.owner, r.legal_type_cached
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE r.legal_type_cached = ? AND (f.status IS NULL OR f.status != 'error')
-                ORDER BY f.file_size DESC
-                LIMIT 100
-                """
-                cursor.execute(query, (legal_type,))
-                files = cursor.fetchall()
-
-            self._show_detailed_modal(
-                f"Legal: {legal_type}",
-                files,
-                ["Nom", "Chemin", "Taille", "Propriétaire", "Type Legal"],
-            )
-
-        except Exception as e:
-            logger.error(f"Error showing legal details: {e}")
-            messagebox.showerror(
-                "Erreur", f"Erreur lors de l'affichage: {e}", parent=self.parent
-            )
 
     def _show_detailed_modal(self, title: str, data: List, headers: List[str]) -> None:
         """Show detailed data in a modal window."""
