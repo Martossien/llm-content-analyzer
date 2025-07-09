@@ -30,37 +30,71 @@ class AnalyticsDrillDownViewer:
     # Base modal creation helpers
     # ------------------------------------------------------------------
     def _create_base_modal(self, title: str, subtitle: str) -> tk.Toplevel:
-        """Create base modal window with common elements."""
+        """Creation de modale sécurisée avec gestion d'erreur robuste."""
 
-        modal = tk.Toplevel(self.analytics_panel.parent)
-        modal.title(title)
-        modal.geometry("1200x700")
-        modal.transient(self.analytics_panel.parent)
-        modal.grab_set()
+        try:
+            if (
+                not hasattr(self.analytics_panel, "parent")
+                or not self.analytics_panel.parent
+            ):
+                logger.error("Parent window non disponible pour la modale")
+                raise ValueError("Parent window indisponible")
 
-        modal.update_idletasks()
-        x = (modal.winfo_screenwidth() // 2) - (1200 // 2)
-        y = (modal.winfo_screenheight() // 2) - (700 // 2)
-        modal.geometry(f"1200x700+{x}+{y}")
+            modal = tk.Toplevel(self.analytics_panel.parent)
+            modal.title(title)
+            modal.withdraw()
+            modal.geometry("1200x700")
+            modal.transient(self.analytics_panel.parent)
+            modal.resizable(True, True)
 
-        header_frame = ttk.Frame(modal)
-        header_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Label(header_frame, text=subtitle, font=("Arial", 11, "bold")).pack(
-            anchor="w"
-        )
+            header_frame = ttk.Frame(modal)
+            header_frame.pack(fill="x", padx=10, pady=5)
+            ttk.Label(header_frame, text=subtitle, font=("Arial", 11, "bold")).pack(
+                anchor="w"
+            )
 
-        self._build_drill_down_treeview(modal)
+            self._build_drill_down_treeview(modal)
 
-        buttons_frame = ttk.Frame(modal)
-        buttons_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Button(
-            buttons_frame, text="📊 Export Liste", command=self._export_filtered_files
-        ).pack(side="left", padx=5)
-        ttk.Button(buttons_frame, text="❌ Fermer", command=modal.destroy).pack(
-            side="right", padx=5
-        )
+            buttons_frame = ttk.Frame(modal)
+            buttons_frame.pack(fill="x", padx=10, pady=5)
+            ttk.Button(
+                buttons_frame,
+                text="📊 Export Liste",
+                command=self._export_filtered_files,
+            ).pack(side="left", padx=5)
+            ttk.Button(buttons_frame, text="❌ Fermer", command=modal.destroy).pack(
+                side="right", padx=5
+            )
 
-        return modal
+            modal.update_idletasks()
+            x = (modal.winfo_screenwidth() // 2) - (1200 // 2)
+            y = (modal.winfo_screenheight() // 2) - (700 // 2)
+            modal.geometry(f"1200x700+{x}+{y}")
+
+            modal.deiconify()
+            modal.lift()
+            modal.focus_set()
+
+            def apply_modal_grab():
+                try:
+                    if modal.winfo_exists():
+                        modal.grab_set()
+                        logger.info(f"Modal grab applied successfully for: {title}")
+                except Exception as e:
+                    logger.warning(f"Modal grab application failed: {e}")
+
+            modal.after(50, apply_modal_grab)
+            logger.info(f"Modal window created successfully: {title}")
+            return modal
+
+        except Exception as e:
+            logger.error(f"Critical failure creating modal window: {e}")
+            messagebox.showerror(
+                "Erreur Critique",
+                f"Impossible de creer la fenetre d'analyse.\nErreur: {str(e)}",
+                parent=self.analytics_panel.parent,
+            )
+            raise
 
     def _build_drill_down_treeview(self, parent_window: tk.Toplevel) -> None:
         """Build treeview for file exploration."""
@@ -850,7 +884,7 @@ class AnalyticsTabClickManager:
 
 
 class UserDrillDownViewer:
-    """Interactive drill-down system for user file exploration."""
+    """Système de drill-down interactif pour l'exploration des fichiers utilisateur."""
 
     def __init__(self, parent_analytics_panel: "AnalyticsPanel") -> None:
         self.analytics_panel = parent_analytics_panel
@@ -859,314 +893,191 @@ class UserDrillDownViewer:
     def show_user_files_modal(
         self, username: str, category: str, user_data: Dict[str, Any]
     ) -> None:
-        """Show modal window with user's files filtered by category."""
-
+        """Affiche fenêtre modale avec fichiers utilisateur filtrés par catégorie."""
         try:
             drill_window = tk.Toplevel(self.analytics_panel.parent)
-            drill_window.title(f"\U0001f4c1 Fichiers de {username} - {category}")
+            drill_window.title(f"📁 Fichiers de {username} - {category}")
+            drill_window.withdraw()
             drill_window.geometry("1400x800")
             drill_window.transient(self.analytics_panel.parent)
-            drill_window.lift()
-            drill_window.focus_set()
-            drill_window.grab_set()
-            try:
-                drill_window.iconbitmap("icon.ico")
-            except Exception:
-                pass
 
             header_frame = ttk.Frame(drill_window)
             header_frame.pack(fill="x", padx=10, pady=5)
 
-            ttk.Label(
+            title_label = ttk.Label(
                 header_frame,
                 text=f"Analyse détaillée: {username}",
                 font=("Arial", 16, "bold"),
-            ).pack(anchor="w")
-
-            summary = (
-                f"Catégorie: {category} | {user_data.get('count', 0)} fichiers | "
-                f"{user_data.get('total_size', 0) / (1024 ** 3):.1f} GB"
             )
-            ttk.Label(header_frame, text=summary, font=("Arial", 12)).pack(
-                anchor="w", pady=2
+            title_label.pack(anchor="w")
+
+            summary_label = ttk.Label(
+                header_frame,
+                text=f"Catégorie: {category} | {user_data.get('count', 0)} fichiers | {user_data.get('total_size', 0)/(1024**3):.1f} GB",
+                font=("Arial", 12),
+            )
+            summary_label.pack(anchor="w", pady=2)
+
+            tree_frame = ttk.Frame(drill_window)
+            tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+            columns = ("nom", "chemin", "taille", "modifie", "classification", "rgpd")
+            tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
+
+            tree.heading("nom", text="Nom du fichier")
+            tree.heading("chemin", text="Chemin")
+            tree.heading("taille", text="Taille")
+            tree.heading("modifie", text="Modifié")
+            tree.heading("classification", text="Classification")
+            tree.heading("rgpd", text="RGPD")
+
+            tree.column("nom", width=200)
+            tree.column("chemin", width=300)
+            tree.column("taille", width=100)
+            tree.column("modifie", width=150)
+            tree.column("classification", width=100)
+            tree.column("rgpd", width=100)
+
+            v_scrollbar = ttk.Scrollbar(
+                tree_frame, orient="vertical", command=tree.yview
+            )
+            h_scrollbar = ttk.Scrollbar(
+                tree_frame, orient="horizontal", command=tree.xview
+            )
+            tree.configure(
+                yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set
             )
 
-            filter_frame = ttk.Frame(drill_window)
-            filter_frame.pack(fill="x", padx=10, pady=5)
+            tree.pack(side="left", fill="both", expand=True)
+            v_scrollbar.pack(side="right", fill="y")
+            h_scrollbar.pack(side="bottom", fill="x")
 
-            ttk.Label(filter_frame, text="Filtres supplémentaires:").pack(
-                side="left", padx=5
-            )
-
-            file_type_var = tk.StringVar(value="Tous")
-            file_type_combo = ttk.Combobox(
-                filter_frame,
-                textvariable=file_type_var,
-                values=["Tous", "Documents", "Images", "Archives", "Autres"],
-                state="readonly",
-                width=15,
-            )
-            file_type_combo.pack(side="left", padx=5)
-
-            size_filter_var = tk.StringVar(value="Tous")
-            size_combo = ttk.Combobox(
-                filter_frame,
-                textvariable=size_filter_var,
-                values=["Tous", ">100MB", ">500MB", ">1GB"],
-                state="readonly",
-                width=15,
-            )
-            size_combo.pack(side="left", padx=5)
+            buttons_frame = ttk.Frame(drill_window)
+            buttons_frame.pack(fill="x", padx=10, pady=5)
 
             ttk.Button(
-                filter_frame,
-                text="\U0001f501 Appliquer Filtres",
-                command=lambda: self._refresh_drill_down_data(
-                    drill_window,
-                    username,
-                    category,
-                    file_type_var.get(),
-                    size_filter_var.get(),
-                ),
-            ).pack(side="left", padx=10)
-
-            content_frame = ttk.Frame(drill_window)
-            content_frame.pack(fill="both", expand=True, padx=10, pady=5)
-            self._create_drill_down_treeview(content_frame, drill_window)
-
-            status_frame = ttk.Frame(drill_window)
-            status_frame.pack(fill="x", padx=10, pady=5)
-            self.drill_status_label = ttk.Label(
-                status_frame, text="Chargement des données..."
-            )
-            self.drill_status_label.pack(side="left")
-
-            controls_frame = ttk.Frame(drill_window)
-            controls_frame.pack(fill="x", padx=10, pady=5)
-            ttk.Button(
-                controls_frame,
-                text="\U0001f4ca Export Utilisateur",
-                command=lambda: self._export_user_data(username, category),
+                buttons_frame,
+                text="📊 Export",
+                command=lambda: self._export_user_files(username, category),
             ).pack(side="left", padx=5)
-
             ttk.Button(
-                controls_frame,
-                text="\U0001f4e7 Ouvrir Dossier",
-                command=lambda: self._open_user_directory(username),
-            ).pack(side="left", padx=5)
-
-            ttk.Button(
-                controls_frame, text="Fermer", command=drill_window.destroy
+                buttons_frame, text="❌ Fermer", command=drill_window.destroy
             ).pack(side="right", padx=5)
 
-            self._load_drill_down_data(drill_window, username, category)
+            self._load_user_files(tree, username, category)
+
+            drill_window.update_idletasks()
+            x = (drill_window.winfo_screenwidth() // 2) - (700 // 2)
+            y = (drill_window.winfo_screenheight() // 2) - (400 // 2)
+            drill_window.geometry(f"1400x800+{x}+{y}")
+
+            drill_window.deiconify()
+            drill_window.lift()
+            drill_window.focus_set()
+            drill_window.after(50, lambda: drill_window.grab_set())
+
+            logger.info(f"Modal utilisateur créée: {username} - {category}")
 
         except Exception as e:
-            logger.error("Failed to create drill-down window for %s: %s", username, e)
+            logger.error(f"Échec création modal utilisateur: {e}")
             messagebox.showerror(
-                "Erreur", f"Impossible d'ouvrir la vue détaillée.\nErreur: {str(e)}"
+                "Erreur",
+                f"Impossible d'ouvrir la vue utilisateur.\nErreur: {str(e)}",
+                parent=self.analytics_panel.parent,
             )
 
-    # ------------------------------------------------------------------
-    # Drill down helpers
-    # ------------------------------------------------------------------
-    def _create_drill_down_treeview(
-        self, parent_frame: ttk.Frame, window: tk.Toplevel
+    def _load_user_files(
+        self, tree: ttk.Treeview, username: str, category: str
     ) -> None:
-        """Create treeview for drill-down view."""
-
-        tree_frame = ttk.Frame(parent_frame)
-        tree_frame.pack(fill="both", expand=True)
-
-        columns = (
-            "Name",
-            "Path",
-            "Size",
-            "Modified",
-            "Classification",
-            "RGPD",
-            "Type",
-        )
-
-        self.drill_tree = ttk.Treeview(
-            tree_frame, columns=columns, show="headings", height=20
-        )
-
-        column_configs = {
-            "Name": {"width": 200, "text": "Nom"},
-            "Path": {"width": 300, "text": "Chemin"},
-            "Size": {"width": 100, "text": "Taille"},
-            "Modified": {"width": 120, "text": "Modifié"},
-            "Classification": {"width": 100, "text": "Sécurité"},
-            "RGPD": {"width": 80, "text": "RGPD"},
-            "Type": {"width": 80, "text": "Type"},
-        }
-
-        for col, cfg in column_configs.items():
-            self.drill_tree.heading(col, text=cfg["text"])
-            self.drill_tree.column(col, width=cfg["width"])
-
-        v_scrollbar = ttk.Scrollbar(
-            tree_frame, orient="vertical", command=self.drill_tree.yview
-        )
-        h_scrollbar = ttk.Scrollbar(
-            tree_frame, orient="horizontal", command=self.drill_tree.xview
-        )
-        self.drill_tree.configure(
-            yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set
-        )
-
-        self.drill_tree.grid(row=0, column=0, sticky="nsew")
-        v_scrollbar.grid(row=0, column=1, sticky="ns")
-        h_scrollbar.grid(row=1, column=0, sticky="ew")
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-
-        self.drill_tree.bind("<Double-1>", self._on_file_double_click)
-        self.drill_tree.bind("<Button-3>", self._show_file_context_menu)
-
-    def _load_drill_down_data(
-        self, window: tk.Toplevel, username: str, category: str
-    ) -> None:
-        """Load and display user files."""
-
+        """Charge les fichiers utilisateur dans le TreeView."""
         try:
-            for item in self.drill_tree.get_children():
-                self.drill_tree.delete(item)
-
-            self.drill_status_label.config(text="Chargement des fichiers...")
-            window.update_idletasks()
-
-            user_files = self._get_user_files_by_category(username, category)
-
-            if not user_files:
-                self.drill_status_label.config(
-                    text="Aucun fichier trouvé pour cet utilisateur"
-                )
+            if not self.db_manager:
                 return
 
-            for file_data in user_files:
-                try:
-                    file_size = file_data.get("file_size", 0)
-                    size_str = self._format_file_size(file_size)
-
-                    mod_date = file_data.get("last_modified", "")
-                    if mod_date:
-                        try:
-                            mod_date = datetime.fromisoformat(
-                                mod_date.replace("Z", "+00:00")
-                            ).strftime("%Y-%m-%d %H:%M")
-                        except Exception:
-                            pass
-
-                    values = (
-                        file_data.get("name", "Unknown")[:50],
-                        file_data.get("path", "")[:100],
-                        size_str,
-                        mod_date,
-                        file_data.get("security_classification_cached", "N/A"),
-                        file_data.get("rgpd_risk_cached", "N/A"),
-                        file_data.get("extension", "").upper(),
-                    )
-
-                    item_id = self.drill_tree.insert("", "end", values=values)
-                    self.drill_tree.set(
-                        item_id, "file_data", str(file_data.get("id", ""))
-                    )
-                except Exception as e:  # pragma: no cover - display issues
-                    logger.warning("Failed to add file to drill-down view: %s", e)
-                    continue
-
-            file_count = len(user_files)
-            total_size = sum(f.get("file_size", 0) for f in user_files)
-            size_gb = total_size / (1024**3)
-            self.drill_status_label.config(
-                text=f"Affichage: {file_count} fichiers | {size_gb:.2f} GB total"
-            )
-
-        except Exception as e:
-            logger.error("Failed to load drill-down data for %s: %s", username, e)
-            self.drill_status_label.config(text="Erreur lors du chargement des données")
-
-    def _refresh_drill_down_data(
-        self,
-        window: tk.Toplevel,
-        username: str,
-        category: str,
-        file_type: str,
-        size_filter: str,
-    ) -> None:
-        """Refresh drill-down data with extra filters (placeholder)."""
-
-        self._load_drill_down_data(window, username, category)
-
-    def _export_user_data(self, username: str, category: str) -> None:
-        """Placeholder for exporting user data."""
-        logger.info("Export user data for %s category %s", username, category)
-
-    def _open_user_directory(self, username: str) -> None:
-        """Placeholder for opening the user's directory."""
-        logger.info("Open directory for user %s", username)
-
-    def _get_user_files_by_category(
-        self, username: str, category: str
-    ) -> List[Dict[str, Any]]:
-        """Query user files filtered by category."""
-
-        if not self.db_manager:
-            return []
-
-        category_filters = {
-            "top_large_files": "f.file_size > 100 * 1024 * 1024",
-            "top_c3_files": "r.security_classification_cached = 'C3'",
-            "top_rgpd_critical": "r.rgpd_risk_cached = 'critical'",
-        }
-
-        filter_condition = category_filters.get(category, "1=1")
-
-        try:
-            with self.db_manager._connect().get() as conn:
-                cursor = conn.cursor()
-                query = f"""
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.extension,
-                       r.security_classification_cached, r.rgpd_risk_cached,
-                       r.finance_type_cached, r.legal_type_cached, r.document_resume
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.owner = ? AND (f.status IS NULL OR f.status != 'error') AND {filter_condition}
-                ORDER BY f.file_size DESC, f.last_modified DESC
-                LIMIT 1000
+            if category == "Gros fichiers":
+                query = """
+                    SELECT f.name, f.path, f.file_size, f.last_modified,
+                           COALESCE(r.security_classification_cached, 'N/A') as classif,
+                           COALESCE(r.rgpd_risk_cached, 'N/A') as rgpd
+                    FROM fichiers f
+                    LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                    WHERE f.owner = ? AND (f.status IS NULL OR f.status != 'error')
+                    AND f.file_size > 100000000
+                    ORDER BY f.file_size DESC
                 """
+            elif category == "Classification C3":
+                query = """
+                    SELECT f.name, f.path, f.file_size, f.last_modified,
+                           COALESCE(r.security_classification_cached, 'N/A') as classif,
+                           COALESCE(r.rgpd_risk_cached, 'N/A') as rgpd
+                    FROM fichiers f
+                    LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                    WHERE f.owner = ? AND (f.status IS NULL OR f.status != 'error')
+                    AND r.security_classification_cached = 'C3'
+                    ORDER BY f.file_size DESC
+                """
+            elif category == "RGPD Critical":
+                query = """
+                    SELECT f.name, f.path, f.file_size, f.last_modified,
+                           COALESCE(r.security_classification_cached, 'N/A') as classif,
+                           COALESCE(r.rgpd_risk_cached, 'N/A') as rgpd
+                    FROM fichiers f
+                    LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                    WHERE f.owner = ? AND (f.status IS NULL OR f.status != 'error')
+                    AND r.rgpd_risk_cached = 'critical'
+                    ORDER BY f.file_size DESC
+                """
+            else:
+                query = """
+                    SELECT f.name, f.path, f.file_size, f.last_modified,
+                           COALESCE(r.security_classification_cached, 'N/A') as classif,
+                           COALESCE(r.rgpd_risk_cached, 'N/A') as rgpd
+                    FROM fichiers f
+                    LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                    WHERE f.owner = ? AND (f.status IS NULL OR f.status != 'error')
+                    ORDER BY f.file_size DESC
+                """
+
+            with self.db_manager._connect() as conn:
+                cursor = conn.cursor()
                 cursor.execute(query, (username,))
-                columns = [desc[0] for desc in cursor.description]
-                files = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                rows = cursor.fetchall()
+
+                for row in rows:
+                    name, path, size, modified, classif, rgpd = row
+                    size_str = self._format_file_size(size)
+                    modified_str = modified[:19] if modified else "N/A"
+                    tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            name[:50] + "..." if len(name) > 50 else name,
+                            path[:60] + "..." if len(path) > 60 else path,
+                            size_str,
+                            modified_str,
+                            classif,
+                            rgpd,
+                        ),
+                    )
+
                 logger.info(
-                    "Retrieved %d files for user %s in category %s",
-                    len(files),
-                    username,
-                    category,
+                    f"Chargement {len(rows)} fichiers pour utilisateur {username}"
                 )
-                return files
+
         except Exception as e:
-            logger.error(
-                "Failed to query user files for %s, %s: %s", username, category, e
-            )
-            return []
+            logger.error(f"Erreur chargement fichiers utilisateur: {e}")
 
     def _format_file_size(self, size_bytes: int) -> str:
-        """Format file size in human readable format."""
+        """Formate la taille de fichier lisible."""
         for unit in ["B", "KB", "MB", "GB", "TB"]:
             if size_bytes < 1024.0:
                 return f"{size_bytes:.1f} {unit}"
             size_bytes /= 1024.0
         return f"{size_bytes:.1f} PB"
 
-    # Placeholder event handlers
-    def _on_file_double_click(self, event):
-        pass
-
-    def _show_file_context_menu(self, event):
-        pass
+    def _export_user_files(self, username: str, category: str) -> None:
+        """Exporte les fichiers utilisateur."""
+        messagebox.showinfo("Export", f"Export des fichiers de {username} - {category}")
 
 
 class AnalyticsPanel:
@@ -2473,6 +2384,8 @@ class AnalyticsPanel:
             self._metrics_cache["business_metrics"] = metrics
             self._cache_timestamp = time.time()
 
+            self._last_calculated_metrics = metrics
+
             logger.info("Business metrics calculation completed successfully")
             return metrics
 
@@ -2901,26 +2814,162 @@ class AnalyticsPanel:
         return temporal_metrics
 
     def _calculate_temporal_analysis(self) -> Dict[str, Any]:
-        """Calculate temporal analysis with proper data retrieval."""
+        """Calcul d'analyse temporelle avec récupération de données robuste."""
+
         try:
-            files = self._connect_files()
-            if not files:
+            if not self.db_manager:
+                logger.warning("Gestionnaire DB non disponible pour analyse temporelle")
                 return {"creation_dates": {}, "modification_dates": {}}
 
-            modification_data = self._calculate_temporal_metrics(files, "modification")
-            creation_data = self._calculate_temporal_metrics(files, "creation")
+            with self.db_manager._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                SELECT 
+                    last_modified,
+                    creation_time,
+                    file_size,
+                    CASE 
+                        WHEN last_modified IS NULL OR last_modified = '' OR last_modified = '0' THEN 0
+                        ELSE 1 
+                    END as has_valid_modification,
+                    CASE 
+                        WHEN creation_time IS NULL OR creation_time = '' OR creation_time = '0' THEN 0
+                        ELSE 1 
+                    END as has_valid_creation
+                FROM fichiers 
+                WHERE (status IS NULL OR status != 'error')
+                AND file_size > 0
+                """
+                )
+                raw_data = cursor.fetchall()
 
+            logger.info(f"Récupération données temporelles: {len(raw_data)} fichiers")
+
+            if not raw_data:
+                logger.warning("Aucune donnée temporelle trouvée")
+                return {"creation_dates": {}, "modification_dates": {}}
+
+            valid_modifications = sum(1 for row in raw_data if row[3] == 1)
+            valid_creations = sum(1 for row in raw_data if row[4] == 1)
             logger.info(
-                f"Temporal analysis calculated: modification={len(modification_data)}, creation={len(creation_data)}"
+                f"Données valides - Modifications: {valid_modifications}, Créations: {valid_creations}"
             )
+
+            modification_data = self._calculate_temporal_metrics_safe(
+                raw_data, "modification"
+            )
+            creation_data = self._calculate_temporal_metrics_safe(raw_data, "creation")
 
             return {
                 "creation_dates": creation_data,
                 "modification_dates": modification_data,
             }
+
         except Exception as e:
-            logger.error(f"Error calculating temporal analysis: {e}")
+            logger.error(f"Erreur calcul analyse temporelle: {e}")
             return {"creation_dates": {}, "modification_dates": {}}
+
+    def _calculate_temporal_metrics_safe(
+        self, raw_data: List[tuple], mode: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Calcul de métriques temporelles sécurisé avec gestion des dates invalides."""
+        from datetime import datetime, timedelta
+
+        try:
+            now = datetime.now()
+            total_files = len(raw_data)
+            temporal_metrics: Dict[str, Dict[str, Any]] = {}
+
+            date_index = 0 if mode == "modification" else 1
+            valid_index = 3 if mode == "modification" else 4
+
+            valid_files = []
+            for row in raw_data:
+                if row[valid_index] == 1:
+                    try:
+                        date_str = row[date_index]
+                        if date_str and date_str != "0":
+                            parsed_date = self._parse_date_flexible(date_str)
+                            if parsed_date:
+                                valid_files.append((parsed_date, row[2]))
+                    except Exception as e:
+                        logger.debug(f"Échec parsing date {date_str}: {e}")
+                        continue
+
+            logger.info(
+                f"Fichiers avec dates {mode} valides: {len(valid_files)} sur {total_files}"
+            )
+
+            if not valid_files:
+                for years in range(1, 8):
+                    key = f"{years}y" if years < 7 else "7y"
+                    temporal_metrics[key] = {
+                        "count": 0,
+                        "percentage": 0.0,
+                        "size_gb": 0.0,
+                    }
+                return temporal_metrics
+
+            for years in range(1, 8):
+                if years == 7:
+                    cutoff = now - timedelta(days=7 * 365)
+                    matching_files = [(d, s) for d, s in valid_files if d <= cutoff]
+                    key = "7y"
+                else:
+                    cutoff_start = now - timedelta(days=(years + 1) * 365)
+                    cutoff_end = now - timedelta(days=years * 365)
+                    matching_files = [
+                        (d, s) for d, s in valid_files if cutoff_start < d <= cutoff_end
+                    ]
+                    key = f"{years}y"
+
+                total_size = sum(size for _, size in matching_files)
+                temporal_metrics[key] = {
+                    "count": len(matching_files),
+                    "percentage": (
+                        round(len(matching_files) / len(valid_files) * 100, 1)
+                        if valid_files
+                        else 0
+                    ),
+                    "size_gb": total_size / (1024**3),
+                }
+
+            return temporal_metrics
+
+        except Exception as e:
+            logger.error(f"Erreur calcul métriques temporelles {mode}: {e}")
+            return {}
+
+    def _parse_date_flexible(self, date_str: str) -> Optional[datetime]:
+        """Parse date avec multiple formats supportés."""
+        if not date_str or date_str in ["0", "", "NULL", "None"]:
+            return None
+
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%SZ",
+        ]
+
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+
+        try:
+            timestamp = float(date_str)
+            return datetime.fromtimestamp(timestamp)
+        except (ValueError, OSError):
+            pass
+
+        logger.debug(f"Format de date non reconnu: {date_str}")
+        return None
 
     def _build_file_size_analysis_tab(self, parent_frame: ttk.Frame) -> None:
         container = ttk.LabelFrame(
@@ -3160,91 +3209,70 @@ class AnalyticsPanel:
         }
 
     def _build_top_users_tab(self, parent_frame: ttk.Frame) -> None:
-        """Build enhanced top users tab with support for 10 users and scrolling."""
+        """Construit l'onglet Top Utilisateurs avec fonctionnalité de clic."""
 
-        header_frame = ttk.Frame(parent_frame)
-        header_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Label(
-            header_frame,
-            text="\U0001f3c6 TOP 10 UTILISATEURS - INTELLIGENCE BUSINESS",
-            font=("Arial", 12, "bold"),
-        ).pack(anchor="w")
+        notebook = ttk.Notebook(parent_frame)
+        notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
-        canvas_frame = ttk.Frame(parent_frame)
-        canvas_frame.pack(fill="both", expand=True, padx=10, pady=5)
-
-        self.top_users_canvas = tk.Canvas(canvas_frame, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(
-            canvas_frame, orient="vertical", command=self.top_users_canvas.yview
-        )
-        self.top_users_scrollable_frame = ttk.Frame(self.top_users_canvas)
-
-        self.top_users_scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.top_users_canvas.configure(
-                scrollregion=self.top_users_canvas.bbox("all")
-            ),
+        large_files_frame = ttk.Frame(notebook)
+        notebook.add(large_files_frame, text="📊 Gros Fichiers")
+        self._build_top_users_sub_tab(
+            large_files_frame, "top_large_files", "Gros fichiers"
         )
 
-        self.top_users_canvas.create_window(
-            (0, 0), window=self.top_users_scrollable_frame, anchor="nw"
+        c3_frame = ttk.Frame(notebook)
+        notebook.add(c3_frame, text="🔒 Classification C3")
+        self._build_top_users_sub_tab(c3_frame, "top_c3_files", "Classification C3")
+
+        rgpd_frame = ttk.Frame(notebook)
+        notebook.add(rgpd_frame, text="⚠️ RGPD Critical")
+        self._build_top_users_sub_tab(rgpd_frame, "top_rgpd_critical", "RGPD Critical")
+
+    def _build_top_users_sub_tab(
+        self, parent_frame: ttk.Frame, category_key: str, category_name: str
+    ) -> None:
+        """Construit un sous-onglet Top Utilisateurs avec gestion de clic."""
+
+        container = ttk.LabelFrame(
+            parent_frame, text=f"TOP UTILISATEURS - {category_name.upper()}"
         )
-        self.top_users_canvas.configure(yscrollcommand=scrollbar.set)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.top_users_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        labels_key = f"{category_key}_labels"
+        setattr(self, labels_key, {})
+        labels_dict = getattr(self, labels_key)
 
-        def _on_mousewheel(event):
-            self.top_users_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        self.top_users_canvas.bind("<MouseWheel>", _on_mousewheel)
-
-        top_categories = [
-            ("\U0001f5c2️ Top 10 Gros Fichiers", "top_large_files"),
-            ("\U0001f512 Top 10 Fichiers C3", "top_c3_files"),
-            ("\u26a0\ufe0f Top 10 RGPD Critical", "top_rgpd_critical"),
-        ]
-
-        for i, (title, key) in enumerate(top_categories):
-            category_frame = ttk.LabelFrame(self.top_users_scrollable_frame, text=title)
-            category_frame.grid(row=i, column=0, padx=5, pady=5, sticky="ew")
-            self.top_users_scrollable_frame.grid_columnconfigure(0, weight=1)
-            category_frame.grid_columnconfigure(0, weight=1)
-            category_frame.grid_columnconfigure(1, weight=1)
-
-            top_labels: Dict[str, ttk.Label] = {}
-            for rank in range(1, 11):
-                label = ttk.Label(
-                    category_frame,
-                    text=f"#{rank}: -- (0 fichiers, 0GB)",
-                    font=("Arial", 10),
-                    cursor="hand2",
-                )
-                label.grid(
-                    row=(rank - 1) // 2,
-                    column=(rank - 1) % 2,
-                    sticky="ew",
-                    pady=1,
-                    padx=5,
-                )
-                label.category_info = {"category": key, "rank": rank}
-                label.bind(
-                    "<Button-1>", lambda e, lbl=label: self._handle_label_click(lbl)
-                )
-                label.bind(
-                    "<Enter>",
-                    lambda e, l=label: l.configure(
-                        foreground="blue", font=("Arial", 10, "underline")
-                    ),
-                )
-                label.bind(
-                    "<Leave>",
-                    lambda e, l=label: l.configure(
-                        foreground="black", font=("Arial", 10, "normal")
-                    ),
-                )
-                top_labels[f"rank_{rank}"] = label
-            setattr(self, f"{key}_labels", top_labels)
+        for rank in range(1, 11):
+            rank_key = f"rank_{rank}"
+            frame = ttk.Frame(container)
+            frame.pack(fill="x", pady=2, padx=10)
+            label = ttk.Label(
+                frame,
+                text=f"#{rank}: -- (0 fichiers, 0GB)",
+                font=("Arial", 11),
+                cursor="hand2",
+            )
+            label.pack(side="left")
+            label.click_info = {
+                "type": "user_drill_down",
+                "category": category_name,
+                "rank": rank,
+                "category_key": category_key,
+            }
+            label.bind("<Button-1>", lambda e, lbl=label: self._handle_user_click(lbl))
+            label.bind(
+                "<Enter>",
+                lambda e, l=label: l.configure(
+                    foreground="blue", font=("Arial", 11, "underline")
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e, l=label: l.configure(
+                    foreground="black", font=("Arial", 11, "normal")
+                ),
+            )
+            labels_dict[rank_key] = label
 
     def _calculate_top_users_metrics_safe(
         self, files: List[FileInfo], class_map: Dict[int, str], rgpd_map: Dict[int, str]
@@ -3336,6 +3364,55 @@ class AnalyticsPanel:
             "top_c3_files": [],
             "top_rgpd_critical": [],
         }
+
+    def _handle_user_click(self, label_widget) -> None:
+        """Gère le clic sur un label utilisateur."""
+        try:
+            click_info = getattr(label_widget, "click_info", {})
+            rank = click_info.get("rank", 1)
+            category = click_info.get("category", "Unknown")
+            category_key = click_info.get("category_key", "")
+
+            if not hasattr(self, "_last_calculated_metrics"):
+                logger.warning("Aucune métrique calculée disponible")
+                messagebox.showwarning(
+                    "Données manquantes",
+                    "Veuillez d'abord cliquer sur 'Recalculer' pour analyser les données.",
+                    parent=self.parent,
+                )
+                return
+
+            metrics = self._last_calculated_metrics
+            top_users = metrics.get("top_users", {})
+            user_entries = top_users.get(category_key, [])
+
+            if rank > len(user_entries):
+                messagebox.showinfo(
+                    "Aucune donnée",
+                    f"Aucune donnée disponible pour le rang #{rank}",
+                    parent=self.parent,
+                )
+                return
+
+            user_data = user_entries[rank - 1]
+            username = user_data.get("owner", "Utilisateur inconnu")
+
+            logger.info(f"Ouverture drill-down utilisateur: {username} - {category}")
+
+            if not hasattr(self, "user_drill_down_viewer"):
+                self.user_drill_down_viewer = UserDrillDownViewer(self)
+
+            self.user_drill_down_viewer.show_user_files_modal(
+                username, category, user_data
+            )
+
+        except Exception as e:
+            logger.error(f"Échec gestion clic utilisateur: {e}")
+            messagebox.showerror(
+                "Erreur",
+                f"Impossible d'ouvrir la vue détaillée.\nErreur: {str(e)}",
+                parent=self.parent,
+            )
 
     def _handle_label_click(self, label_widget) -> None:
         """Handle click on user label to open drill-down view."""
