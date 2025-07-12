@@ -169,6 +169,8 @@ class MainWindow:
         self.prompt_debouncer = TkinterDebouncer(self.root, delay_ms=prompt_delay)
 
         self.build_ui()
+        # Auto-detect and load existing database
+        self._detect_and_load_existing_database()
         self.load_api_configuration()
         self.load_exclusions()
         self.load_templates()
@@ -197,6 +199,92 @@ No need to run analysis to see your files.
 """
         # messagebox.showinfo("Welcome", welcome_text)
         self.log_action("Application started - CSV auto-import enabled", "INFO")
+
+    def _detect_and_load_existing_database(self) -> None:
+        """Automatically detect and load existing database at application startup."""
+        try:
+            default_db = Path("analysis_results.db")
+            if default_db.exists() and default_db.stat().st_size > 0:
+                logger.info(f"Existing database detected: {default_db}")
+                if self._validate_existing_database(default_db):
+                    from content_analyzer.modules.db_manager import DBManager
+
+                    self.db_manager = DBManager(default_db)
+                    self.db_file_path = default_db
+                    self._update_ui_for_loaded_database(default_db)
+                    self.log_action(
+                        f"Auto-loaded existing database: {default_db}", "INFO"
+                    )
+                    logger.info(
+                        f"Database manager initialized automatically with {default_db}"
+                    )
+                else:
+                    logger.info(
+                        f"Database {default_db} exists but appears empty - skipping auto-load"
+                    )
+            else:
+                logger.info("No existing database found - will wait for CSV import")
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect existing database: {e}")
+
+    def _validate_existing_database(self, db_path: Path) -> bool:
+        """Validate that database contains actual data, not just schema."""
+        try:
+            import sqlite3
+
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='fichiers'"
+                )
+                if not cursor.fetchone():
+                    logger.debug(f"Database {db_path} missing 'fichiers' table")
+                    return False
+
+                cursor.execute("SELECT COUNT(*) FROM fichiers")
+                file_count = cursor.fetchone()[0]
+
+                if file_count > 0:
+                    logger.info(f"Database {db_path} contains {file_count} files")
+                    return True
+                logger.debug(f"Database {db_path} has empty 'fichiers' table")
+                return False
+        except Exception as e:
+            logger.warning(f"Database validation failed for {db_path}: {e}")
+            return False
+
+    def _update_ui_for_loaded_database(self, db_path: Path) -> None:
+        """Update UI elements to reflect auto-loaded database."""
+        try:
+            if hasattr(self, "db_info_label"):
+                self.db_info_label.config(
+                    text=f"📁 Database: {db_path.name} (auto-loaded)",
+                    foreground="green",
+                )
+
+            if hasattr(self, "file_path_label"):
+                self.file_path_label.config(
+                    text=f"Database ready: {db_path.name}",
+                    background="lightgreen",
+                )
+
+            self._enable_database_dependent_buttons()
+            logger.debug("UI updated for auto-loaded database")
+        except Exception as e:
+            logger.warning(f"Failed to update UI for auto-loaded database: {e}")
+
+    def _enable_database_dependent_buttons(self) -> None:
+        """Enable UI buttons that depend on a loaded database."""
+        try:
+            for btn_attr in (
+                "view_results_button",
+                "export_button",
+                "analytics_button",
+            ):
+                if hasattr(self, btn_attr):
+                    getattr(self, btn_attr).config(state="normal")
+        except Exception as e:
+            logger.warning(f"Failed to enable DB dependent buttons: {e}")
 
     # ------------------------------------------------------------------
     # UI BUILDING
@@ -538,24 +626,27 @@ No need to run analysis to see your files.
             command=self.analyze_selected_file,
         )
         self.single_button.pack(side="left", padx=5, pady=5)
-        ttk.Button(
+        self.view_results_button = ttk.Button(
             action_frame, text="VIEW RESULTS", width=15, command=self.view_results
-        ).pack(side="left", padx=5, pady=5)
+        )
+        self.view_results_button.pack(side="left", padx=5, pady=5)
         ttk.Button(
             action_frame,
             text="MAINTENANCE",
             width=15,
             command=self.show_maintenance_dialog,
         ).pack(side="left", padx=5, pady=5)
-        ttk.Button(
+        self.export_button = ttk.Button(
             action_frame, text="EXPORT", width=15, command=self.export_results
-        ).pack(side="left", padx=5, pady=5)
-        ttk.Button(
+        )
+        self.export_button.pack(side="left", padx=5, pady=5)
+        self.analytics_button = ttk.Button(
             action_frame,
             text="\U0001f4ca ANALYTICS",
             width=15,
             command=self.open_analytics_dashboard,
-        ).pack(side="left", padx=5, pady=5)
+        )
+        self.analytics_button.pack(side="left", padx=5, pady=5)
 
         # SECTION 5B ----------------------------------------------------
         batch_frame = ttk.LabelFrame(self.root, text="Batch Operations")
@@ -790,16 +881,22 @@ No need to run analysis to see your files.
     def open_api_test_dialog(self):
         """Ouvre le dialog de configuration des tests API."""
         if not self.config_path or not self.config_path.exists():
-            messagebox.showerror("Erreur", "Configuration requise avant de tester l'API")
+            messagebox.showerror(
+                "Erreur", "Configuration requise avant de tester l'API"
+            )
             return
 
-        test_window = self.create_dialog_window(self.root, "Configuration Test API", "600x500")
+        test_window = self.create_dialog_window(
+            self.root, "Configuration Test API", "600x500"
+        )
 
         file_frame = ttk.LabelFrame(test_window, text="📄 Fichier de Test")
         file_frame.pack(fill="x", padx=10, pady=5)
 
         self.test_file_var = tk.StringVar()
-        file_entry = ttk.Entry(file_frame, textvariable=self.test_file_var, state="readonly")
+        file_entry = ttk.Entry(
+            file_frame, textvariable=self.test_file_var, state="readonly"
+        )
         file_entry.pack(side="left", fill="x", expand=True, padx=5, pady=5)
 
         browse_test_button = ttk.Button(
@@ -812,19 +909,39 @@ No need to run analysis to see your files.
         params_frame = ttk.LabelFrame(test_window, text="⚙️ Paramètres de Test")
         params_frame.pack(fill="x", padx=10, pady=5)
 
-        ttk.Label(params_frame, text="Nombre de workers:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(params_frame, text="Nombre de workers:").grid(
+            row=0, column=0, sticky="w", padx=5, pady=2
+        )
         self.test_workers_var = tk.IntVar(value=4)
-        workers_spin = ttk.Spinbox(params_frame, from_=1, to=8, textvariable=self.test_workers_var, width=10)
+        workers_spin = ttk.Spinbox(
+            params_frame, from_=1, to=8, textvariable=self.test_workers_var, width=10
+        )
         workers_spin.grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
-        ttk.Label(params_frame, text="Nombre d'itérations:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(params_frame, text="Nombre d'itérations:").grid(
+            row=1, column=0, sticky="w", padx=5, pady=2
+        )
         self.test_iterations_var = tk.IntVar(value=20)
-        iterations_spin = ttk.Spinbox(params_frame, from_=5, to=100, textvariable=self.test_iterations_var, width=10)
+        iterations_spin = ttk.Spinbox(
+            params_frame,
+            from_=5,
+            to=100,
+            textvariable=self.test_iterations_var,
+            width=10,
+        )
         iterations_spin.grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
-        ttk.Label(params_frame, text="Délai entre requêtes (s):").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(params_frame, text="Délai entre requêtes (s):").grid(
+            row=2, column=0, sticky="w", padx=5, pady=2
+        )
         self.test_delay_var = tk.DoubleVar(value=0.5)
-        delay_scale = ttk.Scale(params_frame, from_=0, to=5, variable=self.test_delay_var, orient="horizontal")
+        delay_scale = ttk.Scale(
+            params_frame,
+            from_=0,
+            to=5,
+            variable=self.test_delay_var,
+            orient="horizontal",
+        )
         delay_scale.grid(row=2, column=1, sticky="ew", padx=5, pady=2)
         delay_label = ttk.Label(params_frame, text="0.5s")
         delay_label.grid(row=2, column=2, padx=5, pady=2)
@@ -834,7 +951,9 @@ No need to run analysis to see your files.
 
         self.test_delay_var.trace("w", update_delay_label)
 
-        ttk.Label(params_frame, text="Type de template:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(params_frame, text="Type de template:").grid(
+            row=3, column=0, sticky="w", padx=5, pady=2
+        )
         self.test_template_var = tk.StringVar(value="comprehensive")
         template_combo = ttk.Combobox(
             params_frame,
@@ -875,7 +994,9 @@ No need to run analysis to see your files.
         )
         start_test_button.pack(side="right", padx=5)
 
-        cancel_button = ttk.Button(buttons_frame, text="Annuler", command=test_window.destroy)
+        cancel_button = ttk.Button(
+            buttons_frame, text="Annuler", command=test_window.destroy
+        )
         cancel_button.pack(side="right", padx=5)
 
     def browse_test_file(self):
@@ -883,7 +1004,10 @@ No need to run analysis to see your files.
         # Identify the Configuration Test API window to use as parent
         current_parent = None
         for widget in self.root.winfo_children():
-            if isinstance(widget, tk.Toplevel) and "Configuration Test API" in widget.title():
+            if (
+                isinstance(widget, tk.Toplevel)
+                and "Configuration Test API" in widget.title()
+            ):
                 current_parent = widget
                 break
 
@@ -967,8 +1091,12 @@ No need to run analysis to see your files.
         header_frame = ttk.Frame(self.test_results_window)
         header_frame.pack(fill="x", padx=10, pady=5)
 
-        ttk.Label(header_frame, text="🧪 Test API en cours", font=("Arial", 14, "bold")).pack(side="left")
-        status_label = ttk.Label(header_frame, textvariable=self.test_status_var, foreground="blue")
+        ttk.Label(
+            header_frame, text="🧪 Test API en cours", font=("Arial", 14, "bold")
+        ).pack(side="left")
+        status_label = ttk.Label(
+            header_frame, textvariable=self.test_status_var, foreground="blue"
+        )
         status_label.pack(side="right")
 
         progress_frame = ttk.Frame(self.test_results_window)
@@ -979,7 +1107,9 @@ No need to run analysis to see your files.
         self.test_progress_bar.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
         self.test_time_var = tk.StringVar(value="0s")
-        ttk.Label(progress_frame, textvariable=self.test_time_var).pack(side="right", padx=5)
+        ttk.Label(progress_frame, textvariable=self.test_time_var).pack(
+            side="right", padx=5
+        )
 
         notebook = ttk.Notebook(self.test_results_window)
         notebook.pack(fill="both", expand=True, padx=10, pady=5)
@@ -988,7 +1118,9 @@ No need to run analysis to see your files.
         notebook.add(tech_frame, text="📊 Métriques Techniques")
 
         self.tech_metrics_text = tk.Text(tech_frame, height=10, state="disabled")
-        tech_scroll = ttk.Scrollbar(tech_frame, orient="vertical", command=self.tech_metrics_text.yview)
+        tech_scroll = ttk.Scrollbar(
+            tech_frame, orient="vertical", command=self.tech_metrics_text.yview
+        )
         self.tech_metrics_text.configure(yscrollcommand=tech_scroll.set)
         self.tech_metrics_text.pack(side="left", fill="both", expand=True)
         tech_scroll.pack(side="right", fill="y")
@@ -997,7 +1129,9 @@ No need to run analysis to see your files.
         notebook.add(llm_frame, text="🧠 Fiabilité LLM")
 
         self.llm_metrics_text = tk.Text(llm_frame, height=10, state="disabled")
-        llm_scroll = ttk.Scrollbar(llm_frame, orient="vertical", command=self.llm_metrics_text.yview)
+        llm_scroll = ttk.Scrollbar(
+            llm_frame, orient="vertical", command=self.llm_metrics_text.yview
+        )
         self.llm_metrics_text.configure(yscrollcommand=llm_scroll.set)
         self.llm_metrics_text.pack(side="left", fill="both", expand=True)
         llm_scroll.pack(side="right", fill="y")
@@ -1006,7 +1140,9 @@ No need to run analysis to see your files.
         notebook.add(perf_frame, text="⚡ Performance")
 
         self.perf_metrics_text = tk.Text(perf_frame, height=10, state="disabled")
-        perf_scroll = ttk.Scrollbar(perf_frame, orient="vertical", command=self.perf_metrics_text.yview)
+        perf_scroll = ttk.Scrollbar(
+            perf_frame, orient="vertical", command=self.perf_metrics_text.yview
+        )
         self.perf_metrics_text.configure(yscrollcommand=perf_scroll.set)
         self.perf_metrics_text.pack(side="left", fill="both", expand=True)
         perf_scroll.pack(side="right", fill="y")
@@ -1038,12 +1174,17 @@ No need to run analysis to see your files.
         )
         self.export_json_button.pack(side="right", padx=5)
 
-        close_button = ttk.Button(buttons_frame, text="Fermer", command=self.test_results_window.destroy)
+        close_button = ttk.Button(
+            buttons_frame, text="Fermer", command=self.test_results_window.destroy
+        )
         close_button.pack(side="right", padx=5)
 
     def on_api_test_progress(self, progress_data):
         """Callback amélioré pour mise à jour progress des tests API."""
-        if not hasattr(self, "test_results_window") or not self.test_results_window.winfo_exists():
+        if (
+            not hasattr(self, "test_results_window")
+            or not self.test_results_window.winfo_exists()
+        ):
             return
 
         completed = progress_data.get("completed", 0)
@@ -1152,10 +1293,14 @@ No need to run analysis to see your files.
         if hasattr(self, "api_test_thread"):
             try:
                 export_path = self.api_test_thread.export_test_results(format_type)
-                messagebox.showinfo("Export réussi", f"Résultats exportés vers:\n{export_path}")
+                messagebox.showinfo(
+                    "Export réussi", f"Résultats exportés vers:\n{export_path}"
+                )
                 self.log_action(f"Export test API: {export_path}", "INFO")
             except Exception as e:
-                messagebox.showerror("Erreur export", f"Impossible d'exporter:\n{str(e)}")
+                messagebox.showerror(
+                    "Erreur export", f"Impossible d'exporter:\n{str(e)}"
+                )
 
     def save_api_configuration(self) -> None:
         try:
@@ -4653,7 +4798,9 @@ Errors: {perf.get('errors', 0)}
             self.invalidate_all_caches()
         except Exception as exc:
             messagebox.showerror(
-                "Restore Error", f"Failed to restore database:\n{exc}", parent=parent_window
+                "Restore Error",
+                f"Failed to restore database:\n{exc}",
+                parent=parent_window,
             )
             self.log_action(f"Database restore failed: {exc}", "ERROR")
 
@@ -4671,7 +4818,9 @@ Errors: {perf.get('errors', 0)}
             self.log_action(f"Integrity check result: {result}", "INFO")
         except Exception as exc:
             messagebox.showerror(
-                "Integrity Error", f"Integrity check failed:\n{exc}", parent=parent_window
+                "Integrity Error",
+                f"Integrity check failed:\n{exc}",
+                parent=parent_window,
             )
             self.log_action(f"Integrity check failed: {exc}", "ERROR")
 
@@ -4990,13 +5139,20 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
         if not hasattr(self, "db_manager") or self.db_manager is None:
             logger.error("Database manager not available for analytics dashboard")
-            messagebox.showerror(
-                "Erreur Database",
-                "Gestionnaire de base de données non disponible.\n"
-                "Veuillez charger un fichier CSV d'abord.",
-                parent=self.root,
-            )
-            return
+            self._detect_and_load_existing_database()
+            if not hasattr(self, "db_manager") or self.db_manager is None:
+                messagebox.showerror(
+                    "Erreur Database",
+                    "Aucune base de données active trouvée.\n\n"
+                    "Actions possibles:\n"
+                    "• Importer un fichier CSV via 'Browse CSV...'\n"
+                    "• Charger une base existante via 'Load Database'\n"
+                    "• Vérifier que analysis_results.db existe et contient des données",
+                    parent=self.root,
+                )
+                return
+            else:
+                logger.info("Database manager successfully auto-detected on retry")
 
         try:
             with self.db_manager._connect().get() as conn:
@@ -5028,6 +5184,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
         self.analytics_window.grab_set()
 
         from .analytics_panel import AnalyticsPanel
+
         analytics_panel = AnalyticsPanel(self.analytics_window, self.db_manager)
         self.analytics_panel = analytics_panel
 
@@ -5035,8 +5192,8 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             try:
                 self.analytics_window.grab_release()
                 self.analytics_window.destroy()
-                if hasattr(self, 'analytics_window'):
-                    delattr(self, 'analytics_window')
+                if hasattr(self, "analytics_window"):
+                    delattr(self, "analytics_window")
                 logger.info("Analytics window closed properly")
             except Exception as e:
                 logger.warning(f"Error during analytics window cleanup: {e}")
@@ -5092,9 +5249,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
                     if "fichiers" in tables:
                         cursor.execute("SELECT COUNT(*) FROM fichiers")
                         file_count = cursor.fetchone()[0]
-                        diagnostic_results.append(
-                            f"✅ Files in database: {file_count}"
-                        )
+                        diagnostic_results.append(f"✅ Files in database: {file_count}")
 
                     if "reponses_llm" in tables:
                         cursor.execute("SELECT COUNT(*) FROM reponses_llm")
@@ -5105,9 +5260,7 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
                     cursor.execute("PRAGMA integrity_check")
                     integrity = cursor.fetchone()[0]
-                    diagnostic_results.append(
-                        f"✅ Database integrity: {integrity}"
-                    )
+                    diagnostic_results.append(f"✅ Database integrity: {integrity}")
 
             except Exception as e:
                 diagnostic_results.append(f"❌ Database error: {str(e)}")
@@ -5116,7 +5269,11 @@ Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}
             messagebox.showinfo(
                 "Diagnostic Database",
                 f"Résultats du diagnostic:\n\n{result_text}",
-                parent=self.analytics_window if hasattr(self, "analytics_window") else self.root,
+                parent=(
+                    self.analytics_window
+                    if hasattr(self, "analytics_window")
+                    else self.root
+                ),
             )
 
         except Exception as exc:  # pragma: no cover - runtime safety
