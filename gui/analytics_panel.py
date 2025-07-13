@@ -185,8 +185,152 @@ class AnalyticsDrillDownViewer:
         }
         return type_map.get(ext, "Autres")
 
+    # ------------------------------------------------------------------
+    # Unified modal query builder
+    # ------------------------------------------------------------------
+    def _build_modal_query_unified(
+        self,
+        category_type: str,
+        category_value: str,
+    ) -> tuple[str, tuple]:
+        """Return SQL query and parameters for a given modal category."""
+
+        base_query = """
+        SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+               COALESCE(r.security_classification_cached, 'none') AS classif,
+               COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE (f.status IS NULL OR f.status != 'error')
+        """
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if category_type == "security":
+            if category_value == "Autres":
+                conditions.append(
+                    "COALESCE(r.security_classification_cached, 'none') NOT IN ('C0','C1','C2','C3','none')"
+                )
+            elif category_value == "none":
+                conditions.append(
+                    "COALESCE(r.security_classification_cached, 'none') = 'none'"
+                )
+            else:
+                conditions.append(
+                    "COALESCE(r.security_classification_cached, 'none') = ?"
+                )
+                params.append(category_value)
+        elif category_type == "rgpd":
+            if category_value == "Autres":
+                conditions.append(
+                    "COALESCE(r.rgpd_risk_cached, 'none') NOT IN ('low','medium','high','critical','none')"
+                )
+            elif category_value == "none":
+                conditions.append(
+                    "COALESCE(r.rgpd_risk_cached, 'none') = 'none'"
+                )
+            else:
+                conditions.append(
+                    "COALESCE(r.rgpd_risk_cached, 'none') = ?"
+                )
+                params.append(category_value)
+        elif category_type == "size":
+            size_map = {
+                "<50MB": (0, 50 * 1024 * 1024),
+                "50-100MB": (50 * 1024 * 1024, 100 * 1024 * 1024),
+                "100-150MB": (100 * 1024 * 1024, 150 * 1024 * 1024),
+                "150-200MB": (150 * 1024 * 1024, 200 * 1024 * 1024),
+                "200-300MB": (200 * 1024 * 1024, 300 * 1024 * 1024),
+                "300-500MB": (300 * 1024 * 1024, 500 * 1024 * 1024),
+                ">500MB": (500 * 1024 * 1024, float('inf')),
+            }
+            if category_value in size_map:
+                min_size, max_size = size_map[category_value]
+                if max_size == float("inf"):
+                    conditions.append("f.file_size >= ?")
+                    params.append(min_size)
+                else:
+                    conditions.append("f.file_size >= ? AND f.file_size < ?")
+                    params.extend([min_size, max_size])
+        elif category_type == "temporal":
+            now = datetime.now()
+            date_field = category_value.split(":")[0]
+            period = category_value.split(":")[1]
+            mapping = {
+                "last_7_days": now - timedelta(days=7),
+                "last_30_days": now - timedelta(days=30),
+                "last_90_days": now - timedelta(days=90),
+                "last_year": now - timedelta(days=365),
+            }
+            if period == "older_1_year":
+                conditions.append(f"f.{date_field} < ?")
+                params.append((now - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S"))
+            elif period == "all":
+                pass
+            else:
+                cutoff = mapping.get(period, now)
+                conditions.append(f"f.{date_field} >= ?")
+                params.append(cutoff.strftime("%Y-%m-%d %H:%M:%S"))
+
+        if conditions:
+            query = base_query + " AND " + " AND ".join(conditions)
+        else:
+            query = base_query
+
+        query += " ORDER BY f.file_size DESC"
+        return query, tuple(params)
+
     def _export_filtered_files(self) -> None:  # pragma: no cover - UI
-        messagebox.showinfo("Export", "Export des fichiers filtrés (à implémenter)")
+        """Export currently displayed rows to a CSV file."""
+        try:
+            rows = [self.drill_tree.item(i)["values"] for i in self.drill_tree.get_children()]
+            if not rows:
+                messagebox.showinfo(
+                    "Export",
+                    "Aucun fichier à exporter",
+                    parent=self.analytics_panel.parent,
+                )
+                return
+
+            from tkinter import filedialog
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv")],
+                parent=self.analytics_panel.parent,
+            )
+            if not file_path:
+                return
+
+            import csv
+
+            with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([
+                    "Name",
+                    "Path",
+                    "Size",
+                    "Modified",
+                    "Classification",
+                    "RGPD",
+                    "Type",
+                    "Owner",
+                ])
+                for row in rows:
+                    writer.writerow(row)
+
+            messagebox.showinfo(
+                "Export",
+                f"Export réussi vers {file_path}",
+                parent=self.analytics_panel.parent,
+            )
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+            messagebox.showerror(
+                "Erreur Export",
+                f"Impossible d'exporter les fichiers.\nErreur: {str(e)}",
+                parent=self.analytics_panel.parent,
+            )
 
     def _on_file_double_click(self, event):  # pragma: no cover - UI
         selection = self.drill_tree.selection()
@@ -301,52 +445,7 @@ class AnalyticsDrillDownViewer:
             modal = self._create_base_modal(
                 title, f"🔒 Classification: {classification}"
             )
-
-            if classification == "Autres":
-                query = """
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.security_classification_cached, 'none') NOT IN ('C0','C1','C2','C3','none')
-                ORDER BY f.file_size DESC
-                """
-                params: tuple = ()
-                logger.debug(
-                    "Security 'Autres' query: excludes standard levels and 'none'"
-                )
-            elif classification == "none":
-                query = """
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.security_classification_cached, 'none') = 'none'
-                ORDER BY f.file_size DESC
-                """
-                params = ()
-                logger.debug("Security 'none' query: includes explicit 'none' and NULL")
-            else:
-                query = """
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.security_classification_cached, 'none') = ?
-                ORDER BY f.file_size DESC
-                """
-                params = (classification,)
-                logger.debug(f"Security exact match query for: {classification}")
-
+            query, params = self._build_modal_query_unified("security", classification)
             self._load_filtered_files(
                 modal, query, params, f"Classification {classification}"
             )
@@ -362,50 +461,7 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         try:
             modal = self._create_base_modal(title, f"⚠️ Risque RGPD: {risk_level}")
-
-            if risk_level == "Autres":
-                query = """
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.rgpd_risk_cached, 'none') NOT IN ('low','medium','high','critical','none')
-                ORDER BY f.file_size DESC
-                """
-                params: tuple = ()
-                logger.debug("RGPD 'Autres' query: excludes known levels and 'none'")
-            elif risk_level == "none":
-                query = """
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.rgpd_risk_cached, 'none') = 'none'
-                ORDER BY f.file_size DESC
-                """
-                params = ()
-                logger.debug("RGPD 'none' query: includes explicit 'none' and NULL")
-            else:
-                query = """
-                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-                FROM fichiers f
-                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.rgpd_risk_cached, 'none') = ?
-                ORDER BY f.file_size DESC
-                """
-                params = (risk_level,)
-                logger.debug(f"RGPD exact match query for: {risk_level}")
-
+            query, params = self._build_modal_query_unified("rgpd", risk_level)
             self._load_filtered_files(modal, query, params, f"RGPD {risk_level}")
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show RGPD modal: %s", e)
@@ -465,36 +521,7 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         try:
             modal = self._create_base_modal(title, f"📊 Analyse de taille: {size_type}")
-
-            size_thresholds = {
-                "<1MB": ("f.file_size < ?", (1024 * 1024,)),
-                "1-10MB": (
-                    "f.file_size >= ? AND f.file_size < ?",
-                    (1024 * 1024, 10 * 1024 * 1024),
-                ),
-                "10-50MB": (
-                    "f.file_size >= ? AND f.file_size < ?",
-                    (10 * 1024 * 1024, 50 * 1024 * 1024),
-                ),
-                "<50MB": ("f.file_size < ?", (50 * 1024 * 1024,)),
-                ">50MB": ("f.file_size >= ?", (50 * 1024 * 1024,)),
-                ">100MB": ("f.file_size >= ?", (100 * 1024 * 1024,)),
-                ">500MB": ("f.file_size >= ?", (500 * 1024 * 1024,)),
-                ">1GB": ("f.file_size >= ?", (1024 * 1024 * 1024,)),
-            }
-
-            condition, params = size_thresholds.get(size_type, ("1=1", ()))
-
-            query = f"""
-            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                   COALESCE(r.security_classification_cached, 'none') AS classif,
-                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error')
-            AND {condition}
-            ORDER BY f.file_size DESC
-            """
+            query, params = self._build_modal_query_unified("size", size_type)
             self._load_filtered_files(modal, query, params, f"Fichiers {size_type}")
             logger.info(f"Opened size analysis modal for: {size_type}")
         except Exception as e:  # pragma: no cover - UI
@@ -556,54 +583,11 @@ class AnalyticsDrillDownViewer:
             date_field = (
                 "last_modified" if temporal_type == "modification" else "creation_time"
             )
-
             period_filter = click_info.get("period_filter", "all")
-            from datetime import datetime, timedelta
 
-            now = datetime.now()
-
-            period_conditions = {
-                "last_7_days": f"f.{date_field} >= ?",
-                "last_30_days": f"f.{date_field} >= ?",
-                "last_90_days": f"f.{date_field} >= ?",
-                "last_year": f"f.{date_field} >= ?",
-                "older_1_year": f"f.{date_field} < ?",
-                "all": "1=1",
-            }
-
-            period_params = {
-                "last_7_days": (
-                    (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-                "last_30_days": (
-                    (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-                "last_90_days": (
-                    (now - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-                "last_year": (
-                    (now - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-                "older_1_year": (
-                    (now - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-                "all": (),
-            }
-
-            condition = period_conditions.get(period_filter, "1=1")
-            params = period_params.get(period_filter, ())
-
-            query = f"""
-            SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
-                   COALESCE(r.security_classification_cached, 'none') AS classif,
-                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error')
-            AND f.{date_field} IS NOT NULL
-            AND {condition}
-            ORDER BY f.{date_field} DESC
-            """
+            query, params = self._build_modal_query_unified(
+                "temporal", f"{date_field}:{period_filter}"
+            )
             self._load_filtered_files(
                 modal, query, params, f"Fichiers {temporal_type} - {period_filter}"
             )
