@@ -287,19 +287,39 @@ class AnalyticsDrillDownViewer:
             modal = self._create_base_modal(
                 title, f"🔒 Classification: {classification}"
             )
-            query = """
-            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                   COALESCE(r.security_classification_cached, 'none') AS classif,
-                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') 
-            AND f.file_size > 0
-            AND r.security_classification_cached = ?
-            ORDER BY f.file_size DESC
-            """
+
+            if classification == "Autres":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.security_classification_cached NOT IN ('C0','C1','C2','C3')
+                     OR r.security_classification_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params: tuple = ()
+                logger.debug("Security 'Autres' query: includes 'none', NULL, and unknown values")
+            else:
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND r.security_classification_cached = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (classification,)
+                logger.debug(f"Security exact match query for: {classification}")
+
             self._load_filtered_files(
-                modal, query, (classification,), f"Classification {classification}"
+                modal, query, params, f"Classification {classification}"
             )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show classification modal: %s", e)
@@ -313,18 +333,52 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         try:
             modal = self._create_base_modal(title, f"⚠️ Risque RGPD: {risk_level}")
-            query = """
-            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                   COALESCE(r.security_classification_cached, 'none') AS classif,
-                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error')
-            AND f.file_size > 0
-            AND r.rgpd_risk_cached = ?
-            ORDER BY f.file_size DESC
-            """
-            self._load_filtered_files(modal, query, (risk_level,), f"RGPD {risk_level}")
+
+            if risk_level == "Autres":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.rgpd_risk_cached NOT IN ('none','low','medium','high','critical')
+                     OR r.rgpd_risk_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params: tuple = ()
+                logger.debug("RGPD 'Autres' query: excludes known levels, includes unknown values")
+            elif risk_level == "none":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.rgpd_risk_cached = 'none' OR r.rgpd_risk_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("RGPD 'none' query: includes explicit 'none' and NULL values")
+            else:
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND r.rgpd_risk_cached = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (risk_level,)
+                logger.debug(f"RGPD exact match query for: {risk_level}")
+
+            self._load_filtered_files(modal, query, params, f"RGPD {risk_level}")
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show RGPD modal: %s", e)
             messagebox.showerror(
@@ -560,23 +614,58 @@ class AnalyticsDrillDownViewer:
     def show_finance_modal(
         self, finance_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Affiche modal pour types financiers avec pattern sécurisé uniforme."""
+        """Affiche modal pour types financiers avec gestion complète des catégories."""
         try:
             modal = self._create_base_modal(title, f"💰 Types Financiers: {finance_type}")
 
-            query = """
-            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                   COALESCE(r.security_classification_cached, 'none') AS classif,
-                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                   COALESCE(r.finance_type_cached, 'none') AS finance_type
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') 
-            AND r.finance_type_cached = ?
-            ORDER BY f.file_size DESC
-            """
+            if finance_type == "Autres":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       COALESCE(r.finance_type_cached, 'none') AS finance_type
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.finance_type_cached NOT IN ('none','invoice','contract','budget','accounting','payment')
+                     OR r.finance_type_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params: tuple = ()
+                logger.debug("Finance 'Autres' query: excludes 6 known types, includes unknown values")
+            elif finance_type == "none":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       COALESCE(r.finance_type_cached, 'none') AS finance_type
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.finance_type_cached = 'none' OR r.finance_type_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("Finance 'none' query: includes explicit 'none' and NULL values")
+            else:
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       COALESCE(r.finance_type_cached, 'none') AS finance_type
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND r.finance_type_cached = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (finance_type,)
+                logger.debug(f"Finance exact match query for: {finance_type}")
 
-            self._load_filtered_files(modal, query, (finance_type,), f"Finance {finance_type}")
+            self._load_filtered_files(modal, query, params, f"Finance {finance_type}")
 
         except Exception as e:
             logger.error(f"Failed to show finance modal: {e}")
@@ -589,23 +678,58 @@ class AnalyticsDrillDownViewer:
     def show_legal_modal(
         self, legal_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Affiche modal pour types légaux avec pattern sécurisé uniforme."""
+        """Affiche modal pour types légaux avec gestion complète des catégories."""
         try:
             modal = self._create_base_modal(title, f"⚖️ Types Légaux: {legal_type}")
 
-            query = """
-            SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                   COALESCE(r.security_classification_cached, 'none') AS classif,
-                   COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                   COALESCE(r.legal_type_cached, 'none') AS legal_type
-            FROM fichiers f
-            LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') 
-            AND r.legal_type_cached = ?
-            ORDER BY f.file_size DESC
-            """
+            if legal_type == "Autres":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       COALESCE(r.legal_type_cached, 'none') AS legal_type
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.legal_type_cached NOT IN ('none','employment','lease','sale','nda','compliance','litigation')
+                     OR r.legal_type_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params: tuple = ()
+                logger.debug("Legal 'Autres' query: excludes 7 known types, includes unknown values")
+            elif legal_type == "none":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       COALESCE(r.legal_type_cached, 'none') AS legal_type
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.legal_type_cached = 'none' OR r.legal_type_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("Legal 'none' query: includes explicit 'none' and NULL values")
+            else:
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       COALESCE(r.legal_type_cached, 'none') AS legal_type
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND r.legal_type_cached = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (legal_type,)
+                logger.debug(f"Legal exact match query for: {legal_type}")
 
-            self._load_filtered_files(modal, query, (legal_type,), f"Legal {legal_type}")
+            self._load_filtered_files(modal, query, params, f"Legal {legal_type}")
 
         except Exception as e:
             logger.error(f"Failed to show legal modal: {e}")
