@@ -503,8 +503,9 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
-                AND (r.security_classification_cached IS NULL 
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.security_classification_cached IS NULL
                      OR r.security_classification_cached NOT IN ('C0', 'C1', 'C2', 'C3'))
                 ORDER BY f.file_size DESC
                 """
@@ -516,7 +517,8 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
                 AND r.security_classification_cached = ?
                 ORDER BY f.file_size DESC
                 """
@@ -549,8 +551,9 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
-                AND (r.rgpd_risk_cached IS NULL 
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.rgpd_risk_cached IS NULL
                      OR r.rgpd_risk_cached NOT IN ('none', 'low', 'medium', 'high', 'critical'))
                 ORDER BY f.file_size DESC
                 """
@@ -562,7 +565,8 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
                 AND (r.rgpd_risk_cached IS NULL OR r.rgpd_risk_cached = 'none')
                 ORDER BY f.file_size DESC
                 """
@@ -574,7 +578,8 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
                 AND r.rgpd_risk_cached = ?
                 ORDER BY f.file_size DESC
                 """
@@ -758,7 +763,9 @@ class AnalyticsDrillDownViewer:
                COALESCE({date_column}, {fallback_column}) AS effective_date
         FROM fichiers f
         LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-        WHERE f.status = 'completed' AND {date_filter}
+        WHERE (f.status IS NULL OR f.status != 'error')
+        AND f.file_size > 0
+        AND {date_filter}
         ORDER BY datetime(COALESCE({date_column}, {fallback_column})) DESC, f.file_size DESC
         LIMIT 5000
             """
@@ -929,9 +936,9 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.finance_type_cached NOT IN ('none', 'invoice', 'contract', 'budget', 'accounting', 'payment') 
+                AND (r.finance_type_cached NOT IN ('none', 'invoice', 'contract', 'budget', 'accounting', 'payment')
                      OR r.finance_type_cached IS NULL)
                 ORDER BY f.file_size DESC
                 """
@@ -944,7 +951,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
                 AND (r.finance_type_cached IS NULL OR r.finance_type_cached = 'none')
                 ORDER BY f.file_size DESC
@@ -958,7 +965,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
                 AND r.finance_type_cached = ?
                 ORDER BY f.file_size DESC
@@ -992,9 +999,9 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.legal_type_cached NOT IN ('none', 'employment', 'lease', 'sale', 'nda', 'compliance', 'litigation') 
+                AND (r.legal_type_cached NOT IN ('none', 'employment', 'lease', 'sale', 'nda', 'compliance', 'litigation')
                      OR r.legal_type_cached IS NULL)
                 ORDER BY f.file_size DESC
                 """
@@ -1007,7 +1014,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
                 AND (r.legal_type_cached IS NULL OR r.legal_type_cached = 'none')
                 ORDER BY f.file_size DESC
@@ -1021,7 +1028,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE f.status = 'completed'
+                WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
                 AND r.legal_type_cached = ?
                 ORDER BY f.file_size DESC
@@ -1467,10 +1474,38 @@ class AnalyticsTabClickManager:
 
     def _handle_temporal_click(self, label_widget) -> None:
         click_info = getattr(label_widget, "click_info", {})
-        temporal_type = click_info.get("temporal_type", "")
+
+        date_type = click_info.get("temporal_type", "modification")
+
+        period = None
+        for attr_name in ["period_key", "period_filter", "key"]:
+            period = click_info.get(attr_name)
+            if period:
+                break
+
+        if not period:
+            label_text = label_widget.cget("text")
+            if "0-1" in label_text:
+                period = "0_1y"
+            elif "1-2" in label_text:
+                period = "1_2y"
+            elif "2-3" in label_text:
+                period = "2_3y"
+            elif "3-4" in label_text:
+                period = "3_4y"
+            elif "4-5" in label_text:
+                period = "4_5y"
+            elif "5-6" in label_text:
+                period = "5_6y"
+            elif "+6" in label_text:
+                period = "6plus"
+            else:
+                period = "0_1y"
+
         self.drill_down_viewer.show_temporal_files_modal(
-            temporal_type,
-            f"Fichiers - Analyse Temporelle ({temporal_type})",
+            period,
+            date_type,
+            f"Fichiers - Analyse Temporelle ({date_type})",
             click_info,
         )
 
