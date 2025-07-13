@@ -1,221 +1,188 @@
-llm-content-analyzer
+# llm-content-analyzer
 
-Module d'analyse de contenu de fichiers par intelligence artificielle pour la classification multi-domaines et l'audit de conformité. Cette brique traite les données générées par SMBeagle enrichi pour analyser le contenu des fichiers via LLM et les classifier selon des critères de sécurité, conformité RGPD, finance et aspects légaux.
-Architecture du Pipeline
-llm-content-analyzer constitue la deuxième brique d'un pipeline d'analyse en trois étapes :
+![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python) ![License](https://img.shields.io/badge/license-Apache--2.0-green) ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 
+**Analyse intelligente de documents avec tableau de bord BI intégré**
 
-smbeagle_enriched → llm-content-analyzer → reports-generator
-    (Brique 1)          (Brique 2)         (Brique 3)
-Scan + métadonnées   Analyse contenu IA   Rapports Excel/PDF
+> Solution complète de classification et de veille documentaire pour les entreprises.
 
-Fonctionnalités
-Classification Multi-Domaines
+- Classification multi-domaines (Sécurité, RGPD, Finance, Juridique)
+- Interface graphique moderne avec gestion des templates de prompt
+- Tableau de bord Analytics pour la business intelligence
+- Tests avancés de fiabilité LLM et stabilité de l'API
 
-Sécurité : Classification C0 (Public), C1 (Interne), C2 (Confidentiel), C3 (Secret)
-RGPD : Détection de données personnelles et évaluation des risques
-Finance : Identification de documents financiers (factures, contrats, budgets)
-Legal : Analyse de contrats et documents juridiques
+## Sommaire
+1. [Aperçu et Architecture](#aperçu-et-architecture)
+2. [Vitrine Fonctionnalités](#vitrine-fonctionnalités)
+3. [Guide de Démarrage Rapide](#guide-de-démarrage-rapide)
+4. [Utilisation Détaillée](#utilisation-détaillée)
+5. [Documentation Technique](#documentation-technique)
+6. [Business Intelligence Intégrée](#business-intelligence-intégrée)
+7. [Développement et Contribution](#développement-et-contribution)
+8. [Déploiement Production](#déploiement-production)
+9. [Roadmap Future](#roadmap-future)
 
-Architecture Modulaire
+---
 
-Cache intelligent : SQLite basé sur une clé FastHash+Taille pour éviter les analyses redondantes
-Filtrage avancé : Exclusions configurables et scoring de priorité
-Templates de prompts : Configuration flexible via Jinja2 et YAML
-Interface graphique : GUI complète pour la gestion et le monitoring
+## Aperçu et Architecture
 
-Robustesse Production
-
-Retry automatique : Gestion des erreurs réseau avec tenacity
-Protection surcharge : Circuit breaker pour l'API LLM
-Monitoring : Métriques de performance et logs détaillés
-Configuration centralisée : YAML pour tous les paramètres
-
-Installation
-Prérequis
-
-Python 3.9+
-API-DOC-IA accessible (généralement localhost:8080)
-Fichiers CSV générés par SMBeagle enrichi
-
-Installation des dépendances
-pip install -r requirements.txt
-
-Configuration
-Copier et adapter le fichier de configuration :
-cp content_analyzer/config/analyzer_config.yaml.example content_analyzer/config/analyzer_config.yaml
-
-Configurer l'URL et le token de l'API-DOC-IA dans le fichier YAML.
-Utilisation
-Interface en ligne de commande
-
-# Analyse basique
-python content_analyzer/content_analyzer.py scan_smbeagle.csv analysis_results.db
-
-# Analyse avec cache activé
-python content_analyzer/content_analyzer.py --input scan.csv --output results.db --enable-cache
-
-Interface graphique
-python gui/main.py
-
-L'interface GUI permet :
-
-Import automatique de fichiers CSV SMBeagle
-Configuration de l'API et des exclusions
-Lancement d'analyses par lot ou fichier unique
-Visualisation des résultats avec filtres
-Export en CSV, JSON, Excel
-
-Workflow typique
-
-Import CSV : Sélectionner un fichier CSV SMBeagle enrichi
-Configuration : Ajuster les paramètres API et exclusions
-Analyse : Lancer l'analyse automatique ou manuelle
-Résultats : Consulter les classifications dans l'interface
-Export : Exporter les données pour génération de rapports
-
-Architecture Technique
-Modules principaux
-
-content_analyzer/
-├── content_analyzer.py      # Orchestrateur principal
-├── modules/
-│   ├── csv_parser.py        # Parse CSV SMBeagle → SQLite
-│   ├── api_client.py        # Client HTTP + retry/circuit breaker
-│   ├── cache_manager.py     # Cache SQLite intelligent
-│   ├── file_filter.py       # Filtrage + scoring priorité
-│   ├── db_manager.py        # Gestionnaire base SQLite
-│   └── prompt_manager.py    # Templates prompts configurables
-├── config/
-│   └── analyzer_config.yaml # Configuration centralisée
-└── gui/                     # Interface graphique
-
-Base de données SQLite
-Le module génère une base SQLite avec :
-
-Table fichiers : Métadonnées SMBeagle + état traitement
-Table reponses_llm : Analyses structurées par domaine
-Table cache_prompts : Cache basé sur une clé FastHash+Taille
-Table metriques : Monitoring performance
-
-Stack technique
-Dépendances externes (2 uniquement) :
-
-tenacity : Retry logic robuste pour appels API
-circuitbreaker : Protection surcharge API
-
-Bibliothèques standard :
-
-sqlite3, requests, pandas, yaml, jinja2
-
-Format d'entrée
-Le module traite les fichiers CSV générés par SMBeagle enrichi avec les colonnes :
-
-Name,Host,Extension,Username,Hostname,UNCDirectory,CreationTime,LastWriteTime,
-Readable,Writeable,Deletable,DirectoryType,Base,FileSize,Owner,FastHash,
-AccessTime,FileAttributes,FileSignature
-
-Format de sortie
-Les analyses LLM sont stockées en JSON structuré :
-{
-  "security": {"classification": "C2", "confidence": 85},
-  "rgpd": {"risk_level": "medium", "data_types": ["email", "phone"]},
-  "finance": {"document_type": "invoice", "amounts": [{"value": "1500€"}]},
-  "legal": {"contract_type": "service_agreement", "parties": [...]}
-}
-Configuration
-API-DOC-IA
-api_config:
-  url: "http://localhost:8080"
-  token: "sk-XXXXXXXXX"
-  max_tokens: 32000
-  timeout_seconds: 300
-
-Exclusions
-exclusions:
-  extensions:
-    blocked: [".tmp", ".log", ".bak"]
-    # Extensions parsed from CSV are normalized with a leading dot so
-    # that values like "zip" match the blocked list [".zip"].
-  file_size:
-    min_bytes: 100
-    max_bytes: 104857600
-  file_attributes:
-    skip_system: true
-    skip_hidden: false
-
-templates:
-  comprehensive:
-    system_prompt: "Tu es un expert en analyse de documents..."
-    user_template: "Fichier: {{ file_name }}..."
-
-Monitoring
-Métriques collectées
-
-Performance API (temps réponse, taux succès)
-Efficacité cache (hit rate, économies)
-Qualité analyse (confiance, cohérence)
-Utilisation ressources (mémoire, stockage)
-
-Logs
-Logs détaillés dans logs/content_analyzer.log avec niveaux INFO, WARN, ERROR.
-Tests
-# Tests unitaires
-python -m pytest content_analyzer/tests/ -v
-
-Intégration Pipeline
-Avec SMBeagle enrichi (Brique 1)
-# 1. Scan avec SMBeagle enrichi
-SMBeagle.exe -c scan_results.csv --sizefile --ownerfile --fasthash
-
-# 2. Analyse avec llm-content-analyzer
-python content_analyzer/content_analyzer.py scan_results.csv analysis.db
-
-Vers reports-generator (Brique 3)
-La base SQLite générée (analysis_results.db) contient les données structurées pour la génération de rapports Excel/PDF par la brique 3.
-
-## Gestion des Doublons
-
-### Architecture Centralisée
-- Module unique : `duplicate_detector.py`
-- Détection basée sur FastHash + Taille fichier
-- Identification automatique source vs copies
-
-### Utilisation
-```python
-from content_analyzer.modules import DuplicateDetector
-
-detector = DuplicateDetector()
-# Détecter famille doublons
-family = detector.detect_duplicate_family(files)
-# Identifier source original
-source = detector.identify_source(family)
-# Statistiques copies
-stats = detector.get_copy_statistics(family)
+```text
+SMBeagle Enriched ─▶ llm-content-analyzer ─▶ Actions Automatisées
+   (Brique 1)            (Briques 2+3)           (Brique 4 prévue)
+Découverte fichiers   Analyse IA + BI       Renommage / déplacement
 ```
 
-### Règles de Gestion
-- Fichiers 0 octet : Exclus automatiquement
-- Source = Fichier le plus ancien par date création
-- Limite taille : 281_474_976_710_656 octets
+llm-content-analyzer est la brique principale d'analyse de contenu. Les fichiers détectés par SMBeagle sont évalués via l'API-DOC-IA, puis stockés dans une base SQLite exploitable par le tableau de bord Analytics.
 
-Limitations
+### Cas d'usage clés
+- Audit de conformité RGPD
+- Classification sécurité niveau C0 à C3
+- Identification automatique de documents financiers et juridiques
+- Visualisation BI et reporting temps réel
 
-Dépend de la disponibilité de l'API-DOC-IA
-Qualité d'analyse liée à la qualité des prompts et du modèle LLM
-Formats de fichiers limités à ceux supportés par l'API
-Cache basé sur FastHash+Taille : moins de faux positifs mais modifications mineures non détectées
+## Vitrine Fonctionnalités
 
-Support
-Les logs détaillés facilitent le diagnostic des problèmes. Les erreurs courantes sont documentées dans la configuration et l'interface GUI fournit des messages d'erreur explicites.
-Licence
-Apache License 2.0. Voir LICENSE pour les détails.
+### Classification Multi-Domaines
+| Domaine   | Valeurs possibles |
+|-----------|------------------|
+| Sécurité  | C0 à C3 + N/A    |
+| RGPD      | none, low, medium, high, critical |
+| Finance   | none, invoice, contract, budget, accounting, payment + N/A |
+| Juridique | none, employment, lease, sale, NDA, compliance, litigation + N/A |
 
-## Performance Benchmarks
+### Interface Graphique
+- Import et gestion de fichiers CSV
+- Configuration API et test de connexion
+- Système complet de templates Jinja2 pour les prompts
+- Analyse par lot ou fichier unique
+- Export CSV/JSON/Excel
 
-La méthode `parse_csv_optimized` utilise des insertions SQLite en batch et des
-PRAGMA adaptés pour accélérer l'import des CSV SMBeagle. Sur le fichier de test
-`scan_local_mini.csv` (63 lignes), le temps de chargement passe d'environ
-0.5&nbsp;s à moins de 0.1&nbsp;s sur la même machine.
+### Test API & Fiabilité LLM
+- Lancement de tests de charge multi-workers
+- Mesure du taux de réponses corrompues ou tronquées
+- Statistiques de variance de classification
+- Détection de la cohérence des réponses et métriques de confiance
 
+### Bibliothèque de Prompts
+- Création et édition via l'interface
+- Prévisualisation temps réel
+- Versioning et sauvegarde dans `analyzer_config.yaml`
+- Modes spécialisés (sécurité, RGPD, finance, juridique)
 
+### Tableau de Bord Analytics
+Six onglets spécialisés :
+1. **Vue Globale** – volumes, tailles, progrès traitement
+2. **Analyse Thématique** – répartitions Sécurité/RGPD/Finance/Juridique
+3. **Analyse Temporelle** – distribution par âge de fichier
+4. **Métriques Étendues** – doublons, top utilisateurs, tailles
+5. **Focus Sécurité** – combinaisons C3 et RGPD critique
+6. **Performance** – statistiques API et taux de cache
+
+Chaque métrique est cliquable : un drill‑down affiche la liste détaillée des fichiers dans une fenêtre modale. Les données peuvent être exportées pour générer des rapports exécutifs.
+
+### Moteur Haute Performance
+- Import CSV optimisé avec inserts batch
+- Filtrage avancé et scoring de priorité
+- Cache SQLite intelligent (FastHash + taille)
+- Traitement parallèle configurable
+
+## Guide de Démarrage Rapide
+
+### Prérequis
+- Python 3.9+
+- API-DOC-IA disponible (par défaut `localhost:8080`)
+- CSV SMBeagle enrichi
+
+```bash
+pip install -r requirements.txt
+cp content_analyzer/config/analyzer_config.yaml content_analyzer/config/local_config.yaml
+```
+
+### Première Analyse
+```bash
+python content_analyzer/content_analyzer.py scan.csv analysis.db
+```
+Lancez ensuite l'interface graphique :
+```bash
+python gui/main.py
+```
+
+## Utilisation Détaillée
+
+### Interface CLI
+```bash
+# Analyse avec cache
+python content_analyzer/content_analyzer.py --input scan.csv --output results.db --enable-cache
+```
+
+### Parcours GUI
+1. Importer un CSV
+2. Configurer l'API et sélectionner un template de prompt
+3. Lancer l'analyse (unique ou par lot)
+4. Consulter les résultats et exporter
+5. Ouvrir le **Tableau de Bord Analytics** pour la BI
+
+### Gestion des Templates
+Des boutons permettent d'ajouter, éditer ou prévisualiser les prompts. Les limites de taille sont vérifiées automatiquement et un code couleur indique la marge disponible.
+
+### Test API Avancé
+Dans le menu « Test API », définissez le nombre d'itérations et de workers. Le tableau de résultats en temps réel affiche :
+- Réponses réussies / corrompues
+- Débit (req/min)
+- Variance de classification
+- Score de fiabilité global
+Les rapports peuvent être exportés en JSON ou CSV.
+
+## Documentation Technique
+
+### Modules Principaux
+- `csv_parser.py` – import CSV vers SQLite
+- `file_filter.py` – règles de filtrage et scoring
+- `cache_manager.py` – gestion cache et TTL
+- `api_client.py` – client HTTP robuste (retry + circuit breaker)
+- `db_manager.py` – accès SQLite thread‑safe
+- `prompt_manager.py` – génération de prompts Jinja2
+- `duplicate_detector.py` – détection de copies et statistiques
+- `age_analyzer.py` / `size_analyzer.py` – analyses complémentaires
+
+### Schéma Base de Données
+```
+fichiers(id, name, path, size, hash, status, ...)
+reponses_llm(file_id, security, rgpd, finance, legal, confidence)
+cache_prompts(cache_key, response_content, hits_count, ttl_expiry)
+metriques(key, value, timestamp)
+```
+
+### Optimisation
+- Connexions SQLite en pool
+- Inserts batch et PRAGMA optimisés
+- Cache avec TTL paramétrable
+- Monitoring détaillé dans `logs/content_analyzer.log`
+
+## Business Intelligence Intégrée
+
+Le tableau de bord est accessible via la fenêtre principale. Chaque onglet propose filtres, graphiques et exports. Les mises à jour sont dynamiques et un bouton permet de générer un **rapport exécutif** au format CSV ou Excel. Les top utilisateurs (de 1 à 10) sont affichés par catégorie avec possibilité de cliquer pour afficher les fichiers correspondants.
+
+## Développement et Contribution
+
+```bash
+# Lancer les tests
+pytest -q
+```
+Les contributions sont les bienvenues via pull request. Merci de respecter la configuration Black et Flake8 fournie.
+
+## Déploiement Production
+
+1. Copier le projet sur le serveur cible
+2. Installer les dépendances
+3. Configurer `analyzer_config.yaml` (URL API, chemin base, paramètres cache)
+4. Lancer `python gui/main.py`
+
+Pour la supervision, consultez les logs et activez la rotation selon vos besoins.
+
+## Roadmap Future
+
+La prochaine **brique 4** ajoutera des actions automatisées : renommage, déplacement intelligent et application de permissions selon les résultats d'analyse.
+
+---
+Licence Apache 2.0.
