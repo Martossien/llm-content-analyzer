@@ -675,7 +675,7 @@ class AnalyticsDrillDownViewer:
     def show_temporal_files_modal(
         self, temporal_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Fixed Temporal analysis modal with proper date filtering."""
+        """Fixed Temporal analysis modal with standardized date filtering."""
         try:
             modal = self._create_base_modal(title, f"📅 Analyse temporelle: {temporal_type}")
 
@@ -685,13 +685,13 @@ class AnalyticsDrillDownViewer:
             logger.debug(f"Temporal modal query for: {temporal_type}, period: {period_filter}")
 
             period_conditions = {
-                "recent": f"f.{date_field} >= date('now', '-30 days')",
-                "1y": f"f.{date_field} >= date('now', '-1 year') AND f.{date_field} < date('now')",
-                "2y": f"f.{date_field} >= date('now', '-2 years') AND f.{date_field} < date('now', '-1 year')",
-                "3y": f"f.{date_field} >= date('now', '-3 years') AND f.{date_field} < date('now', '-2 years')",
-                "5y": f"f.{date_field} >= date('now', '-5 years') AND f.{date_field} < date('now', '-3 years')",
-                "7y": f"f.{date_field} >= date('now', '-7 years') AND f.{date_field} < date('now', '-5 years')",
-                "old": f"f.{date_field} < date('now', '-7 years')",
+                "0_1y": f"f.{date_field} > date('now', '-1 year')",
+                "1_2y": f"f.{date_field} <= date('now', '-1 year') AND f.{date_field} > date('now', '-2 years')",
+                "2_3y": f"f.{date_field} <= date('now', '-2 years') AND f.{date_field} > date('now', '-3 years')",
+                "3_4y": f"f.{date_field} <= date('now', '-3 years') AND f.{date_field} > date('now', '-4 years')",
+                "4_5y": f"f.{date_field} <= date('now', '-4 years') AND f.{date_field} > date('now', '-5 years')",
+                "5_6y": f"f.{date_field} <= date('now', '-5 years') AND f.{date_field} > date('now', '-6 years')",
+                "6plus": f"f.{date_field} <= date('now', '-6 years')",
                 "all": "1=1",
             }
 
@@ -706,6 +706,8 @@ class AnalyticsDrillDownViewer:
         WHERE (f.status IS NULL OR f.status != 'error')
         AND f.file_size > 0
         AND f.{date_field} IS NOT NULL
+        AND f.{date_field} != ''
+        AND f.{date_field} != '0'
         AND {date_condition}
         ORDER BY f.{date_field} DESC
             """
@@ -1241,6 +1243,7 @@ class AnalyticsTabClickManager:
             )
 
     def _add_temporal_click_handlers(self) -> None:
+        """Add click handlers for temporal analysis with standardized keys."""
         for attr in ["modification_labels", "creation_labels"]:
             if hasattr(self.analytics_panel, attr):
                 labels = getattr(self.analytics_panel, attr)
@@ -3227,6 +3230,7 @@ class AnalyticsPanel:
         self._build_temporal_sub_tab(creation_frame, "creation")
 
     def _build_temporal_sub_tab(self, parent_frame: ttk.Frame, mode: str) -> None:
+        """Build temporal analysis sub-tab with standardized period mapping."""
         title = "MODIFICATION" if mode == "modification" else "CRÉATION"
         container = ttk.LabelFrame(
             parent_frame, text=f"FICHIERS PAR ANCIENNETÉ {title}"
@@ -3237,15 +3241,19 @@ class AnalyticsPanel:
         setattr(self, temporal_labels_key, {})
         temporal_labels = getattr(self, temporal_labels_key)
 
-        for years in range(1, 8):
-            if years == 7:
-                label_text = "+6 ans: 0% | 0 fichiers | 0GB"
-                description = f"Fichiers sans {mode} depuis plus de 6 ans"
-            else:
-                lower = years - 1
-                upper = years
-                label_text = f"{lower}-{upper} an{'s' if upper > 1 else ''}: 0% | 0 fichiers | 0GB"
-                description = f"Fichiers sans {mode} depuis {lower} à {upper} an{'s' if upper > 1 else ''}"
+        # Nouvelle logique standardisée
+        temporal_periods = [
+            {"key": "0_1y", "label": "0-1 an", "description": f"Fichiers sans {mode} depuis 0 à 1 an"},
+            {"key": "1_2y", "label": "1-2 ans", "description": f"Fichiers sans {mode} depuis 1 à 2 ans"},
+            {"key": "2_3y", "label": "2-3 ans", "description": f"Fichiers sans {mode} depuis 2 à 3 ans"},
+            {"key": "3_4y", "label": "3-4 ans", "description": f"Fichiers sans {mode} depuis 3 à 4 ans"},
+            {"key": "4_5y", "label": "4-5 ans", "description": f"Fichiers sans {mode} depuis 4 à 5 ans"},
+            {"key": "5_6y", "label": "5-6 ans", "description": f"Fichiers sans {mode} depuis 5 à 6 ans"},
+            {"key": "6plus", "label": "+6 ans", "description": f"Fichiers sans {mode} depuis plus de 6 ans"},
+        ]
+
+        for period in temporal_periods:
+            label_text = f"{period['label']}: 0% | 0 fichiers | 0GB"
 
             frame = ttk.Frame(container)
             frame.pack(fill="x", pady=2, padx=10)
@@ -3254,11 +3262,11 @@ class AnalyticsPanel:
             label.pack(side="left")
 
             desc_label = ttk.Label(
-                frame, text=f"({description})", font=("Arial", 9), foreground="gray"
+                frame, text=f"({period['description']})", font=("Arial", 9), foreground="gray"
             )
             desc_label.pack(side="left", padx=10)
 
-            temporal_labels[f"{years}y"] = label
+            temporal_labels[period["key"]] = label
 
     def _calculate_temporal_metrics(
         self, files: List[FileInfo], mode: str
@@ -3369,7 +3377,7 @@ class AnalyticsPanel:
     def _calculate_temporal_metrics_safe(
         self, raw_data: List[tuple], mode: str
     ) -> Dict[str, Dict[str, Any]]:
-        """Calcul de métriques temporelles sécurisé avec gestion des dates invalides."""
+        """Calculate temporal metrics with standardized period logic."""
         from datetime import datetime, timedelta
 
         try:
@@ -3398,8 +3406,7 @@ class AnalyticsPanel:
             )
 
             if not valid_files:
-                for years in range(1, 8):
-                    key = f"{years}y" if years < 7 else "7y"
+                for key in ["0_1y", "1_2y", "2_3y", "3_4y", "4_5y", "5_6y", "6plus"]:
                     temporal_metrics[key] = {
                         "count": 0,
                         "percentage": 0.0,
@@ -3407,21 +3414,31 @@ class AnalyticsPanel:
                     }
                 return temporal_metrics
 
-            for years in range(1, 8):
-                if years == 7:
-                    cutoff = now - timedelta(days=6 * 365)
+            temporal_ranges = [
+                {"key": "0_1y", "min_days": 0, "max_days": 365},
+                {"key": "1_2y", "min_days": 365, "max_days": 730},
+                {"key": "2_3y", "min_days": 730, "max_days": 1095},
+                {"key": "3_4y", "min_days": 1095, "max_days": 1460},
+                {"key": "4_5y", "min_days": 1460, "max_days": 1825},
+                {"key": "5_6y", "min_days": 1825, "max_days": 2190},
+                {"key": "6plus", "min_days": 2190, "max_days": None},
+            ]
+
+            for range_def in temporal_ranges:
+                if range_def["max_days"] is None:
+                    cutoff = now - timedelta(days=range_def["min_days"])
                     matching_files = [(d, s) for d, s in valid_files if d <= cutoff]
-                    key = "7y"
                 else:
-                    upper = now - timedelta(days=(years - 1) * 365)
-                    lower = now - timedelta(days=years * 365)
+                    upper_cutoff = now - timedelta(days=range_def["min_days"])
+                    lower_cutoff = now - timedelta(days=range_def["max_days"])
                     matching_files = [
-                        (d, s) for d, s in valid_files if lower < d <= upper
+                        (d, s)
+                        for d, s in valid_files
+                        if lower_cutoff < d <= upper_cutoff
                     ]
-                    key = f"{years}y"
 
                 total_size = sum(size for _, size in matching_files)
-                temporal_metrics[key] = {
+                temporal_metrics[range_def["key"]] = {
                     "count": len(matching_files),
                     "percentage": (
                         round(len(matching_files) / len(valid_files) * 100, 1)
@@ -4234,6 +4251,42 @@ class AnalyticsPanel:
             logger.debug("Attribut %s non trouvé, retour dictionnaire vide", labels_key)
             return {}
 
+    def update_temporal_analysis_display(self, temporal_data: Dict[str, Any]) -> None:
+        """Update temporal analysis display with standardized keys."""
+        try:
+            for mode in ["modification", "creation"]:
+                if mode in temporal_data:
+                    labels_attr = f"{mode}_labels"
+                    if hasattr(self, labels_attr):
+                        labels = getattr(self, labels_attr)
+                        mode_data = temporal_data[mode]
+
+                        key_mappings = {
+                            "0_1y": "0-1 an",
+                            "1_2y": "1-2 ans",
+                            "2_3y": "2-3 ans",
+                            "3_4y": "3-4 ans",
+                            "4_5y": "4-5 ans",
+                            "5_6y": "5-6 ans",
+                            "6plus": "+6 ans",
+                        }
+
+                        for key, label_text in key_mappings.items():
+                            if key in labels and key in mode_data:
+                                metrics = mode_data[key]
+                                count = metrics.get("count", 0)
+                                percentage = metrics.get("percentage", 0.0)
+                                size_gb = metrics.get("size_gb", 0.0)
+
+                                display_text = (
+                                    f"{label_text}: {percentage}% | {count} fichiers | {size_gb:.1f}GB"
+                                )
+                                labels[key].config(text=display_text)
+
+                                logger.debug(f"Updated {mode} {key}: {count} files")
+        except Exception as e:
+            logger.error(f"Failed to update temporal display: {e}")
+
     def update_extended_tabs(self, metrics: Dict[str, Any]) -> None:
         """Met à jour les onglets étendus avec vérifications robustes."""
         try:
@@ -4250,29 +4303,10 @@ class AnalyticsPanel:
                 except Exception as e:
                     logger.warning("Erreur mise à jour niveau %s: %s", level, e)
 
-            for mode in ["modification", "creation"]:
-                temporal_data = metrics.get(f"temporal_{mode}", {})
-                labels = self._safe_get_labels(f"{mode}_labels")
-                for years_key, label in labels.items():
-                    try:
-                        data = temporal_data.get(
-                            years_key, {"percentage": 0, "count": 0, "size_gb": 0}
-                        )
-                        prefix = (
-                            label.cget("text").split(":")[0]
-                            if hasattr(label, "cget")
-                            else years_key
-                        )
-                        label.config(
-                            text=f"{prefix}: {data['percentage']}% | {data['count']} fichiers | {data['size_gb']:.1f}GB"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "Erreur mise à jour temporelle %s/%s: %s",
-                            mode,
-                            years_key,
-                            e,
-                        )
+            self.update_temporal_analysis_display({
+                "modification": metrics.get("temporal_modification", {}),
+                "creation": metrics.get("temporal_creation", {}),
+            })
 
             size_data = metrics.get("file_size_analysis", {})
             size_labels = self._safe_get_labels("file_size_labels")
