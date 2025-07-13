@@ -482,6 +482,87 @@ class AnalyticsDrillDownViewer:
                 parent=modal,
             )
 
+    def _load_filtered_files_direct(
+        self, modal: tk.Toplevel, file_rows: List, category_name: str
+    ) -> None:
+        """Load pre-filtered rows directly into the treeview."""
+        try:
+            progress_label = ttk.Label(modal, text="🔄 Chargement des données...")
+            progress_label.pack(pady=10)
+            modal.update_idletasks()
+
+            if not file_rows:
+                progress_label.config(
+                    text="ℹ️ Aucun fichier trouvé pour ces critères"
+                )
+                logger.warning(f"No files to display for {category_name}")
+                return
+
+            for item in self.drill_tree.get_children():
+                self.drill_tree.delete(item)
+
+            self.current_files = []
+            for row in file_rows:
+                try:
+                    if len(row) >= 7:
+                        file_id, name, path, size, modified, creation, owner = row[:7]
+                        classif = row[7] if len(row) > 7 else "N/A"
+                        rgpd = row[8] if len(row) > 8 else "N/A"
+
+                        size_str = self._format_file_size(size or 0)
+                        date_str = (modified or creation or "")[:19] or "N/A"
+                        name_str = (
+                            str(name)[:50] + "..." if len(str(name)) > 50 else str(name)
+                        )
+                        path_str = (
+                            str(path)[:80] + "..." if len(str(path)) > 80 else str(path)
+                        )
+                        owner_str = str(owner or "Inconnu")
+
+                        self.drill_tree.insert(
+                            "",
+                            "end",
+                            values=(
+                                name_str,
+                                path_str,
+                                size_str,
+                                date_str,
+                                classif,
+                                rgpd,
+                                "",
+                                owner_str,
+                            ),
+                        )
+
+                        self.current_files.append(
+                            {
+                                "name": name,
+                                "path": path,
+                                "file_size": size,
+                                "last_modified": modified,
+                                "owner": owner,
+                                "classif": classif,
+                                "rgpd": rgpd,
+                            }
+                        )
+                except Exception as row_error:
+                    logger.warning(f"Erreur traitement ligne: {row_error}")
+                    continue
+
+            progress_label.config(
+                text=f"✅ {len(file_rows)} fichiers chargés - {category_name}"
+            )
+            modal.after(3000, progress_label.destroy)
+        except Exception as e:
+            logger.error(f"Critical error in _load_filtered_files_direct: {e}")
+            if "progress_label" in locals():
+                progress_label.config(text=f"❌ Erreur: {str(e)}")
+            messagebox.showerror(
+                "Erreur Chargement",
+                f"Erreur lors du chargement des fichiers:\n{str(e)}",
+                parent=modal,
+            )
+
     # ------------------------------------------------------------------
     # Public modal entry points
     # ------------------------------------------------------------------
@@ -735,23 +816,17 @@ class AnalyticsDrillDownViewer:
                 "f.creation_time" if date_type == "modification" else "f.last_modified"
             )
 
-            if period == "6plus":
-                date_filter = f"""
-            (
-                COALESCE({date_column}, {fallback_column}) IS NOT NULL
-                AND COALESCE({date_column}, {fallback_column}) != ''
-                AND datetime(COALESCE({date_column}, {fallback_column})) < datetime('{start_date.strftime('%Y-%m-%d %H:%M:%S')}')
-            )
-            """
-            else:
-                date_filter = f"""
-            (
-                COALESCE({date_column}, {fallback_column}) IS NOT NULL
-                AND COALESCE({date_column}, {fallback_column}) != ''
-                AND datetime(COALESCE({date_column}, {fallback_column})) >= datetime('{start_date.strftime('%Y-%m-%d %H:%M:%S')}')
-                AND datetime(COALESCE({date_column}, {fallback_column})) < datetime('{end_date.strftime('%Y-%m-%d %H:%M:%S')}')
-            )
-            """
+            range_definitions = {
+                "0_1y": {"min_days": 0, "max_days": 365},
+                "1_2y": {"min_days": 365, "max_days": 730},
+                "2_3y": {"min_days": 730, "max_days": 1095},
+                "3_4y": {"min_days": 1095, "max_days": 1460},
+                "4_5y": {"min_days": 1460, "max_days": 1825},
+                "5_6y": {"min_days": 1825, "max_days": 2190},
+                "6plus": {"min_days": 2190, "max_days": None},
+            }
+
+            range_def = range_definitions[period]
 
             query = f"""
         SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.creation_time, f.owner,
@@ -759,23 +834,59 @@ class AnalyticsDrillDownViewer:
                COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk,
                COALESCE(r.finance_type_cached, 'none') AS finance_type,
                COALESCE(r.legal_type_cached, 'none') AS legal_type,
-               r.document_resume,
-               COALESCE({date_column}, {fallback_column}) AS effective_date
+               r.document_resume
         FROM fichiers f
         LEFT JOIN reponses_llm r ON f.id = r.fichier_id
         WHERE (f.status IS NULL OR f.status != 'error')
         AND f.file_size > 0
-        AND {date_filter}
-        ORDER BY datetime(COALESCE({date_column}, {fallback_column})) DESC, f.file_size DESC
-        LIMIT 5000
+        AND (
+            COALESCE({date_column}, {fallback_column}) IS NOT NULL
+            AND COALESCE({date_column}, {fallback_column}) != ''
+        )
+        ORDER BY f.file_size DESC
+        LIMIT 10000
             """
 
             params: tuple = ()
 
-            logger.debug(f"Requête temporelle pour {period}: {query[:100]}...")
+            logger.debug("Executing base query to get files for temporal filtering")
 
-            self._load_filtered_files(
-                modal, query, params, f"Temporel {date_type} - {period}"
+            with self.analytics_panel.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                all_files = cursor.fetchall()
+
+            logger.info(f"Retrieved {len(all_files)} candidate files for temporal filtering")
+
+            filtered_files = []
+            date_col_idx = 4 if date_type == "modification" else 5
+            fallback_col_idx = 5 if date_type == "modification" else 4
+
+            for row in all_files:
+                date_str = row[date_col_idx] or row[fallback_col_idx]
+                if date_str and date_str != "0":
+                    try:
+                        parsed_date = self.analytics_panel._parse_date_flexible(date_str)
+                        if parsed_date:
+                            if range_def["max_days"] is None:
+                                cutoff = now - timedelta(days=range_def["min_days"])
+                                if parsed_date <= cutoff:
+                                    filtered_files.append(row)
+                            else:
+                                start_cutoff = now - timedelta(days=range_def["max_days"])
+                                end_cutoff = now - timedelta(days=range_def["min_days"])
+                                if start_cutoff <= parsed_date < end_cutoff:
+                                    filtered_files.append(row)
+                    except Exception as e:
+                        logger.debug(f"Date parsing failed for {date_str}: {e}")
+                        continue
+
+            logger.info(
+                f"Temporal filtering result: {len(filtered_files)} files match period {period}"
+            )
+
+            self._load_filtered_files_direct(
+                modal, filtered_files, f"Temporel {date_type} - {period}"
             )
 
             logger.info(f"Modal temporel ouvert: {date_type}, période: {period}")
