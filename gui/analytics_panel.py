@@ -25,6 +25,8 @@ class AnalyticsDrillDownViewer:
     def __init__(self, parent_analytics_panel: "AnalyticsPanel") -> None:
         self.analytics_panel = parent_analytics_panel
         self.db_manager = parent_analytics_panel.db_manager
+        # Store currently displayed files for export functionality
+        self.current_files: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Base modal creation helpers
@@ -282,54 +284,61 @@ class AnalyticsDrillDownViewer:
         return query, tuple(params)
 
     def _export_filtered_files(self) -> None:  # pragma: no cover - UI
-        """Export currently displayed rows to a CSV file."""
+        """Export filtered files with proper window Z-order management."""
         try:
-            rows = [self.drill_tree.item(i)["values"] for i in self.drill_tree.get_children()]
-            if not rows:
-                messagebox.showinfo(
-                    "Export",
-                    "Aucun fichier à exporter",
-                    parent=self.analytics_panel.parent,
-                )
+            if not hasattr(self, 'current_files') or not self.current_files:
+                messagebox.showwarning("Attention", "Aucun fichier à exporter", parent=self.analytics_panel.parent)
                 return
 
             from tkinter import filedialog
-            file_path = filedialog.asksaveasfilename(
+            filename = filedialog.asksaveasfilename(
+                parent=self.analytics_panel.parent,
+                title="Exporter la liste des fichiers",
                 defaultextension=".csv",
-                filetypes=[("CSV", "*.csv")],
-                parent=self.analytics_panel.parent,
+                filetypes=[
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx"),
+                    ("All files", "*.*"),
+                ],
             )
-            if not file_path:
-                return
 
-            import csv
+            if filename:
+                import csv
+                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.writer(csvfile)
+                    headers = ["Nom", "Chemin", "Taille", "Propriétaire", "Modifié", "Classification", "Risque RGPD"]
+                    writer.writerow(headers)
+                    for file_data in self.current_files:
+                        writer.writerow([
+                            file_data.get('name', ''),
+                            file_data.get('path', ''),
+                            file_data.get('file_size', 0),
+                            file_data.get('owner', ''),
+                            file_data.get('last_modified', ''),
+                            file_data.get('classif', ''),
+                            file_data.get('rgpd', ''),
+                        ])
 
-            with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow([
-                    "Name",
-                    "Path",
-                    "Size",
-                    "Modified",
-                    "Classification",
-                    "RGPD",
-                    "Type",
-                    "Owner",
-                ])
-                for row in rows:
-                    writer.writerow(row)
+                success_window = tk.Toplevel(self.analytics_panel.parent)
+                success_window.title("Export Réussi")
+                success_window.geometry("400x150")
+                success_window.transient(self.analytics_panel.parent)
+                success_window.lift()
+                success_window.focus_set()
+                success_window.attributes("-topmost", True)
+                success_window.grab_set()
+                success_window.after(100, lambda: success_window.attributes("-topmost", False))
 
-            messagebox.showinfo(
-                "Export",
-                f"Export réussi vers {file_path}",
-                parent=self.analytics_panel.parent,
-            )
+                ttk.Label(success_window, text="✅ Export réussi!", font=("Arial", 12, "bold")).pack(pady=20)
+                ttk.Label(success_window, text=f"Fichier: {filename}").pack(pady=5)
+                ttk.Button(success_window, text="OK", command=lambda: [success_window.grab_release(), success_window.destroy()]).pack(pady=10)
+
+                logger.info(f"Files exported successfully to: {filename}")
+
         except Exception as e:
-            logger.error(f"Export failed: {e}")
+            logger.error(f"Failed to export files: {e}")
             messagebox.showerror(
-                "Erreur Export",
-                f"Impossible d'exporter les fichiers.\nErreur: {str(e)}",
-                parent=self.analytics_panel.parent,
+                "Erreur Export", f"Échec de l'export:\n{str(e)}", parent=self.analytics_panel.parent
             )
 
     def _on_file_double_click(self, event):  # pragma: no cover - UI
@@ -382,6 +391,7 @@ class AnalyticsDrillDownViewer:
                 for item in self.drill_tree.get_children():
                     self.drill_tree.delete(item)
 
+                self.current_files = []
                 for row in rows:
                     try:
                         if len(row) >= 6:
@@ -417,6 +427,18 @@ class AnalyticsDrillDownViewer:
                                     owner_str,
                                 ),
                             )
+
+                            self.current_files.append(
+                                {
+                                    "name": name,
+                                    "path": path,
+                                    "file_size": size,
+                                    "last_modified": modified,
+                                    "owner": owner,
+                                    "classif": classif,
+                                    "rgpd": rgpd,
+                                }
+                            )
                     except Exception as row_error:
                         logger.warning(f"Erreur traitement ligne: {row_error}")
                         continue
@@ -441,30 +463,107 @@ class AnalyticsDrillDownViewer:
     def show_classification_files_modal(
         self, classification: str, title: str, click_info: Dict[str, Any]
     ) -> None:
+        """Fixed Security classification modal with proper 'Autres' handling."""
         try:
-            modal = self._create_base_modal(
-                title, f"🔒 Classification: {classification}"
-            )
-            query, params = self._build_modal_query_unified("security", classification)
-            self._load_filtered_files(
-                modal, query, params, f"Classification {classification}"
-            )
-        except Exception as e:  # pragma: no cover - UI
-            logger.error("Failed to show classification modal: %s", e)
+            modal = self._create_base_modal(title, f"🔐 Classification: {classification}")
+
+            logger.debug(f"Classification modal query for: {classification}")
+
+            if classification == "Autres":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.security_classification_cached NOT IN ('C0', 'C1', 'C2', 'C3') 
+                     OR r.security_classification_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("Using NOT IN query for 'Autres' category")
+            else:
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND COALESCE(r.security_classification_cached, 'none') = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (classification,)
+                logger.debug(f"Using exact match query for '{classification}'")
+
+            self._load_filtered_files(modal, query, params, f"Classification {classification}")
+
+        except Exception as e:
+            logger.error(f"Failed to show classification modal: {e}")
             messagebox.showerror(
-                "Erreur",
-                f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}",
+                "Erreur", f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}"
             )
 
     def show_rgpd_files_modal(
         self, risk_level: str, title: str, click_info: Dict[str, Any]
     ) -> None:
+        """Fixed RGPD risk modal with proper 'Autres'/'none' handling."""
         try:
-            modal = self._create_base_modal(title, f"⚠️ Risque RGPD: {risk_level}")
-            query, params = self._build_modal_query_unified("rgpd", risk_level)
-            self._load_filtered_files(modal, query, params, f"RGPD {risk_level}")
-        except Exception as e:  # pragma: no cover - UI
-            logger.error("Failed to show RGPD modal: %s", e)
+            modal = self._create_base_modal(title, f"🛡️ Risque RGPD: {risk_level}")
+
+            logger.debug(f"RGPD modal query for: {risk_level}")
+
+            if risk_level == "Autres":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.rgpd_risk_cached NOT IN ('none', 'low', 'medium', 'high', 'critical') 
+                     OR r.rgpd_risk_cached IS NULL)
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("Using NOT IN query for RGPD 'Autres' category")
+            elif risk_level == "none":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND (r.rgpd_risk_cached IS NULL OR r.rgpd_risk_cached = 'none')
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("Using NULL/none query for 'none' category")
+            else:
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND r.rgpd_risk_cached = ?
+                ORDER BY f.file_size DESC
+                """
+                params = (risk_level,)
+                logger.debug(f"Using exact match query for RGPD '{risk_level}'")
+
+            self._load_filtered_files(modal, query, params, f"Risque RGPD {risk_level}")
+
+        except Exception as e:
+            logger.error(f"Failed to show RGPD modal: {e}")
             messagebox.showerror(
                 "Erreur", f"Impossible d'ouvrir la vue RGPD.\nErreur: {str(e)}"
             )
@@ -576,26 +675,48 @@ class AnalyticsDrillDownViewer:
     def show_temporal_files_modal(
         self, temporal_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
+        """Fixed Temporal analysis modal with proper date filtering."""
         try:
-            modal = self._create_base_modal(
-                title, f"📅 Analyse temporelle: {temporal_type}"
-            )
-            date_field = (
-                "last_modified" if temporal_type == "modification" else "creation_time"
-            )
+            modal = self._create_base_modal(title, f"📅 Analyse temporelle: {temporal_type}")
+
+            date_field = "last_modified" if temporal_type == "modification" else "creation_time"
             period_filter = click_info.get("period_filter", "all")
 
-            query, params = self._build_modal_query_unified(
-                "temporal", f"{date_field}:{period_filter}"
-            )
-            self._load_filtered_files(
-                modal, query, params, f"Fichiers {temporal_type} - {period_filter}"
-            )
-            logger.info(
-                f"Opened temporal modal: {temporal_type}, period: {period_filter}"
-            )
-        except Exception as e:  # pragma: no cover - UI
-            logger.error("Failed to show temporal modal: %s", e)
+            logger.debug(f"Temporal modal query for: {temporal_type}, period: {period_filter}")
+
+            period_conditions = {
+                "recent": f"f.{date_field} >= date('now', '-30 days')",
+                "1y": f"f.{date_field} >= date('now', '-1 year') AND f.{date_field} < date('now')",
+                "2y": f"f.{date_field} >= date('now', '-2 years') AND f.{date_field} < date('now', '-1 year')",
+                "3y": f"f.{date_field} >= date('now', '-3 years') AND f.{date_field} < date('now', '-2 years')",
+                "5y": f"f.{date_field} >= date('now', '-5 years') AND f.{date_field} < date('now', '-3 years')",
+                "7y": f"f.{date_field} >= date('now', '-7 years') AND f.{date_field} < date('now', '-5 years')",
+                "old": f"f.{date_field} < date('now', '-7 years')",
+                "all": "1=1",
+            }
+
+            date_condition = period_conditions.get(period_filter, "1=1")
+
+            query = f"""
+        SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
+               COALESCE(r.security_classification_cached, 'none') AS classif,
+               COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE (f.status IS NULL OR f.status != 'error')
+        AND f.file_size > 0
+        AND f.{date_field} IS NOT NULL
+        AND {date_condition}
+        ORDER BY f.{date_field} DESC
+            """
+
+            params = ()
+
+            self._load_filtered_files(modal, query, params, f"Fichiers {temporal_type} - {period_filter}")
+            logger.info(f"Opened temporal modal: {temporal_type}, period: {period_filter}")
+
+        except Exception as e:
+            logger.error(f"Failed to show temporal modal: {e}")
             messagebox.showerror(
                 "Erreur", f"Impossible d'ouvrir la vue Temporelle.\nErreur: {str(e)}"
             )
@@ -660,11 +781,30 @@ class AnalyticsDrillDownViewer:
     def show_duplicates_detailed_modal(
         self, level: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Show modal for specific duplicate level (1x, 2x, 3x, etc.)."""
+        """Fixed duplicate analysis modal with proper counting logic."""
         try:
             modal = self._create_base_modal(title, f"🔄 Fichiers dupliqués - {level}")
 
-            if level == "7x+":
+            logger.debug(f"Duplicates detailed modal query for: {level}")
+
+            if level == "1x":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       1 as copy_count
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.fast_hash IS NOT NULL AND f.fast_hash != ''
+                AND (SELECT COUNT(*) FROM fichiers f2
+                     WHERE f2.fast_hash = f.fast_hash AND f2.file_size = f.file_size
+                       AND (f2.status IS NULL OR f2.status != 'error')) = 1
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+
+            elif level == "7x+":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
@@ -682,6 +822,7 @@ class AnalyticsDrillDownViewer:
                 ORDER BY copy_count DESC, f.file_size DESC
                 """
                 params = ()
+
             else:
                 target_count = int(level.replace("x", ""))
                 query = """
@@ -703,9 +844,10 @@ class AnalyticsDrillDownViewer:
                 params = (target_count,)
 
             self._load_filtered_files(modal, query, params, f"Groupes avec {level}")
+            logger.info(f"Opened duplicates detailed modal: {level}")
 
         except Exception as e:
-            logger.error("Failed to show duplicates detailed modal: %s", e)
+            logger.error(f"Failed to show duplicates detailed modal: {e}")
             messagebox.showerror(
                 "Erreur",
                 f"Impossible d'ouvrir la vue doublons détaillée.\nErreur: {str(e)}",
@@ -714,57 +856,55 @@ class AnalyticsDrillDownViewer:
     def show_finance_modal(
         self, finance_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Affiche modal pour types financiers avec gestion complète des catégories."""
+        """Fixed Finance modal with proper 'Autres'/'none' handling."""
         try:
-            modal = self._create_base_modal(
-                title, f"💰 Types Financiers: {finance_type}"
-            )
+            modal = self._create_base_modal(title, f"💰 Finance: {finance_type}")
+
+            logger.debug(f"Finance modal query for: {finance_type}")
 
             if finance_type == "Autres":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                       COALESCE(r.finance_type_cached, 'none') AS finance_type
+                       COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND COALESCE(r.finance_type_cached, 'none') NOT IN ('invoice','contract','budget','accounting','payment','none')
+                AND (r.finance_type_cached NOT IN ('none', 'invoice', 'contract', 'budget', 'accounting', 'payment') 
+                     OR r.finance_type_cached IS NULL)
                 ORDER BY f.file_size DESC
                 """
-                params: tuple = ()
-                logger.debug("Finance 'Autres' query: excludes known types and 'none'")
+                params = ()
+                logger.debug("Using NOT IN query for Finance 'Autres' category")
             elif finance_type == "none":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                       COALESCE(r.finance_type_cached, 'none') AS finance_type
+                       COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND COALESCE(r.finance_type_cached, 'none') = 'none'
+                AND (r.finance_type_cached IS NULL OR r.finance_type_cached = 'none')
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Finance 'none' query: includes explicit 'none' and NULL")
+                logger.debug("Using NULL/none query for Finance 'none' category")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                       COALESCE(r.finance_type_cached, 'none') AS finance_type
+                       COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND COALESCE(r.finance_type_cached, 'none') = ?
+                AND r.finance_type_cached = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (finance_type,)
-                logger.debug(f"Finance exact match query for: {finance_type}")
+                logger.debug(f"Using exact match query for Finance '{finance_type}'")
 
             self._load_filtered_files(modal, query, params, f"Finance {finance_type}")
 
@@ -779,57 +919,57 @@ class AnalyticsDrillDownViewer:
     def show_legal_modal(
         self, legal_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Affiche modal pour types légaux avec gestion complète des catégories."""
+        """Fixed Legal modal with proper 'Autres'/'none' handling."""
         try:
-            modal = self._create_base_modal(title, f"⚖️ Types Légaux: {legal_type}")
+            modal = self._create_base_modal(title, f"⚖️ Légal: {legal_type}")
+
+            logger.debug(f"Legal modal query for: {legal_type}")
 
             if legal_type == "Autres":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                       COALESCE(r.legal_type_cached, 'none') AS legal_type
+                       COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND COALESCE(r.legal_type_cached, 'none') NOT IN ('employment','lease','sale','nda','compliance','litigation','none')
+                AND (r.legal_type_cached NOT IN ('none', 'employment', 'lease', 'sale', 'nda', 'compliance', 'litigation') 
+                     OR r.legal_type_cached IS NULL)
                 ORDER BY f.file_size DESC
                 """
-                params: tuple = ()
-                logger.debug("Legal 'Autres' query: excludes known types and 'none'")
+                params = ()
+                logger.debug("Using NOT IN query for Legal 'Autres' category")
             elif legal_type == "none":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                       COALESCE(r.legal_type_cached, 'none') AS legal_type
+                       COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND COALESCE(r.legal_type_cached, 'none') = 'none'
+                AND (r.legal_type_cached IS NULL OR r.legal_type_cached = 'none')
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Legal 'none' query: includes explicit 'none' and NULL")
+                logger.debug("Using NULL/none query for Legal 'none' category")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                        COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
-                       COALESCE(r.legal_type_cached, 'none') AS legal_type
+                       COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND COALESCE(r.legal_type_cached, 'none') = ?
+                AND r.legal_type_cached = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (legal_type,)
-                logger.debug(f"Legal exact match query for: {legal_type}")
+                logger.debug(f"Using exact match query for Legal '{legal_type}'")
 
-            self._load_filtered_files(modal, query, params, f"Legal {legal_type}")
+            self._load_filtered_files(modal, query, params, f"Légal {legal_type}")
 
         except Exception as e:
             logger.error(f"Failed to show legal modal: {e}")
