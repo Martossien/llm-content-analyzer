@@ -229,13 +229,9 @@ class AnalyticsDrillDownViewer:
                     "COALESCE(r.rgpd_risk_cached, 'none') NOT IN ('low','medium','high','critical','none')"
                 )
             elif category_value == "none":
-                conditions.append(
-                    "COALESCE(r.rgpd_risk_cached, 'none') = 'none'"
-                )
+                conditions.append("COALESCE(r.rgpd_risk_cached, 'none') = 'none'")
             else:
-                conditions.append(
-                    "COALESCE(r.rgpd_risk_cached, 'none') = ?"
-                )
+                conditions.append("COALESCE(r.rgpd_risk_cached, 'none') = ?")
                 params.append(category_value)
         elif category_type == "size":
             size_map = {
@@ -245,7 +241,7 @@ class AnalyticsDrillDownViewer:
                 "150-200MB": (150 * 1024 * 1024, 200 * 1024 * 1024),
                 "200-300MB": (200 * 1024 * 1024, 300 * 1024 * 1024),
                 "300-500MB": (300 * 1024 * 1024, 500 * 1024 * 1024),
-                ">500MB": (500 * 1024 * 1024, float('inf')),
+                ">500MB": (500 * 1024 * 1024, float("inf")),
             }
             if category_value in size_map:
                 min_size, max_size = size_map[category_value]
@@ -286,11 +282,16 @@ class AnalyticsDrillDownViewer:
     def _export_filtered_files(self) -> None:  # pragma: no cover - UI
         """Export filtered files with proper window Z-order management."""
         try:
-            if not hasattr(self, 'current_files') or not self.current_files:
-                messagebox.showwarning("Attention", "Aucun fichier à exporter", parent=self.analytics_panel.parent)
+            if not hasattr(self, "current_files") or not self.current_files:
+                messagebox.showwarning(
+                    "Attention",
+                    "Aucun fichier à exporter",
+                    parent=self.analytics_panel.parent,
+                )
                 return
 
             from tkinter import filedialog
+
             filename = filedialog.asksaveasfilename(
                 parent=self.analytics_panel.parent,
                 title="Exporter la liste des fichiers",
@@ -304,20 +305,31 @@ class AnalyticsDrillDownViewer:
 
             if filename:
                 import csv
-                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+
+                with open(filename, "w", newline="", encoding="utf-8") as csvfile:
                     writer = csv.writer(csvfile)
-                    headers = ["Nom", "Chemin", "Taille", "Propriétaire", "Modifié", "Classification", "Risque RGPD"]
+                    headers = [
+                        "Nom",
+                        "Chemin",
+                        "Taille",
+                        "Propriétaire",
+                        "Modifié",
+                        "Classification",
+                        "Risque RGPD",
+                    ]
                     writer.writerow(headers)
                     for file_data in self.current_files:
-                        writer.writerow([
-                            file_data.get('name', ''),
-                            file_data.get('path', ''),
-                            file_data.get('file_size', 0),
-                            file_data.get('owner', ''),
-                            file_data.get('last_modified', ''),
-                            file_data.get('classif', ''),
-                            file_data.get('rgpd', ''),
-                        ])
+                        writer.writerow(
+                            [
+                                file_data.get("name", ""),
+                                file_data.get("path", ""),
+                                file_data.get("file_size", 0),
+                                file_data.get("owner", ""),
+                                file_data.get("last_modified", ""),
+                                file_data.get("classif", ""),
+                                file_data.get("rgpd", ""),
+                            ]
+                        )
 
                 success_window = tk.Toplevel(self.analytics_panel.parent)
                 success_window.title("Export Réussi")
@@ -327,18 +339,31 @@ class AnalyticsDrillDownViewer:
                 success_window.focus_set()
                 success_window.attributes("-topmost", True)
                 success_window.grab_set()
-                success_window.after(100, lambda: success_window.attributes("-topmost", False))
+                success_window.after(
+                    100, lambda: success_window.attributes("-topmost", False)
+                )
 
-                ttk.Label(success_window, text="✅ Export réussi!", font=("Arial", 12, "bold")).pack(pady=20)
+                ttk.Label(
+                    success_window, text="✅ Export réussi!", font=("Arial", 12, "bold")
+                ).pack(pady=20)
                 ttk.Label(success_window, text=f"Fichier: {filename}").pack(pady=5)
-                ttk.Button(success_window, text="OK", command=lambda: [success_window.grab_release(), success_window.destroy()]).pack(pady=10)
+                ttk.Button(
+                    success_window,
+                    text="OK",
+                    command=lambda: [
+                        success_window.grab_release(),
+                        success_window.destroy(),
+                    ],
+                ).pack(pady=10)
 
                 logger.info(f"Files exported successfully to: {filename}")
 
         except Exception as e:
             logger.error(f"Failed to export files: {e}")
             messagebox.showerror(
-                "Erreur Export", f"Échec de l'export:\n{str(e)}", parent=self.analytics_panel.parent
+                "Erreur Export",
+                f"Échec de l'export:\n{str(e)}",
+                parent=self.analytics_panel.parent,
             )
 
     def _on_file_double_click(self, event):  # pragma: no cover - UI
@@ -465,46 +490,47 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         """Fixed Security classification modal with proper 'Autres' handling."""
         try:
-            modal = self._create_base_modal(title, f"🔐 Classification: {classification}")
+            modal = self._create_base_modal(
+                title, f"🔐 Classification: {classification}"
+            )
 
             logger.debug(f"Classification modal query for: {classification}")
 
             if classification == "Autres":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                       COALESCE(r.security_classification_cached, 'none') AS security_class,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND (r.security_classification_cached NOT IN ('C0', 'C1', 'C2', 'C3') 
-                     OR r.security_classification_cached IS NULL)
+                WHERE f.status = 'completed'
+                AND (r.security_classification_cached IS NULL 
+                     OR r.security_classification_cached NOT IN ('C0', 'C1', 'C2', 'C3'))
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Using NOT IN query for 'Autres' category")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                       COALESCE(r.security_classification_cached, 'none') AS security_class,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND COALESCE(r.security_classification_cached, 'none') = ?
+                WHERE f.status = 'completed'
+                AND r.security_classification_cached = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (classification,)
-                logger.debug(f"Using exact match query for '{classification}'")
 
-            self._load_filtered_files(modal, query, params, f"Classification {classification}")
+            self._load_filtered_files(
+                modal, query, params, f"Sécurité {classification}"
+            )
 
         except Exception as e:
             logger.error(f"Failed to show classification modal: {e}")
             messagebox.showerror(
-                "Erreur", f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}"
+                "Erreur",
+                f"Impossible d'ouvrir la vue Classification.\nErreur: {str(e)}",
             )
 
     def show_rgpd_files_modal(
@@ -519,48 +545,42 @@ class AnalyticsDrillDownViewer:
             if risk_level == "Autres":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                       COALESCE(r.security_classification_cached, 'none') AS security_class,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
-                AND (r.rgpd_risk_cached NOT IN ('none', 'low', 'medium', 'high', 'critical') 
-                     OR r.rgpd_risk_cached IS NULL)
+                WHERE f.status = 'completed'
+                AND (r.rgpd_risk_cached IS NULL 
+                     OR r.rgpd_risk_cached NOT IN ('none', 'low', 'medium', 'high', 'critical'))
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Using NOT IN query for RGPD 'Autres' category")
             elif risk_level == "none":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                       COALESCE(r.security_classification_cached, 'none') AS security_class,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
+                WHERE f.status = 'completed'
                 AND (r.rgpd_risk_cached IS NULL OR r.rgpd_risk_cached = 'none')
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Using NULL/none query for 'none' category")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       COALESCE(r.security_classification_cached, 'none') AS classif,
-                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                       COALESCE(r.security_classification_cached, 'none') AS security_class,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
-                AND f.file_size > 0
+                WHERE f.status = 'completed'
                 AND r.rgpd_risk_cached = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (risk_level,)
-                logger.debug(f"Using exact match query for RGPD '{risk_level}'")
 
-            self._load_filtered_files(modal, query, params, f"Risque RGPD {risk_level}")
+            self._load_filtered_files(modal, query, params, f"RGPD {risk_level}")
 
         except Exception as e:
             logger.error(f"Failed to show RGPD modal: {e}")
@@ -673,54 +693,92 @@ class AnalyticsDrillDownViewer:
             )
 
     def show_temporal_files_modal(
-        self, temporal_type: str, title: str, click_info: Dict[str, Any]
+        self, period: str, date_type: str, title: str, click_info: Dict[str, Any]
     ) -> None:
-        """Fixed Temporal analysis modal with standardized date filtering."""
+        """Display temporal files modal with strict date filtering."""
+
         try:
-            modal = self._create_base_modal(title, f"📅 Analyse temporelle: {temporal_type}")
+            logger = logging.getLogger(__name__)
+            logger.info(f"Ouverture modal temporel: {date_type}, période: {period}")
 
-            date_field = "last_modified" if temporal_type == "modification" else "creation_time"
-            period_filter = click_info.get("period_filter", "all")
+            modal = self._create_base_modal(
+                f"Fichiers - Analyse Temporelle ({date_type})", title
+            )
 
-            logger.debug(f"Temporal modal query for: {temporal_type}, period: {period_filter}")
+            from datetime import datetime, timedelta
 
-            period_conditions = {
-                "0_1y": f"f.{date_field} > date('now', '-1 year')",
-                "1_2y": f"f.{date_field} <= date('now', '-1 year') AND f.{date_field} > date('now', '-2 years')",
-                "2_3y": f"f.{date_field} <= date('now', '-2 years') AND f.{date_field} > date('now', '-3 years')",
-                "3_4y": f"f.{date_field} <= date('now', '-3 years') AND f.{date_field} > date('now', '-4 years')",
-                "4_5y": f"f.{date_field} <= date('now', '-4 years') AND f.{date_field} > date('now', '-5 years')",
-                "5_6y": f"f.{date_field} <= date('now', '-5 years') AND f.{date_field} > date('now', '-6 years')",
-                "6plus": f"f.{date_field} <= date('now', '-6 years')",
-                "all": "1=1",
+            now = datetime.now()
+            period_definitions = {
+                "0_1y": (now - timedelta(days=365), now),
+                "1_2y": (now - timedelta(days=730), now - timedelta(days=365)),
+                "2_3y": (now - timedelta(days=1095), now - timedelta(days=730)),
+                "3_4y": (now - timedelta(days=1460), now - timedelta(days=1095)),
+                "4_5y": (now - timedelta(days=1825), now - timedelta(days=1460)),
+                "5_6y": (now - timedelta(days=2190), now - timedelta(days=1825)),
+                "6plus": (datetime.min, now - timedelta(days=2190)),
             }
 
-            date_condition = period_conditions.get(period_filter, "1=1")
+            if period not in period_definitions:
+                raise ValueError(f"Période temporelle inconnue: {period}")
 
-            query = f"""
-        SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
-               COALESCE(r.security_classification_cached, 'none') AS classif,
-               COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
-        FROM fichiers f
-        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-        WHERE (f.status IS NULL OR f.status != 'error')
-        AND f.file_size > 0
-        AND f.{date_field} IS NOT NULL
-        AND f.{date_field} != ''
-        AND f.{date_field} != '0'
-        AND {date_condition}
-        ORDER BY f.{date_field} DESC
+            start_date, end_date = period_definitions[period]
+
+            date_column = (
+                "f.last_modified" if date_type == "modification" else "f.creation_time"
+            )
+            fallback_column = (
+                "f.creation_time" if date_type == "modification" else "f.last_modified"
+            )
+
+            if period == "6plus":
+                date_filter = f"""
+            (
+                COALESCE({date_column}, {fallback_column}) IS NOT NULL
+                AND COALESCE({date_column}, {fallback_column}) != ''
+                AND datetime(COALESCE({date_column}, {fallback_column})) < datetime('{start_date.strftime('%Y-%m-%d %H:%M:%S')}')
+            )
+            """
+            else:
+                date_filter = f"""
+            (
+                COALESCE({date_column}, {fallback_column}) IS NOT NULL
+                AND COALESCE({date_column}, {fallback_column}) != ''
+                AND datetime(COALESCE({date_column}, {fallback_column})) >= datetime('{start_date.strftime('%Y-%m-%d %H:%M:%S')}')
+                AND datetime(COALESCE({date_column}, {fallback_column})) < datetime('{end_date.strftime('%Y-%m-%d %H:%M:%S')}')
+            )
             """
 
-            params = ()
+            query = f"""
+        SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.creation_time, f.owner,
+               COALESCE(r.security_classification_cached, 'none') AS security_class,
+               COALESCE(r.rgpd_risk_cached, 'none') AS rgpd_risk,
+               COALESCE(r.finance_type_cached, 'none') AS finance_type,
+               COALESCE(r.legal_type_cached, 'none') AS legal_type,
+               r.document_resume,
+               COALESCE({date_column}, {fallback_column}) AS effective_date
+        FROM fichiers f
+        LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+        WHERE f.status = 'completed' AND {date_filter}
+        ORDER BY datetime(COALESCE({date_column}, {fallback_column})) DESC, f.file_size DESC
+        LIMIT 5000
+            """
 
-            self._load_filtered_files(modal, query, params, f"Fichiers {temporal_type} - {period_filter}")
-            logger.info(f"Opened temporal modal: {temporal_type}, period: {period_filter}")
+            params: tuple = ()
+
+            logger.debug(f"Requête temporelle pour {period}: {query[:100]}...")
+
+            self._load_filtered_files(
+                modal, query, params, f"Temporel {date_type} - {period}"
+            )
+
+            logger.info(f"Modal temporel ouvert: {date_type}, période: {period}")
 
         except Exception as e:
-            logger.error(f"Failed to show temporal modal: {e}")
+            logger.error(f"Échec ouverture modal temporel: {e}")
             messagebox.showerror(
-                "Erreur", f"Impossible d'ouvrir la vue Temporelle.\nErreur: {str(e)}"
+                "Erreur",
+                f"Impossible d'ouvrir la vue temporelle.\nPériode: {period}\nType: {date_type}\nErreur: {str(e)}",
+                parent=self.analytics_panel.parent,
             )
 
     def show_combined_files_modal(
@@ -871,7 +929,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
+                WHERE f.status = 'completed'
                 AND f.file_size > 0
                 AND (r.finance_type_cached NOT IN ('none', 'invoice', 'contract', 'budget', 'accounting', 'payment') 
                      OR r.finance_type_cached IS NULL)
@@ -886,7 +944,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
+                WHERE f.status = 'completed'
                 AND f.file_size > 0
                 AND (r.finance_type_cached IS NULL OR r.finance_type_cached = 'none')
                 ORDER BY f.file_size DESC
@@ -900,7 +958,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.finance_type_cached, 'none') AS finance
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
+                WHERE f.status = 'completed'
                 AND f.file_size > 0
                 AND r.finance_type_cached = ?
                 ORDER BY f.file_size DESC
@@ -934,7 +992,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
+                WHERE f.status = 'completed'
                 AND f.file_size > 0
                 AND (r.legal_type_cached NOT IN ('none', 'employment', 'lease', 'sale', 'nda', 'compliance', 'litigation') 
                      OR r.legal_type_cached IS NULL)
@@ -949,7 +1007,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
+                WHERE f.status = 'completed'
                 AND f.file_size > 0
                 AND (r.legal_type_cached IS NULL OR r.legal_type_cached = 'none')
                 ORDER BY f.file_size DESC
@@ -963,7 +1021,7 @@ class AnalyticsDrillDownViewer:
                        COALESCE(r.legal_type_cached, 'none') AS legal
                 FROM fichiers f
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-                WHERE (f.status IS NULL OR f.status != 'error')
+                WHERE f.status = 'completed'
                 AND f.file_size > 0
                 AND r.legal_type_cached = ?
                 ORDER BY f.file_size DESC
@@ -2906,9 +2964,9 @@ class AnalyticsPanel:
 
             try:
                 metrics["duplicates"] = self._calculate_duplicates_safe(files)
-                metrics["duplicates"][
-                    "detailed"
-                ] = self._calculate_duplicates_detailed_metrics(files)
+                metrics["duplicates"]["detailed"] = (
+                    self._calculate_duplicates_detailed_metrics(files)
+                )
             except Exception as e:
                 logger.warning("Duplicate analysis failed: %s", e)
                 metrics["duplicates"] = {
@@ -3200,18 +3258,24 @@ class AnalyticsPanel:
 
         for level in ["1x", "2x", "3x", "4x", "5x", "6x", "7x+"]:
             if level == "7x+":
-                matching_families = [fam for fam in all_families.values() if len(fam) >= 7]
+                matching_families = [
+                    fam for fam in all_families.values() if len(fam) >= 7
+                ]
             else:
                 target = int(level.replace("x", ""))
-                matching_families = [fam for fam in all_families.values() if len(fam) == target]
+                matching_families = [
+                    fam for fam in all_families.values() if len(fam) == target
+                ]
 
             files_count = sum(len(fam) for fam in matching_families)
             size_total = sum(sum(f.file_size for f in fam) for fam in matching_families)
 
             detailed_metrics[level] = {
                 "count": files_count,
-                "percentage": round(files_count / total_files * 100, 1) if total_files else 0,
-                "size_gb": size_total / (1024 ** 3),
+                "percentage": (
+                    round(files_count / total_files * 100, 1) if total_files else 0
+                ),
+                "size_gb": size_total / (1024**3),
                 "families_count": len(matching_families),
             }
 
@@ -3243,13 +3307,41 @@ class AnalyticsPanel:
 
         # Nouvelle logique standardisée
         temporal_periods = [
-            {"key": "0_1y", "label": "0-1 an", "description": f"Fichiers sans {mode} depuis 0 à 1 an"},
-            {"key": "1_2y", "label": "1-2 ans", "description": f"Fichiers sans {mode} depuis 1 à 2 ans"},
-            {"key": "2_3y", "label": "2-3 ans", "description": f"Fichiers sans {mode} depuis 2 à 3 ans"},
-            {"key": "3_4y", "label": "3-4 ans", "description": f"Fichiers sans {mode} depuis 3 à 4 ans"},
-            {"key": "4_5y", "label": "4-5 ans", "description": f"Fichiers sans {mode} depuis 4 à 5 ans"},
-            {"key": "5_6y", "label": "5-6 ans", "description": f"Fichiers sans {mode} depuis 5 à 6 ans"},
-            {"key": "6plus", "label": "+6 ans", "description": f"Fichiers sans {mode} depuis plus de 6 ans"},
+            {
+                "key": "0_1y",
+                "label": "0-1 an",
+                "description": f"Fichiers sans {mode} depuis 0 à 1 an",
+            },
+            {
+                "key": "1_2y",
+                "label": "1-2 ans",
+                "description": f"Fichiers sans {mode} depuis 1 à 2 ans",
+            },
+            {
+                "key": "2_3y",
+                "label": "2-3 ans",
+                "description": f"Fichiers sans {mode} depuis 2 à 3 ans",
+            },
+            {
+                "key": "3_4y",
+                "label": "3-4 ans",
+                "description": f"Fichiers sans {mode} depuis 3 à 4 ans",
+            },
+            {
+                "key": "4_5y",
+                "label": "4-5 ans",
+                "description": f"Fichiers sans {mode} depuis 4 à 5 ans",
+            },
+            {
+                "key": "5_6y",
+                "label": "5-6 ans",
+                "description": f"Fichiers sans {mode} depuis 5 à 6 ans",
+            },
+            {
+                "key": "6plus",
+                "label": "+6 ans",
+                "description": f"Fichiers sans {mode} depuis plus de 6 ans",
+            },
         ]
 
         for period in temporal_periods:
@@ -3262,60 +3354,116 @@ class AnalyticsPanel:
             label.pack(side="left")
 
             desc_label = ttk.Label(
-                frame, text=f"({period['description']})", font=("Arial", 9), foreground="gray"
+                frame,
+                text=f"({period['description']})",
+                font=("Arial", 9),
+                foreground="gray",
             )
             desc_label.pack(side="left", padx=10)
 
             temporal_labels[period["key"]] = label
 
     def _calculate_temporal_metrics(
-        self, files: List[FileInfo], mode: str
-    ) -> Dict[str, Dict[str, Any]]:
+        self, files: List[FileInfo], date_type: str = "modification"
+    ) -> Dict[str, Any]:
+        """Calculate temporal metrics with strict period logic."""
+
         from datetime import datetime, timedelta
 
+        from content_analyzer.modules.age_analyzer import AgeAnalyzer
+
+        logger = logging.getLogger(__name__)
+        analyzer = AgeAnalyzer()
+
         now = datetime.now()
-        total_files = len(files)
-        temporal_metrics: Dict[str, Dict[str, Any]] = {}
+        logger.info(
+            f"Calcul temporel {date_type} avec référence: {now.strftime('%Y-%m-%d')}"
+        )
 
-        for years in range(1, 8):
-            if years == 7:
-                cutoff = now - timedelta(days=6 * 365)
-                if mode == "modification":
-                    matching_files = [
-                        f for f in files if self._parse_time(f.last_modified) <= cutoff
-                    ]
-                else:
-                    matching_files = [
-                        f for f in files if self._parse_time(f.creation_time) <= cutoff
-                    ]
-            else:
-                upper = now - timedelta(days=(years - 1) * 365)
-                lower = now - timedelta(days=years * 365)
-                if mode == "modification":
-                    matching_files = [
-                        f
-                        for f in files
-                        if lower < self._parse_time(f.last_modified) <= upper
-                    ]
-                else:
-                    matching_files = [
-                        f
-                        for f in files
-                        if lower < self._parse_time(f.creation_time) <= upper
-                    ]
+        period_definitions = {
+            "0_1y": (now - timedelta(days=365), now),
+            "1_2y": (now - timedelta(days=730), now - timedelta(days=365)),
+            "2_3y": (now - timedelta(days=1095), now - timedelta(days=730)),
+            "3_4y": (now - timedelta(days=1460), now - timedelta(days=1095)),
+            "4_5y": (now - timedelta(days=1825), now - timedelta(days=1460)),
+            "5_6y": (now - timedelta(days=2190), now - timedelta(days=1825)),
+            "6plus": (datetime.min, now - timedelta(days=2190)),
+        }
 
-            total_size = sum(f.file_size for f in matching_files)
-            temporal_metrics[f"{years}y"] = {
-                "count": len(matching_files),
-                "percentage": (
-                    round(len(matching_files) / total_files * 100, 1)
-                    if total_files
-                    else 0
-                ),
-                "size_gb": total_size / (1024**3),
-            }
+        period_counts = {
+            key: {"count": 0, "size": 0, "files": []} for key in period_definitions
+        }
 
-        return temporal_metrics
+        files_processed = 0
+        files_with_valid_dates = 0
+
+        for info in files:
+            files_processed += 1
+            date_str = (
+                info.last_modified
+                if date_type == "modification"
+                else info.creation_time
+            ) or (
+                info.creation_time
+                if date_type == "modification"
+                else info.last_modified
+            )
+
+            if not date_str:
+                logger.debug(f"Fichier {info.name}: pas de date {date_type}")
+                continue
+
+            file_date = analyzer._parse_time(date_str)
+            if file_date == datetime.max:
+                logger.warning(
+                    f"Impossible de parser la date pour {info.name}: {date_str}"
+                )
+                continue
+
+            files_with_valid_dates += 1
+            classified = False
+            for period_key, (start_date, end_date) in period_definitions.items():
+                if start_date <= file_date < end_date:
+                    data = period_counts[period_key]
+                    data["count"] += 1
+                    data["size"] += info.file_size or 0
+                    data["files"].append(info.id)
+                    classified = True
+                    logger.debug(
+                        f"Fichier {info.name} ({file_date.strftime('%Y-%m-%d')}) → {period_key}"
+                    )
+                    break
+
+            if not classified:
+                logger.warning(
+                    f"Fichier non classifié: {info.name} - {file_date.strftime('%Y-%m-%d')}"
+                )
+
+        total_files = files_with_valid_dates
+        for key in period_counts:
+            count = period_counts[key]["count"]
+            period_counts[key]["percentage"] = (
+                (count / total_files * 100) if total_files > 0 else 0
+            )
+
+        result = {
+            "distribution": period_counts,
+            "total_files": total_files,
+            "files_processed": files_processed,
+            "files_with_valid_dates": files_with_valid_dates,
+            "date_type": date_type,
+            "reference_date": now.isoformat(),
+        }
+
+        logger.info(
+            f"Analyse temporelle {date_type} terminée: {total_files} fichiers avec dates valides"
+        )
+        for period, data in period_counts.items():
+            logger.info(
+                f"  {period}: {data['count']} fichiers ({data['percentage']:.1f}%)"
+            )
+
+        return result
 
     def _calculate_temporal_analysis(self) -> Dict[str, Any]:
         """Calcul d'analyse temporelle avec récupération de données robuste."""
@@ -4278,9 +4426,7 @@ class AnalyticsPanel:
                                 percentage = metrics.get("percentage", 0.0)
                                 size_gb = metrics.get("size_gb", 0.0)
 
-                                display_text = (
-                                    f"{label_text}: {percentage}% | {count} fichiers | {size_gb:.1f}GB"
-                                )
+                                display_text = f"{label_text}: {percentage}% | {count} fichiers | {size_gb:.1f}GB"
                                 labels[key].config(text=display_text)
 
                                 logger.debug(f"Updated {mode} {key}: {count} files")
@@ -4303,10 +4449,12 @@ class AnalyticsPanel:
                 except Exception as e:
                     logger.warning("Erreur mise à jour niveau %s: %s", level, e)
 
-            self.update_temporal_analysis_display({
-                "modification": metrics.get("temporal_modification", {}),
-                "creation": metrics.get("temporal_creation", {}),
-            })
+            self.update_temporal_analysis_display(
+                {
+                    "modification": metrics.get("temporal_modification", {}),
+                    "creation": metrics.get("temporal_creation", {}),
+                }
+            )
 
             size_data = metrics.get("file_size_analysis", {})
             size_labels = self._safe_get_labels("file_size_labels")
