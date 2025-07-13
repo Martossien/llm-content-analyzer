@@ -227,8 +227,12 @@ class AnalyticsDrillDownViewer:
                 logger.info(f"Results found: {len(rows)} rows")
 
                 if not rows:
-                    progress_label.config(text="ℹ️ Aucun fichier trouvé pour ces critères")
-                    logger.warning(f"No results for query: {query[:100]}... params: {params}")
+                    progress_label.config(
+                        text="ℹ️ Aucun fichier trouvé pour ces critères"
+                    )
+                    logger.warning(
+                        f"No results for query: {query[:100]}... params: {params}"
+                    )
                     return
 
                 for item in self.drill_tree.get_children():
@@ -243,8 +247,16 @@ class AnalyticsDrillDownViewer:
 
                             size_str = self._format_file_size(size or 0)
                             modified_str = modified[:19] if modified else "N/A"
-                            name_str = (str(name)[:50] + "..." if len(str(name)) > 50 else str(name))
-                            path_str = (str(path)[:80] + "..." if len(str(path)) > 80 else str(path))
+                            name_str = (
+                                str(name)[:50] + "..."
+                                if len(str(name)) > 50
+                                else str(name)
+                            )
+                            path_str = (
+                                str(path)[:80] + "..."
+                                if len(str(path)) > 80
+                                else str(path)
+                            )
                             owner_str = str(owner or "Inconnu")
 
                             self.drill_tree.insert(
@@ -265,7 +277,9 @@ class AnalyticsDrillDownViewer:
                         logger.warning(f"Erreur traitement ligne: {row_error}")
                         continue
 
-                progress_label.config(text=f"✅ {len(rows)} fichiers chargés - {category}")
+                progress_label.config(
+                    text=f"✅ {len(rows)} fichiers chargés - {category}"
+                )
                 modal.after(3000, progress_label.destroy)
         except Exception as e:
             logger.error(f"Critical error in _load_filtered_files: {e}")
@@ -297,12 +311,27 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.security_classification_cached NOT IN ('C0','C1','C2','C3')
-                     OR r.security_classification_cached IS NULL)
+                AND COALESCE(r.security_classification_cached, 'none') NOT IN ('C0','C1','C2','C3','none')
                 ORDER BY f.file_size DESC
                 """
                 params: tuple = ()
-                logger.debug("Security 'Autres' query: includes 'none', NULL, and unknown values")
+                logger.debug(
+                    "Security 'Autres' query: excludes standard levels and 'none'"
+                )
+            elif classification == "none":
+                query = """
+                SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
+                FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
+                WHERE (f.status IS NULL OR f.status != 'error')
+                AND f.file_size > 0
+                AND COALESCE(r.security_classification_cached, 'none') = 'none'
+                ORDER BY f.file_size DESC
+                """
+                params = ()
+                logger.debug("Security 'none' query: includes explicit 'none' and NULL")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -312,7 +341,7 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND r.security_classification_cached = ?
+                AND COALESCE(r.security_classification_cached, 'none') = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (classification,)
@@ -343,12 +372,11 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.rgpd_risk_cached NOT IN ('none','low','medium','high','critical')
-                     OR r.rgpd_risk_cached IS NULL)
+                AND COALESCE(r.rgpd_risk_cached, 'none') NOT IN ('low','medium','high','critical','none')
                 ORDER BY f.file_size DESC
                 """
                 params: tuple = ()
-                logger.debug("RGPD 'Autres' query: excludes known levels, includes unknown values")
+                logger.debug("RGPD 'Autres' query: excludes known levels and 'none'")
             elif risk_level == "none":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -358,11 +386,11 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.rgpd_risk_cached = 'none' OR r.rgpd_risk_cached IS NULL)
+                AND COALESCE(r.rgpd_risk_cached, 'none') = 'none'
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("RGPD 'none' query: includes explicit 'none' and NULL values")
+                logger.debug("RGPD 'none' query: includes explicit 'none' and NULL")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -372,7 +400,7 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND r.rgpd_risk_cached = ?
+                AND COALESCE(r.rgpd_risk_cached, 'none') = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (risk_level,)
@@ -390,14 +418,26 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         try:
             modal = self._create_base_modal(title, f"📅 Analyse d'âge: {age_type}")
-            threshold_years = getattr(
-                self.analytics_panel, "threshold_age_years", tk.StringVar(value="2")
-            ).get()
+            age_category = click_info.get("age_category", "old_files")
+            threshold_days = click_info.get("threshold_days", 365)
+
             date_field = (
-                "last_modified"
-                if age_type == "old_files_modification"
-                else "creation_time"
+                "last_modified" if "modification" in age_type else "creation_time"
             )
+
+            age_conditions = {
+                "recent_7_days": f"f.{date_field} >= date('now', '-7 days')",
+                "recent_30_days": f"f.{date_field} >= date('now', '-30 days') AND f.{date_field} < date('now', '-7 days')",
+                "recent_90_days": f"f.{date_field} >= date('now', '-90 days') AND f.{date_field} < date('now', '-30 days')",
+                "old_1_year": f"f.{date_field} < date('now', '-1 year')",
+                "old_2_years": f"f.{date_field} < date('now', '-2 years')",
+                "dormant": f"f.{date_field} < date('now', '-{threshold_days} days')",
+            }
+
+            condition = age_conditions.get(
+                age_category, f"f.{date_field} < date('now', '-1 year')"
+            )
+
             query = f"""
             SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
                    COALESCE(r.security_classification_cached, 'none') AS classif,
@@ -406,11 +446,13 @@ class AnalyticsDrillDownViewer:
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
             WHERE (f.status IS NULL OR f.status != 'error')
             AND f.file_size > 0
-            AND date(f.{date_field}) < date('now', '-{threshold_years} years')
+            AND f.{date_field} IS NOT NULL
+            AND {condition}
             ORDER BY f.{date_field} ASC
             """
-            self._load_filtered_files(
-                modal, query, (), f"Fichiers anciens ({age_type})"
+            self._load_filtered_files(modal, query, (), f"Fichiers {age_category}")
+            logger.info(
+                f"Opened age analysis modal: {age_type}, category: {age_category}"
             )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show age analysis modal: %s", e)
@@ -423,22 +465,38 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         try:
             modal = self._create_base_modal(title, f"📊 Analyse de taille: {size_type}")
-            threshold_mb = getattr(
-                self.analytics_panel, "threshold_size_mb", tk.StringVar(value="100")
-            ).get()
-            threshold_bytes = int(threshold_mb) * 1024 * 1024
-            query = """
+
+            size_thresholds = {
+                "<1MB": ("f.file_size < ?", (1024 * 1024,)),
+                "1-10MB": (
+                    "f.file_size >= ? AND f.file_size < ?",
+                    (1024 * 1024, 10 * 1024 * 1024),
+                ),
+                "10-50MB": (
+                    "f.file_size >= ? AND f.file_size < ?",
+                    (10 * 1024 * 1024, 50 * 1024 * 1024),
+                ),
+                "<50MB": ("f.file_size < ?", (50 * 1024 * 1024,)),
+                ">50MB": ("f.file_size >= ?", (50 * 1024 * 1024,)),
+                ">100MB": ("f.file_size >= ?", (100 * 1024 * 1024,)),
+                ">500MB": ("f.file_size >= ?", (500 * 1024 * 1024,)),
+                ">1GB": ("f.file_size >= ?", (1024 * 1024 * 1024,)),
+            }
+
+            condition, params = size_thresholds.get(size_type, ("1=1", ()))
+
+            query = f"""
             SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                    COALESCE(r.security_classification_cached, 'none') AS classif,
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') AND f.file_size > ?
+            WHERE (f.status IS NULL OR f.status != 'error')
+            AND {condition}
             ORDER BY f.file_size DESC
             """
-            self._load_filtered_files(
-                modal, query, (threshold_bytes,), f"Gros fichiers (>{threshold_mb}MB)"
-            )
+            self._load_filtered_files(modal, query, params, f"Fichiers {size_type}")
+            logger.info(f"Opened size analysis modal for: {size_type}")
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show size analysis modal: %s", e)
             messagebox.showerror(
@@ -453,24 +511,35 @@ class AnalyticsDrillDownViewer:
             SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
                    COALESCE(r.security_classification_cached, 'none') AS classif,
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                   f.fast_hash,
                    (
                        SELECT COUNT(*) FROM fichiers f2
-                       WHERE f2.file_size = f.file_size
-                         AND f2.name = f.name
+                       WHERE f2.fast_hash = f.fast_hash
+                         AND f2.file_size = f.file_size
+                         AND f2.fast_hash IS NOT NULL
+                         AND f2.fast_hash != ''
                          AND (f2.status IS NULL OR f2.status != 'error')
-                   ) AS duplicate_count
+                   ) as duplicate_count
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
             WHERE (f.status IS NULL OR f.status != 'error')
+            AND f.file_size > 0
+            AND f.fast_hash IS NOT NULL
+            AND f.fast_hash != ''
             AND (
                 SELECT COUNT(*) FROM fichiers f2
-                WHERE f2.file_size = f.file_size
-                  AND f2.name = f.name
+                WHERE f2.fast_hash = f.fast_hash
+                  AND f2.file_size = f.file_size
+                  AND f2.fast_hash IS NOT NULL
+                  AND f2.fast_hash != ''
                   AND (f2.status IS NULL OR f2.status != 'error')
             ) > 1
             ORDER BY duplicate_count DESC, f.file_size DESC
             """
-            self._load_filtered_files(modal, query, (), "Groupes de fichiers dupliqués")
+            self._load_filtered_files(
+                modal, query, (), "Groupes fichiers dupliqués (FastHash)"
+            )
+            logger.info("Opened duplicates modal with FastHash logic")
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show duplicates modal: %s", e)
             messagebox.showerror(
@@ -484,23 +553,62 @@ class AnalyticsDrillDownViewer:
             modal = self._create_base_modal(
                 title, f"📅 Analyse temporelle: {temporal_type}"
             )
-            if temporal_type == "modification":
-                date_field = "last_modified"
-                order = "f.last_modified DESC"
-            else:
-                date_field = "creation_time"
-                order = "f.creation_time DESC"
+            date_field = (
+                "last_modified" if temporal_type == "modification" else "creation_time"
+            )
+
+            period_filter = click_info.get("period_filter", "all")
+            from datetime import datetime, timedelta
+
+            now = datetime.now()
+
+            period_conditions = {
+                "last_7_days": f"f.{date_field} >= ?",
+                "last_30_days": f"f.{date_field} >= ?",
+                "last_90_days": f"f.{date_field} >= ?",
+                "last_year": f"f.{date_field} >= ?",
+                "older_1_year": f"f.{date_field} < ?",
+                "all": "1=1",
+            }
+
+            period_params = {
+                "last_7_days": (
+                    (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+                "last_30_days": (
+                    (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+                "last_90_days": (
+                    (now - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+                "last_year": (
+                    (now - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+                "older_1_year": (
+                    (now - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+                "all": (),
+            }
+
+            condition = period_conditions.get(period_filter, "1=1")
+            params = period_params.get(period_filter, ())
+
             query = f"""
             SELECT f.id, f.name, f.path, f.file_size, f.{date_field}, f.owner,
                    COALESCE(r.security_classification_cached, 'none') AS classif,
                    COALESCE(r.rgpd_risk_cached, 'none') AS rgpd
             FROM fichiers f
             LEFT JOIN reponses_llm r ON f.id = r.fichier_id
-            WHERE (f.status IS NULL OR f.status != 'error') AND f.{date_field} IS NOT NULL
-            ORDER BY {order}
+            WHERE (f.status IS NULL OR f.status != 'error')
+            AND f.{date_field} IS NOT NULL
+            AND {condition}
+            ORDER BY f.{date_field} DESC
             """
             self._load_filtered_files(
-                modal, query, (), f"Analyse temporelle ({temporal_type})"
+                modal, query, params, f"Fichiers {temporal_type} - {period_filter}"
+            )
+            logger.info(
+                f"Opened temporal modal: {temporal_type}, period: {period_filter}"
             )
         except Exception as e:  # pragma: no cover - UI
             logger.error("Failed to show temporal modal: %s", e)
@@ -575,14 +683,18 @@ class AnalyticsDrillDownViewer:
             if level == "7x+":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       (SELECT COUNT(*) FROM fichiers f2 
-                        WHERE f2.file_size = f.file_size AND f2.name = f.name 
-                        AND (f2.status IS NULL OR f2.status != 'error')) as copy_count
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       (SELECT COUNT(*) FROM fichiers f2
+                        WHERE f2.fast_hash = f.fast_hash AND f2.file_size = f.file_size
+                          AND (f2.status IS NULL OR f2.status != 'error')) as copy_count
                 FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
-                AND (SELECT COUNT(*) FROM fichiers f2 
-                     WHERE f2.file_size = f.file_size AND f2.name = f.name 
-                     AND (f2.status IS NULL OR f2.status != 'error')) >= 7
+                AND f.fast_hash IS NOT NULL AND f.fast_hash != ''
+                AND (SELECT COUNT(*) FROM fichiers f2
+                     WHERE f2.fast_hash = f.fast_hash AND f2.file_size = f.file_size
+                       AND (f2.status IS NULL OR f2.status != 'error')) >= 7
                 ORDER BY copy_count DESC, f.file_size DESC
                 """
                 params = ()
@@ -590,14 +702,18 @@ class AnalyticsDrillDownViewer:
                 target_count = int(level.replace("x", ""))
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
-                       (SELECT COUNT(*) FROM fichiers f2 
-                        WHERE f2.file_size = f.file_size AND f2.name = f.name 
-                        AND (f2.status IS NULL OR f2.status != 'error')) as copy_count
+                       COALESCE(r.security_classification_cached, 'none') AS classif,
+                       COALESCE(r.rgpd_risk_cached, 'none') AS rgpd,
+                       (SELECT COUNT(*) FROM fichiers f2
+                        WHERE f2.fast_hash = f.fast_hash AND f2.file_size = f.file_size
+                          AND (f2.status IS NULL OR f2.status != 'error')) as copy_count
                 FROM fichiers f
+                LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
-                AND (SELECT COUNT(*) FROM fichiers f2 
-                     WHERE f2.file_size = f.file_size AND f2.name = f.name 
-                     AND (f2.status IS NULL OR f2.status != 'error')) = ?
+                AND f.fast_hash IS NOT NULL AND f.fast_hash != ''
+                AND (SELECT COUNT(*) FROM fichiers f2
+                     WHERE f2.fast_hash = f.fast_hash AND f2.file_size = f.file_size
+                       AND (f2.status IS NULL OR f2.status != 'error')) = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (target_count,)
@@ -616,7 +732,9 @@ class AnalyticsDrillDownViewer:
     ) -> None:
         """Affiche modal pour types financiers avec gestion complète des catégories."""
         try:
-            modal = self._create_base_modal(title, f"💰 Types Financiers: {finance_type}")
+            modal = self._create_base_modal(
+                title, f"💰 Types Financiers: {finance_type}"
+            )
 
             if finance_type == "Autres":
                 query = """
@@ -628,12 +746,11 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.finance_type_cached NOT IN ('none','invoice','contract','budget','accounting','payment')
-                     OR r.finance_type_cached IS NULL)
+                AND COALESCE(r.finance_type_cached, 'none') NOT IN ('invoice','contract','budget','accounting','payment','none')
                 ORDER BY f.file_size DESC
                 """
                 params: tuple = ()
-                logger.debug("Finance 'Autres' query: excludes 6 known types, includes unknown values")
+                logger.debug("Finance 'Autres' query: excludes known types and 'none'")
             elif finance_type == "none":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -644,11 +761,11 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.finance_type_cached = 'none' OR r.finance_type_cached IS NULL)
+                AND COALESCE(r.finance_type_cached, 'none') = 'none'
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Finance 'none' query: includes explicit 'none' and NULL values")
+                logger.debug("Finance 'none' query: includes explicit 'none' and NULL")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -659,7 +776,7 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND r.finance_type_cached = ?
+                AND COALESCE(r.finance_type_cached, 'none') = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (finance_type,)
@@ -692,12 +809,11 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.legal_type_cached NOT IN ('none','employment','lease','sale','nda','compliance','litigation')
-                     OR r.legal_type_cached IS NULL)
+                AND COALESCE(r.legal_type_cached, 'none') NOT IN ('employment','lease','sale','nda','compliance','litigation','none')
                 ORDER BY f.file_size DESC
                 """
                 params: tuple = ()
-                logger.debug("Legal 'Autres' query: excludes 7 known types, includes unknown values")
+                logger.debug("Legal 'Autres' query: excludes known types and 'none'")
             elif legal_type == "none":
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -708,11 +824,11 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND (r.legal_type_cached = 'none' OR r.legal_type_cached IS NULL)
+                AND COALESCE(r.legal_type_cached, 'none') = 'none'
                 ORDER BY f.file_size DESC
                 """
                 params = ()
-                logger.debug("Legal 'none' query: includes explicit 'none' and NULL values")
+                logger.debug("Legal 'none' query: includes explicit 'none' and NULL")
             else:
                 query = """
                 SELECT f.id, f.name, f.path, f.file_size, f.last_modified, f.owner,
@@ -723,7 +839,7 @@ class AnalyticsDrillDownViewer:
                 LEFT JOIN reponses_llm r ON f.id = r.fichier_id
                 WHERE (f.status IS NULL OR f.status != 'error')
                 AND f.file_size > 0
-                AND r.legal_type_cached = ?
+                AND COALESCE(r.legal_type_cached, 'none') = ?
                 ORDER BY f.file_size DESC
                 """
                 params = (legal_type,)
@@ -980,7 +1096,8 @@ class AnalyticsTabClickManager:
             label.click_info = {
                 "type": "duplicates_detailed",
                 "level": level,
-                "category": f"duplicates_{level}",
+                "category": "duplicate_analysis",
+                "logic_type": "exact_count" if level != "7x+" else "minimum_count",
             }
             label.bind(
                 "<Button-1>",
@@ -1008,7 +1125,8 @@ class AnalyticsTabClickManager:
                     label.click_info = {
                         "type": "temporal_analysis",
                         "temporal_type": attr.split("_")[0],
-                        "category": key,
+                        "period_filter": key,
+                        "category": "temporal_analysis",
                     }
                     label.bind(
                         "<Button-1>",
@@ -1410,7 +1528,9 @@ class AnalyticsPanel:
                 self._db_manager_error = False
                 logger.info("Analytics Panel: Database manager validated successfully")
                 if not self._validate_connection_manager():
-                    logger.warning("Connection manager validation failed during initialization")
+                    logger.warning(
+                        "Connection manager validation failed during initialization"
+                    )
             except Exception as e:
                 logger.error("Database manager validation failed during init: %s", e)
                 self._db_manager_error = True
@@ -2659,9 +2779,9 @@ class AnalyticsPanel:
 
             try:
                 metrics["duplicates"] = self._calculate_duplicates_safe(files)
-                metrics["duplicates"]["detailed"] = (
-                    self._calculate_duplicates_detailed_metrics(files)
-                )
+                metrics["duplicates"][
+                    "detailed"
+                ] = self._calculate_duplicates_detailed_metrics(files)
             except Exception as e:
                 logger.warning("Duplicate analysis failed: %s", e)
                 metrics["duplicates"] = {
@@ -2808,7 +2928,6 @@ class AnalyticsPanel:
                 self.finance_labels = {}
             self.finance_labels[finance_type] = label
 
-
     def _build_legal_tab(self, parent_frame: ttk.Frame) -> None:
         title_label = ttk.Label(
             parent_frame, text="⚖️ ANALYSE LEGAL", font=("Arial", 14, "bold")
@@ -2842,7 +2961,6 @@ class AnalyticsPanel:
             label.pack(pady=2, anchor="w", padx=20)
 
             self.legal_labels[legal_type] = label
-
 
     def _show_detailed_modal(self, title: str, data: List, headers: List[str]) -> None:
         """Show detailed data in a modal window."""
