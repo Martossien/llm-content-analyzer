@@ -3177,34 +3177,38 @@ class AnalyticsPanel:
     def _calculate_duplicates_detailed_metrics(
         self, files: List[FileInfo]
     ) -> Dict[str, Dict[str, Any]]:
-        dup_families = self.duplicate_detector.detect_duplicate_family(files)
-        total_files = len(files)
+        """Return detailed duplicate metrics including unique files."""
 
+        from content_analyzer.utils.duplicate_utils import create_enhanced_duplicate_key
+
+        all_families: Dict[str, List[FileInfo]] = {}
+        for info in files:
+            try:
+                ignore, _ = self.duplicate_detector.should_ignore_file(info)
+                if ignore or not info.fast_hash:
+                    continue
+                key = create_enhanced_duplicate_key(info.fast_hash, info.file_size)
+                all_families.setdefault(key, []).append(info)
+            except Exception as e:  # pragma: no cover
+                logger.debug(f"Erreur regroupement doublons pour {info.path}: {e}")
+
+        total_files = sum(len(f) for f in all_families.values())
         detailed_metrics: Dict[str, Dict[str, Any]] = {}
+
         for level in ["1x", "2x", "3x", "4x", "5x", "6x", "7x+"]:
             if level == "7x+":
-                matching_families = [
-                    fam for fam in dup_families.values() if len(fam) >= 7
-                ]
+                matching_families = [fam for fam in all_families.values() if len(fam) >= 7]
             else:
-                target_count = int(level.replace("x", ""))
-                matching_families = [
-                    fam for fam in dup_families.values() if len(fam) == target_count
-                ]
+                target = int(level.replace("x", ""))
+                matching_families = [fam for fam in all_families.values() if len(fam) == target]
 
-            total_files_level = sum(len(fam) for fam in matching_families)
-            total_size_level = sum(
-                sum(f.file_size for f in fam) for fam in matching_families
-            )
+            files_count = sum(len(fam) for fam in matching_families)
+            size_total = sum(sum(f.file_size for f in fam) for fam in matching_families)
 
             detailed_metrics[level] = {
-                "count": total_files_level,
-                "percentage": (
-                    round(total_files_level / total_files * 100, 1)
-                    if total_files
-                    else 0
-                ),
-                "size_gb": total_size_level / (1024**3),
+                "count": files_count,
+                "percentage": round(files_count / total_files * 100, 1) if total_files else 0,
+                "size_gb": size_total / (1024 ** 3),
                 "families_count": len(matching_families),
             }
 
@@ -3235,13 +3239,13 @@ class AnalyticsPanel:
 
         for years in range(1, 8):
             if years == 7:
-                label_text = f"+{years} ans: 0% | 0 fichiers | 0GB"
-                description = f"Fichiers sans {mode} depuis {years} ans ou plus"
+                label_text = "+6 ans: 0% | 0 fichiers | 0GB"
+                description = f"Fichiers sans {mode} depuis plus de 6 ans"
             else:
-                label_text = (
-                    f"{years} an{'s' if years > 1 else ''}: 0% | 0 fichiers | 0GB"
-                )
-                description = f"Fichiers sans {mode} depuis exactement {years} an{'s' if years > 1 else ''}"
+                lower = years - 1
+                upper = years
+                label_text = f"{lower}-{upper} an{'s' if upper > 1 else ''}: 0% | 0 fichiers | 0GB"
+                description = f"Fichiers sans {mode} depuis {lower} à {upper} an{'s' if upper > 1 else ''}"
 
             frame = ttk.Frame(container)
             frame.pack(fill="x", pady=2, padx=10)
@@ -3267,7 +3271,7 @@ class AnalyticsPanel:
 
         for years in range(1, 8):
             if years == 7:
-                cutoff = now - timedelta(days=years * 365)
+                cutoff = now - timedelta(days=6 * 365)
                 if mode == "modification":
                     matching_files = [
                         f for f in files if self._parse_time(f.last_modified) <= cutoff
@@ -3277,23 +3281,19 @@ class AnalyticsPanel:
                         f for f in files if self._parse_time(f.creation_time) <= cutoff
                     ]
             else:
-                cutoff_start = now - timedelta(days=(years + 1) * 365)
-                cutoff_end = now - timedelta(days=years * 365)
+                upper = now - timedelta(days=(years - 1) * 365)
+                lower = now - timedelta(days=years * 365)
                 if mode == "modification":
                     matching_files = [
                         f
                         for f in files
-                        if cutoff_start
-                        < self._parse_time(f.last_modified)
-                        <= cutoff_end
+                        if lower < self._parse_time(f.last_modified) <= upper
                     ]
                 else:
                     matching_files = [
                         f
                         for f in files
-                        if cutoff_start
-                        < self._parse_time(f.creation_time)
-                        <= cutoff_end
+                        if lower < self._parse_time(f.creation_time) <= upper
                     ]
 
             total_size = sum(f.file_size for f in matching_files)
@@ -3409,14 +3409,14 @@ class AnalyticsPanel:
 
             for years in range(1, 8):
                 if years == 7:
-                    cutoff = now - timedelta(days=7 * 365)
+                    cutoff = now - timedelta(days=6 * 365)
                     matching_files = [(d, s) for d, s in valid_files if d <= cutoff]
                     key = "7y"
                 else:
-                    cutoff_start = now - timedelta(days=(years + 1) * 365)
-                    cutoff_end = now - timedelta(days=years * 365)
+                    upper = now - timedelta(days=(years - 1) * 365)
+                    lower = now - timedelta(days=years * 365)
                     matching_files = [
-                        (d, s) for d, s in valid_files if cutoff_start < d <= cutoff_end
+                        (d, s) for d, s in valid_files if lower < d <= upper
                     ]
                     key = f"{years}y"
 
