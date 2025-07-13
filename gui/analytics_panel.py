@@ -218,7 +218,7 @@ class AnalyticsDrillDownViewer:
             progress_label.pack(pady=10)
             modal.update_idletasks()
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
@@ -1220,7 +1220,7 @@ class UserDrillDownViewer:
                     ORDER BY f.file_size DESC
                 """
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, (username,))
                 rows = cursor.fetchall()
@@ -1285,6 +1285,8 @@ class AnalyticsPanel:
                 self.db_manager = db_manager
                 self._db_manager_error = False
                 logger.info("Analytics Panel: Database manager validated successfully")
+                if not self._validate_connection_manager():
+                    logger.warning("Connection manager validation failed during initialization")
             except Exception as e:
                 logger.error("Database manager validation failed during init: %s", e)
                 self._db_manager_error = True
@@ -1534,6 +1536,24 @@ class AnalyticsPanel:
                 logger.info("Click functionality initialized for all analytics tabs")
         except Exception as e:  # pragma: no cover - init
             logger.error("Failed to initialize click functionality: %s", e)
+
+    def _validate_connection_manager(self) -> bool:
+        """Validate that database connection manager works properly."""
+        try:
+            if not self.db_manager:
+                logger.error("No database manager available for validation")
+                return False
+
+            with self.db_manager._connect().get() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+
+            logger.info("Database connection manager validation successful")
+            return True
+        except Exception as e:
+            logger.error(f"Connection manager validation failed: {e}")
+            return False
 
     def _ensure_database_manager(self) -> bool:
         """Ensure database manager is available and functional."""
@@ -2931,11 +2951,11 @@ class AnalyticsPanel:
                 logger.warning("Gestionnaire DB non disponible pour analyse temporelle")
                 return {"creation_dates": {}, "modification_dates": {}}
 
-            with self.db_manager._connect() as conn:
+            with self.db_manager._connect().get() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                SELECT 
+                SELECT
                     last_modified,
                     creation_time,
                     file_size,
