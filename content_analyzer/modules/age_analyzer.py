@@ -13,13 +13,35 @@ class AgeAnalyzer:
     """Perform analysis on file ages."""
 
     def _parse_time(self, value: str) -> datetime:
+        """Parse a string into a ``datetime`` object.
+
+        Returns ``datetime.max`` when the value cannot be parsed. The accepted
+        formats mirror those used in :class:`AnalyticsPanel` so that both parts
+        of the application interpret dates consistently.
+        """
+
         if not value:
             return datetime.max
-        for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y",
+        ]
+
+        for fmt in formats:
             try:
                 return datetime.strptime(value.strip(), fmt)
             except ValueError:
                 continue
+
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (ValueError, TypeError):
+            pass
+
         logger.warning("Could not parse date: %s", value)
         return datetime.max
 

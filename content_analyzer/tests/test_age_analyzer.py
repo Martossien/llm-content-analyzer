@@ -44,3 +44,19 @@ def test_age_statistics():
     stats = analyzer.get_age_statistics(files)
     assert stats["max_days"] >= 2
     assert stats["min_days"] >= 1
+
+
+def test_parse_time_additional_formats():
+    analyzer = AgeAnalyzer()
+
+    dt_str_micro = "2024-03-01 12:34:56.123456"
+    dt_micro = analyzer._parse_time(dt_str_micro)
+    assert dt_micro == datetime(2024, 3, 1, 12, 34, 56, 123456)
+
+    dt_str_short = "01/03/2024"
+    dt_short = analyzer._parse_time(dt_str_short)
+    assert dt_short == datetime(2024, 3, 1)
+
+    timestamp = datetime(2024, 3, 1, 12, 0, 0).timestamp()
+    dt_ts = analyzer._parse_time(str(timestamp))
+    assert dt_ts == datetime.fromtimestamp(timestamp)
