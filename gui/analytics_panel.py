@@ -2483,8 +2483,16 @@ class AnalyticsPanel:
         return sum(len(fam) for fam in families.values() if len(fam) == copies)
 
     def _parse_time(self, value: str | None) -> datetime:
+        """Parse a string into a datetime object.
+
+        Returns ``datetime.max`` when the value cannot be parsed. This aligns
+        with :class:`AgeAnalyzer` which uses ``datetime.max`` to represent an
+        invalid or missing date. Using ``datetime.max`` avoids treating unparsable
+        values as extremely old dates in age-based calculations.
+        """
+
         if not value or value == "None":
-            return datetime.min
+            return datetime.max
 
         try:
             formats = [
@@ -2504,10 +2512,10 @@ class AnalyticsPanel:
                 return datetime.fromtimestamp(float(value))
             except (ValueError, TypeError):
                 logger.warning(f"Could not parse time: {value}")
-                return datetime.min
+                return datetime.max
         except Exception as e:
             logger.warning(f"Time parsing error for '{value}': {e}")
-            return datetime.min
+            return datetime.max
 
     def _get_old_files_creation(
         self, files: List[FileInfo], threshold_days: int
@@ -2518,6 +2526,12 @@ class AnalyticsPanel:
             dt = self._parse_time(f.creation_time)
             if dt != datetime.max and dt <= cutoff:
                 result.append(f)
+        logger.debug(
+            "Old file check: threshold=%d days, found=%d of %d files",
+            threshold_days,
+            len(result),
+            len(files),
+        )
         return result
 
     def _query_distribution(self, column: str) -> Dict[str, Dict[str, Any]]:
@@ -3072,6 +3086,14 @@ class AnalyticsPanel:
                 "total_size_gb": total_size / (1024**3),
             },
         }
+
+        logger.debug(
+            "Size-age metrics computed: large=%d, old=%d, dormant=%d, details=%s",
+            len(large_files),
+            len(old_files),
+            len(dormant_files),
+            metrics.get("size_age"),
+        )
         return metrics
 
     def calculate_business_metrics(self) -> Dict[str, Any]:
