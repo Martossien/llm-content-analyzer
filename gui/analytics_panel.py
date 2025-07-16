@@ -2687,7 +2687,7 @@ class AnalyticsPanel:
     def _calculate_size_age_direct_sql(
         self, size_threshold_mb: int, age_threshold_days: int
     ) -> Dict[str, Any]:
-        """Compute size/age metrics using Python filtering instead of SQL."""
+        """Compute size/age metrics using Python filtering with AgeAnalyzer."""
         try:
             files = self._connect_files()
             if not files:
@@ -2702,25 +2702,37 @@ class AnalyticsPanel:
             total_files = len(files)
             size_threshold_bytes = size_threshold_mb * 1024 * 1024
 
+            # Filtrage par taille (logique simple, fonctionnelle)
             large_files = [f for f in files if f.file_size >= size_threshold_bytes]
+            
+            # Filtrage par âge (utilise AgeAnalyzer robuste)
             dormant_files = self.age_analyzer.identify_stale_files(files, age_threshold_days)
+            
+            # Debug logging pour diagnostic
+            logger.info(f"Size/Age Analysis: {len(files)} total files, {len(large_files)} large (>={size_threshold_mb}MB), {len(dormant_files)} dormant (>={age_threshold_days} days)")
 
             large_files_pct = len(large_files) / total_files * 100 if total_files else 0
             dormant_files_pct = len(dormant_files) / total_files * 100 if total_files else 0
 
+            # Calcul de l'espace archivable (union des fichiers volumineux ET anciens)
             archival_size_gb = (
                 sum(f.file_size for f in large_files) + sum(f.file_size for f in dormant_files)
             ) / (1024 ** 3)
 
+            # Nombre total de fichiers affectés (union sans doublons)
             total_affected = len({f.id for f in large_files} | {f.id for f in dormant_files})
 
-            return {
+            result = {
                 "large_files_pct": round(large_files_pct, 1),
                 "old_files_pct": round(dormant_files_pct, 1),
                 "dormant_files_pct": round(dormant_files_pct, 1),
                 "archival_size_gb": archival_size_gb,
                 "total_affected": total_affected,
             }
+            
+            logger.info(f"Size/Age Results: {result}")
+            return result
+            
         except Exception as e:  # pragma: no cover - runtime issues
             logger.error(f"Erreur calcul size_age: {e}")
             return {
@@ -3204,6 +3216,27 @@ class AnalyticsPanel:
             except Exception as e:
                 logger.warning("Size analysis failed: %s", e)
                 metrics["file_size_analysis"] = {}
+
+            # Add size/age metrics calculation
+            try:
+                age_threshold_days = int(self.threshold_age_years.get()) * 365
+                size_threshold_mb = int(self.threshold_size_mb.get())
+                logger.info(f"Calculating size/age metrics with thresholds: age={age_threshold_days} days, size={size_threshold_mb} MB")
+                
+                size_age_metrics = self._calculate_size_age_direct_sql(
+                    size_threshold_mb, age_threshold_days
+                )
+                metrics["size_age"] = size_age_metrics
+                logger.info(f"Size/age metrics calculated: {size_age_metrics}")
+            except Exception as e:
+                logger.warning("Size/age analysis failed: %s", e)
+                metrics["size_age"] = {
+                    "large_files_pct": 0,
+                    "old_files_pct": 0,
+                    "dormant_files_pct": 0,
+                    "archival_size_gb": 0,
+                    "total_affected": 0
+                }
 
             self._metrics_cache["business_metrics"] = metrics
             self._cache_timestamp = time.time()
