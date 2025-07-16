@@ -2477,10 +2477,33 @@ class AnalyticsPanel:
         allowed = mapping.get(level, set())
         return [f for f in files if class_map.get(f.id) in allowed]
 
-    def _count_files_duplicated_n_times(
-        self, families: Dict[str, List[FileInfo]], copies: int
-    ) -> int:
-        return sum(len(fam) for fam in families.values() if len(fam) == copies)
+    def _count_files_duplicated_n_times(self, families: Dict[str, List[FileInfo]], n: int) -> int:
+        """Count total files that appear exactly n times in duplicate families.
+
+        Args:
+            families: Dictionary of duplicate families {hash: [FileInfo]}
+            n: Exact number of duplicates to count
+
+        Returns:
+            Total count of files that appear exactly n times
+
+        Example:
+            families = {"hash1": [file1, file2], "hash2": [file3, file4, file5]}
+            _count_files_duplicated_n_times(families, 2) returns 2
+            _count_files_duplicated_n_times(families, 3) returns 3
+        """
+        try:
+            total_count = 0
+            for family_files in families.values():
+                if len(family_files) == n:
+                    total_count += len(family_files)
+
+            logger.debug(f"Found {total_count} files duplicated exactly {n} times")
+            return total_count
+
+        except Exception as e:
+            logger.warning(f"Error counting {n}x duplicates: {e}")
+            return 0
 
     def _parse_time(self, value: str | None) -> datetime:
         """Parse a string into a datetime object.
