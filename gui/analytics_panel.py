@@ -2687,10 +2687,10 @@ class AnalyticsPanel:
     def _calculate_size_age_direct_sql(
         self, size_threshold_mb: int, age_threshold_days: int
     ) -> Dict[str, Any]:
-        """Compute size/age metrics directly using SQL queries."""
+        """Compute size/age metrics using Python filtering instead of SQL."""
         try:
-            if not self.db_manager:
-                logger.warning("Pas de gestionnaire DB pour calcul size_age direct")
+            files = self._connect_files()
+            if not files:
                 return {
                     "large_files_pct": 0,
                     "old_files_pct": 0,
@@ -2699,108 +2699,30 @@ class AnalyticsPanel:
                     "total_affected": 0,
                 }
 
-            with self.db_manager._connect().get() as conn:
-                cursor = conn.cursor()
+            total_files = len(files)
+            size_threshold_bytes = size_threshold_mb * 1024 * 1024
 
-                cursor.execute(
-                    """
-                SELECT COUNT(*) FROM fichiers
-                WHERE (status IS NULL OR status != 'error') AND file_size > 0
-                """
-                )
-                total_files = cursor.fetchone()[0] or 0
+            large_files = [f for f in files if f.file_size >= size_threshold_bytes]
+            dormant_files = self.age_analyzer.identify_stale_files(files, age_threshold_days)
 
-                if total_files == 0:
-                    logger.warning("Aucun fichier valide trouvé pour calcul size_age")
-                    return {
-                        "large_files_pct": 0,
-                        "old_files_pct": 0,
-                        "dormant_files_pct": 0,
-                        "archival_size_gb": 0,
-                        "total_affected": 0,
-                    }
+            large_files_pct = len(large_files) / total_files * 100 if total_files else 0
+            dormant_files_pct = len(dormant_files) / total_files * 100 if total_files else 0
 
-                size_threshold_bytes = size_threshold_mb * 1024 * 1024
-                cursor.execute(
-                    """
-                SELECT COUNT(*), COALESCE(SUM(file_size), 0)
-                FROM fichiers
-                WHERE (status IS NULL OR status != 'error')
-                  AND file_size >= ?
-                """,
-                    (size_threshold_bytes,),
-                )
-                large_files_count, large_files_size = cursor.fetchone()
-                large_files_count = large_files_count or 0
-                large_files_size = large_files_size or 0
+            archival_size_gb = (
+                sum(f.file_size for f in large_files) + sum(f.file_size for f in dormant_files)
+            ) / (1024 ** 3)
 
-                cursor.execute(
-                    """
-                SELECT COUNT(*)
-                FROM fichiers
-                WHERE (status IS NULL OR status != 'error') AND file_size > 0
-                  AND creation_time IS NOT NULL AND creation_time != '' AND creation_time != '0'
-                  AND julianday('now') - julianday(creation_time) > ?
-                """,
-                    (age_threshold_days,),
-                )
-                old_files_count = cursor.fetchone()[0] or 0
+            total_affected = len({f.id for f in large_files} | {f.id for f in dormant_files})
 
-                cursor.execute(
-                    """
-                SELECT COUNT(*), COALESCE(SUM(file_size), 0)
-                FROM fichiers
-                WHERE (status IS NULL OR status != 'error') AND file_size > 0
-                  AND last_modified IS NOT NULL AND last_modified != '' AND last_modified != '0'
-                  AND julianday('now') - julianday(last_modified) > ?
-                """,
-                    (age_threshold_days,),
-                )
-                dormant_files_count, dormant_files_size = cursor.fetchone()
-                dormant_files_count = dormant_files_count or 0
-                dormant_files_size = dormant_files_size or 0
-
-                cursor.execute(
-                    """
-                SELECT COUNT(DISTINCT id)
-                FROM fichiers
-                WHERE (status IS NULL OR status != 'error') AND file_size > 0
-                  AND (
-                        file_size >= ?
-                     OR (creation_time IS NOT NULL AND creation_time != '' AND creation_time != '0'
-                         AND julianday('now') - julianday(creation_time) > ?)
-                     OR (last_modified IS NOT NULL AND last_modified != '' AND last_modified != '0'
-                         AND julianday('now') - julianday(last_modified) > ?)
-                  )
-                """,
-                    (size_threshold_bytes, age_threshold_days, age_threshold_days),
-                )
-                total_affected = cursor.fetchone()[0] or 0
-
-                large_files_pct = round(large_files_count / total_files * 100, 1)
-                old_files_pct = round(old_files_count / total_files * 100, 1)
-                dormant_files_pct = round(dormant_files_count / total_files * 100, 1)
-
-                archival_size_gb = (large_files_size + dormant_files_size) / (1024 ** 3)
-
-                result = {
-                    "large_files_pct": large_files_pct,
-                    "old_files_pct": old_files_pct,
-                    "dormant_files_pct": dormant_files_pct,
-                    "archival_size_gb": archival_size_gb,
-                    "total_affected": total_affected,
-                }
-
-                logger.info(
-                    "Size-age direct SQL: %s%% large, %s%% dormant, %s affected",
-                    large_files_pct,
-                    dormant_files_pct,
-                    total_affected,
-                )
-                return result
-
-        except Exception as e:
-            logger.error(f"Erreur calcul size_age direct SQL: {e}")
+            return {
+                "large_files_pct": round(large_files_pct, 1),
+                "old_files_pct": round(dormant_files_pct, 1),
+                "dormant_files_pct": round(dormant_files_pct, 1),
+                "archival_size_gb": archival_size_gb,
+                "total_affected": total_affected,
+            }
+        except Exception as e:  # pragma: no cover - runtime issues
+            logger.error(f"Erreur calcul size_age: {e}")
             return {
                 "large_files_pct": 0,
                 "old_files_pct": 0,
