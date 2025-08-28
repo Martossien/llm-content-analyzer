@@ -1174,10 +1174,22 @@ No need to run analysis to see your files.
         )
         self.export_json_button.pack(side="right", padx=5)
 
+        # Bouton "Nouveau test" à gauche du bouton "Fermer"
+        new_test_button = ttk.Button(
+            buttons_frame, 
+            text="🆕 Nouveau test", 
+            command=self.start_new_test,
+            state="disabled"
+        )
+        new_test_button.pack(side="right", padx=5)
+        
         close_button = ttk.Button(
             buttons_frame, text="Fermer", command=self.test_results_window.destroy
         )
         close_button.pack(side="right", padx=5)
+        
+        # Store reference for enabling after test completion
+        self.new_test_button = new_test_button
 
     def on_api_test_progress(self, progress_data):
         """Callback amélioré pour mise à jour progress des tests API."""
@@ -1209,12 +1221,34 @@ No need to run analysis to see your files.
         self.stop_test_button.config(state="disabled")
         self.export_csv_button.config(state="normal")
         self.export_json_button.config(state="normal")
+        # Activer le bouton "Nouveau test" à la fin du test
+        if hasattr(self, "new_test_button"):
+            self.new_test_button.config(state="normal")
 
         if hasattr(self.api_test_thread, "get_summary_report"):
             summary = self.api_test_thread.get_summary_report()
             self.display_final_test_summary(summary)
 
         self.log_action(f"Test API terminé: {results.get('status', 'unknown')}", "INFO")
+
+    def start_new_test(self):
+        """Ferme la fenêtre des résultats et relance la configuration des tests API."""
+        try:
+            # Fermer la fenêtre des résultats
+            if hasattr(self, "test_results_window") and self.test_results_window.winfo_exists():
+                self.test_results_window.destroy()
+            
+            # Nettoyer les références
+            if hasattr(self, "api_test_thread"):
+                self.api_test_thread = None
+            self.api_test_running = False
+            
+            # Relancer la fenêtre de configuration des tests API
+            self.open_api_test_dialog()
+            
+        except Exception as e:
+            self.log_action(f"Erreur lors du redémarrage du test: {str(e)}", "ERROR")
+            messagebox.showerror("Erreur", f"Impossible de redémarrer le test:\n{str(e)}")
 
     def update_test_metrics_display(self, metrics):
         """Met à jour l'affichage des métriques avec toutes les données."""
@@ -1256,10 +1290,133 @@ No need to run analysis to see your files.
    • Actifs: {metrics.get('worker_efficiency', {})}
 """
 
+        # NOUVEAU: Ajouter section RAW RESPONSES
+        raw_responses_text = self._format_raw_responses()
+        if raw_responses_text:
+            display_text += f"\n{raw_responses_text}"
+
         self.tech_metrics_text.config(state="normal")
         self.tech_metrics_text.delete("1.0", "end")
         self.tech_metrics_text.insert("1.0", display_text)
         self.tech_metrics_text.config(state="disabled")
+
+        # NOUVEAU: Mettre à jour l'onglet Performance
+        self._update_performance_metrics_display(metrics)
+
+    def _format_raw_responses(self):
+        """Formate les réponses brutes pour affichage dans l'onglet Métriques Techniques.
+        
+        Returns:
+            str: Texte formaté contenant toutes les réponses brutes des tests
+        """
+        if not hasattr(self, "api_test_thread") or not self.api_test_thread:
+            return ""
+        
+        if not hasattr(self.api_test_thread, "test_results"):
+            return ""
+            
+        test_results = self.api_test_thread.test_results
+        if not test_results:
+            return ""
+        
+        # Logger pour debugging
+        logger.info(f"Formatage RAW RESPONSES: {len(test_results)} résultats disponibles")
+        
+        raw_text = "\n🔍 RAW RESPONSES:\n"
+        raw_text += "─" * 50 + "\n"
+        
+        for i, result in enumerate(test_results, 1):
+            raw_response = result.get("raw_response", "")
+            worker_id = result.get("worker_id", 0)
+            iteration = result.get("iteration", i-1)
+            status = result.get("status", "unknown")
+            
+            # Limiter la taille de chaque réponse pour éviter l'overflow
+            if len(raw_response) > 500:
+                truncated_response = raw_response[:500] + "...[TRONQUÉ]"
+            else:
+                truncated_response = raw_response
+            
+            raw_text += f"Test #{i} (Worker {worker_id}, Iter {iteration}, Status: {status}):\n"
+            raw_text += f"{truncated_response}\n"
+            raw_text += "─" * 30 + "\n"
+            
+            # Limiter le nombre total d'affichages pour éviter de surcharger l'interface
+            if i >= 10:  # Afficher maximum 10 réponses
+                remaining = len(test_results) - i
+                if remaining > 0:
+                    raw_text += f"... et {remaining} autres réponses\n"
+                break
+        
+        return raw_text
+
+    def _update_performance_metrics_display(self, metrics):
+        """Met à jour l'affichage des métriques de performance en temps réel.
+        
+        Args:
+            metrics (dict): Dictionnaire contenant les métriques de performance
+        """
+        if not hasattr(self, "perf_metrics_text"):
+            return
+
+        # Récupération des métriques temporelles
+        elapsed_time = metrics.get("elapsed_time", 0.0)
+        throughput = metrics.get("throughput_per_minute", 0.0)
+        successful_responses = metrics.get("successful_responses", 0)
+        total_responses = successful_responses + metrics.get("corrupted_responses", 0) + metrics.get("malformed_json", 0)
+        
+        # Calcul des temps moyens si disponibles
+        response_times = metrics.get("response_times", [])
+        avg_api_time = sum(response_times) / len(response_times) if response_times else 0.0
+        
+        # Récupération des données de worker efficiency
+        worker_efficiency = metrics.get("worker_efficiency", {})
+        active_workers = len([w for w in worker_efficiency.values() if w > 0])
+        
+        # Calcul du temps moyen total (approximation)
+        avg_total_time = avg_api_time * 1.1 if avg_api_time > 0 else 0.0  # API + overhead
+        
+        # Formatage du temps écoulé
+        if elapsed_time >= 60:
+            time_display = f"{int(elapsed_time // 60)}m {int(elapsed_time % 60)}s"
+        else:
+            time_display = f"{elapsed_time:.1f}s"
+        
+        # Construction du texte d'affichage
+        performance_text = f"""⚡ MÉTRIQUES DE PERFORMANCE TEMPS RÉEL
+
+⏱️ Temporel:
+   • Temps écoulé total: {time_display}
+   • Débit: {throughput:.1f} requêtes/min
+   • Réponses traitées: {total_responses}
+   • Taux de succès: {(successful_responses/total_responses*100) if total_responses > 0 else 0:.1f}%
+
+🚀 Temps de Réponse:
+   • Temps moyen API: {avg_api_time:.2f}s
+   • Temps moyen total: {avg_total_time:.2f}s
+   • Échantillons: {len(response_times)}
+
+👥 Workers:
+   • Workers actifs: {active_workers}
+   • Efficacité par worker: {dict(worker_efficiency) if worker_efficiency else 'N/A'}
+
+📈 Performance Globale:
+   • Débit instantané: {throughput:.1f} req/min
+   • Efficacité système: {(throughput/60*avg_total_time*100) if throughput > 0 and avg_total_time > 0 else 0:.1f}%
+"""
+
+        # Mise à jour de l'affichage
+        try:
+            self.perf_metrics_text.config(state="normal")
+            self.perf_metrics_text.delete("1.0", "end")
+            self.perf_metrics_text.insert("1.0", performance_text)
+            self.perf_metrics_text.config(state="disabled")
+            
+            # Logger pour debugging
+            logger.debug(f"Onglet Performance mis à jour: {throughput:.1f} req/min, {elapsed_time:.1f}s écoulées")
+            
+        except Exception as e:
+            logger.error(f"Erreur mise à jour onglet Performance: {e}")
 
     def display_final_test_summary(self, summary):
         """Affiche le résumé final des tests."""
