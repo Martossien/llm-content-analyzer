@@ -136,11 +136,24 @@ class ContentAnalyzer:
             logger.error("Failed to extract JSON from content: %s", content[:200])
             fallback = self._create_fallback_json(content)
             return {
-                "status": "completed",
+                "status": "error",
                 "result": fallback,
                 "task_id": task_id,
+                "error": "JSON parsing failed",
                 "resume": fallback.get("resume", ""),
-                "raw_response": json.dumps(fallback, ensure_ascii=False),
+                "raw_response": content[:500] + ("..." if len(content) > 500 else ""),
+            }
+
+        # NOUVEAU: Détecter parsing_error dans le JSON extrait
+        if extracted_json.get("parsing_error", False):
+            logger.error("LLM indicated parsing error in response")
+            return {
+                "status": "error",
+                "result": extracted_json,
+                "task_id": task_id,
+                "error": "LLM parsing error",
+                "resume": extracted_json.get("resume", ""),
+                "raw_response": json.dumps(extracted_json, ensure_ascii=False),
             }
 
         resume = extracted_json.get("resume", "")
@@ -148,6 +161,25 @@ class ContentAnalyzer:
             words = resume.split()
             if len(words) > 50:
                 resume = " ".join(words[:50])
+            
+            # NOUVEAU: Détecter réponses "fichier inaccessible/corrompu"
+            resume_lower = resume.lower()
+            if ("fichier corrompu" in resume_lower or 
+                "fichier inaccessible" in resume_lower or
+                "document inconnu" in resume_lower or
+                "document corrompu" in resume_lower or
+                "fichier endommagé" in resume_lower or
+                "impossible d'analyser" in resume_lower or
+                "contenu inaccessible" in resume_lower):
+                logger.error("LLM could not access file content: %s", resume[:100])
+                return {
+                    "status": "error",
+                    "result": extracted_json,
+                    "task_id": task_id,
+                    "error": "File inaccessible to LLM",
+                    "resume": resume,
+                    "raw_response": json.dumps(extracted_json, ensure_ascii=False),
+                }
 
         confidences = self._extract_domain_confidences(extracted_json)
         total = sum(v for v in confidences.values() if isinstance(v, int) and v > 0)
@@ -182,6 +214,12 @@ class ContentAnalyzer:
 
         try:
             parsed = json.loads(content.strip())
+            
+            # CORRECTION URGENTE: Détecter parsing_error AVANT validation structure
+            if isinstance(parsed, dict) and parsed.get("parsing_error", False):
+                logger.warning("JSON contains parsing_error=True, returning as-is")
+                return parsed
+                
             if self._validate_json_structure(parsed):
                 return parsed
             logger.warning("JSON structure validation failed")
@@ -194,6 +232,12 @@ class ContentAnalyzer:
         for match in matches:
             try:
                 parsed = json.loads(match)
+                
+                # CORRECTION URGENTE: Détecter parsing_error AVANT validation
+                if isinstance(parsed, dict) and parsed.get("parsing_error", False):
+                    logger.warning("Regex JSON contains parsing_error=True, returning as-is")
+                    return parsed
+                    
                 if self._validate_json_structure(parsed):
                     logger.info("Successfully extracted JSON using regex")
                     return parsed
@@ -204,6 +248,12 @@ class ContentAnalyzer:
         if json_candidate:
             try:
                 parsed = json.loads(json_candidate)
+                
+                # CORRECTION URGENTE: Détecter parsing_error AVANT validation
+                if isinstance(parsed, dict) and parsed.get("parsing_error", False):
+                    logger.warning("Balanced JSON contains parsing_error=True, returning as-is")
+                    return parsed
+                    
                 if self._validate_json_structure(parsed):
                     logger.info("Successfully extracted JSON using balanced extraction")
                     return parsed
@@ -301,7 +351,7 @@ class ContentAnalyzer:
 
         try:
             logger.debug(
-                "🔍 Début analyse: %s (%s)",
+                "[START] Début analyse: %s (%s)",
                 Path(file_path).name,
                 self._format_file_size(file_size),
             )
@@ -328,7 +378,7 @@ class ContentAnalyzer:
                     file_row.get("file_size"),
                 )
             if cached:
-                logger.info("✅ Cache HIT: %s", Path(file_path).name)
+                logger.info("[CACHE HIT] %s", Path(file_path).name)
                 return {
                     "status": "cached",
                     "result": cached["analysis_data"],
@@ -371,7 +421,7 @@ class ContentAnalyzer:
             )
 
             if api_result.get("status") == "cancelled":
-                logger.info("⏹️ Analyse annulée: %s", Path(file_path).name)
+                logger.info("[CANCELLED] Analyse annulée: %s", Path(file_path).name)
                 return {"status": "cancelled", "reason": "interrupted_during_api"}
 
             if self.stop_event and self.stop_event.is_set():
@@ -395,7 +445,7 @@ class ContentAnalyzer:
             if status == "completed":
                 confidence = parsed_result.get("result", {}).get("confidence_global", 0)
                 logger.info(
-                    "✅ Analyse réussie: %s | Durée: %.1fs | Confiance: %d%% | Cache: %s",
+                    "[SUCCESS] Analyse réussie: %s | Durée: %.1fs | Confiance: %d%% | Cache: %s",
                     Path(file_path).name,
                     duration,
                     confidence,
@@ -404,7 +454,7 @@ class ContentAnalyzer:
             elif status == "error":
                 error_msg = parsed_result.get("error", "unknown")
                 logger.error(
-                    "❌ Analyse échouée: %s | Durée: %.1fs | Erreur: %s",
+                    "[ERROR] Analyse échouée: %s | Durée: %.1fs | Erreur: %s",
                     Path(file_path).name,
                     duration,
                     error_msg,
@@ -423,7 +473,7 @@ class ContentAnalyzer:
             duration = time.perf_counter() - start
             if self.stop_event and self.stop_event.is_set():
                 logger.info(
-                    "⏹️ Analyse interrompue: %s | Durée: %.1fs",
+                    "[INTERRUPTED] Analyse interrompue: %s | Durée: %.1fs",
                     Path(file_path).name,
                     duration,
                 )
@@ -433,7 +483,7 @@ class ContentAnalyzer:
                 }
             else:
                 logger.error(
-                    "💥 EXCEPTION ANALYSE: %s | Durée: %.1fs | Type: %s | Détail: %s | Taille: %s",
+                    "[EXCEPTION] ANALYSE: %s | Durée: %.1fs | Type: %s | Détail: %s | Taille: %s",
                     Path(file_path).name,
                     duration,
                     type(exc).__name__,

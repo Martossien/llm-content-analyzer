@@ -4671,24 +4671,80 @@ Errors: {perf.get('errors', 0)}
         if not response:
             return
         try:
+            import time
+            import platform
+            
             db_path = Path("analysis_results.db")
-            if db_path.exists():
-                db_path.unlink()
+            if not db_path.exists():
+                # Database doesn't exist, just create new one
+                self.db_manager = DBManager(db_path)
+                self.invalidate_all_caches()
+                self._update_db_status_labels(0.0)
+                if hasattr(self, "analytics_panel"):
+                    self.analytics_panel.set_db_manager(self.db_manager)
+                messagebox.showinfo(
+                    "Database Reset",
+                    "Database has been reset successfully!",
+                    parent=parent_window,
+                )
+                self.log_action("Database reset completed (no existing DB)", "INFO")
+                return
+            
+            # WINDOWS-SAFE: Close all DB connections before deleting file
+            self.log_action("Closing DB connections for Windows-safe reset", "INFO")
+            
+            # 1. Force close all connections using our new method
+            if hasattr(self, "db_manager") and self.db_manager:
+                self.db_manager.force_close_all_connections_windows_safe()
+            
+            # 2. Also close any cache manager connections that might exist
+            if hasattr(self, "cache_manager") and self.cache_manager:
+                self.cache_manager.force_close_all_connections_windows_safe()
+            
+            # 3. Windows retry pattern for file deletion
+            retry_count = 5
+            is_windows = platform.system() == "Windows"
+            
+            for attempt in range(retry_count):
+                try:
+                    db_path.unlink()
+                    self.log_action(f"Database file deleted (attempt {attempt + 1})", "INFO")
+                    break
+                except (PermissionError, OSError) as e:
+                    if "WinError 32" in str(e) or "being used by another process" in str(e):
+                        if attempt < retry_count - 1:
+                            wait_time = (attempt + 1) * 0.5  # Increasing wait time
+                            self.log_action(
+                                f"File locked (attempt {attempt + 1}), waiting {wait_time}s...", 
+                                "WARNING"
+                            )
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            raise Exception(
+                                f"Windows file lock persists after {retry_count} attempts. "
+                                f"Please ensure no other applications are using the database file."
+                            )
+                    else:
+                        raise  # Different error, re-raise immediately
+            
+            # 4. Recreate DB manager and update UI
             self.db_manager = DBManager(db_path)
             self.invalidate_all_caches()
             self._update_db_status_labels(0.0)
             if hasattr(self, "analytics_panel"):
                 self.analytics_panel.set_db_manager(self.db_manager)
+                
             messagebox.showinfo(
                 "Database Reset",
                 "Database has been reset successfully!",
                 parent=parent_window,
             )
             self.log_action("Database reset completed", "INFO")
+            
         except Exception as e:
-            messagebox.showerror(
-                "Reset Error", f"Cannot reset database:\n{str(e)}", parent=parent_window
-            )
+            error_msg = f"Cannot reset database:\n{str(e)}"
+            messagebox.showerror("Reset Error", error_msg, parent=parent_window)
             self.log_action(f"Database reset failed: {str(e)}", "ERROR")
 
     def compact_database(self, parent_window: tk.Toplevel) -> None:
@@ -4844,6 +4900,9 @@ Errors: {perf.get('errors', 0)}
     def clear_cache(self, parent_window: tk.Toplevel) -> None:
         """Vide complètement le cache SQLite."""
         try:
+            import time
+            import platform
+            
             cache_db = Path("analysis_results_cache.db")
             if not cache_db.exists():
                 messagebox.showinfo(
@@ -4851,13 +4910,50 @@ Errors: {perf.get('errors', 0)}
                 )
                 return
 
+            # Get stats before clearing
             cache_manager = CacheManager(cache_db)
             stats_before = cache_manager.get_stats()
             entries_before = stats_before.get("total_entries", 0)
             size_before = stats_before.get("cache_size_mb", 0)
 
-            cache_manager.cleanup_expired()
-            cache_db.unlink()
+            # WINDOWS-SAFE: Close cache connections before deleting file
+            self.log_action("Closing cache connections for Windows-safe clear", "INFO")
+            
+            # 1. Force close cache connections using our new method
+            cache_manager.force_close_all_connections_windows_safe()
+            
+            # 2. Also close any main cache manager instance that might exist
+            if hasattr(self, "cache_manager") and self.cache_manager:
+                self.cache_manager.force_close_all_connections_windows_safe()
+            
+            # 3. Windows retry pattern for cache file deletion
+            retry_count = 5
+            is_windows = platform.system() == "Windows"
+            
+            for attempt in range(retry_count):
+                try:
+                    cache_db.unlink()
+                    self.log_action(f"Cache file deleted (attempt {attempt + 1})", "INFO")
+                    break
+                except (PermissionError, OSError) as e:
+                    if "WinError 32" in str(e) or "being used by another process" in str(e):
+                        if attempt < retry_count - 1:
+                            wait_time = (attempt + 1) * 0.5  # Increasing wait time
+                            self.log_action(
+                                f"Cache file locked (attempt {attempt + 1}), waiting {wait_time}s...", 
+                                "WARNING"
+                            )
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            raise Exception(
+                                f"Windows cache file lock persists after {retry_count} attempts. "
+                                f"Please ensure no other applications are using the cache file."
+                            )
+                    else:
+                        raise  # Different error, re-raise immediately
+
+            # 4. Invalidate all caches and update UI
             self.invalidate_all_caches()
 
             messagebox.showinfo(
@@ -4873,9 +4969,8 @@ Errors: {perf.get('errors', 0)}
             )
 
         except Exception as e:
-            messagebox.showerror(
-                "Clear Error", f"Failed to clear cache:\n{str(e)}", parent=parent_window
-            )
+            error_msg = f"Failed to clear cache:\n{str(e)}"
+            messagebox.showerror("Clear Error", error_msg, parent=parent_window)
             self.log_action(f"Cache clear failed: {str(e)}", "ERROR")
 
     def show_cache_stats(self, parent_window: tk.Toplevel) -> None:

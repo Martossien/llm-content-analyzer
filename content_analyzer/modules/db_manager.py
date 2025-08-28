@@ -39,6 +39,43 @@ class DBManager:
         if hasattr(self, "_pool"):
             self._pool.close()
 
+    def force_close_all_connections_windows_safe(self) -> None:
+        """Ferme toutes les connexions DB de manière sûre pour Windows.
+        
+        Cette méthode est spécifiquement conçue pour résoudre les WinError 32
+        lors des opérations de maintenance sur Windows.
+        """
+        import time
+        import gc
+        import platform
+        
+        logger.info("Closing all DB connections for Windows-safe maintenance")
+        
+        try:
+            # 1. Cancel maintenance timer first
+            if self._maintenance_timer:
+                self._maintenance_timer.cancel()
+                self._maintenance_timer = None
+            
+            # 2. Close connection pool
+            if hasattr(self, "_pool"):
+                self._pool.close()
+            
+            # 3. Force garbage collection to release Python references
+            gc.collect()
+            
+            # 4. Windows-specific: Wait for OS to release file handles
+            if platform.system() == "Windows":
+                time.sleep(1.0)  # Windows needs more time
+            else:
+                time.sleep(0.1)  # Linux/macOS is faster
+            
+            logger.info("All DB connections closed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during DB connection cleanup: {e}")
+            # Still try to continue - maintenance might still work
+
     def _connect(self) -> SQLiteConnectionPool:
         return self._pool
 

@@ -45,6 +45,45 @@ class CacheManager:
             self._cleanup_timer = None
         self._pool.close()
 
+    def force_close_all_connections_windows_safe(self) -> None:
+        """Ferme toutes les connexions cache de manière sûre pour Windows.
+        
+        Cette méthode est spécifiquement conçue pour résoudre les WinError 32
+        lors du clear cache sur Windows.
+        """
+        import time
+        import gc
+        import platform
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info("Closing all cache connections for Windows-safe maintenance")
+        
+        try:
+            # 1. Cancel cleanup timer first
+            if self._cleanup_timer:
+                self._cleanup_timer.cancel()
+                self._cleanup_timer = None
+            
+            # 2. Close connection pool
+            if hasattr(self, "_pool"):
+                self._pool.close()
+            
+            # 3. Force garbage collection
+            gc.collect()
+            
+            # 4. Windows-specific waiting
+            if platform.system() == "Windows":
+                time.sleep(1.0)  # Windows needs more time
+            else:
+                time.sleep(0.1)  # Linux/macOS is faster
+            
+            logger.info("All cache connections closed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during cache connection cleanup: {e}")
+            # Continue anyway
+
     def __enter__(self) -> "CacheManager":
         return self
 

@@ -505,7 +505,7 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                         )
                         adaptive_timeout = int(max(60, min(current_spacing + 30, 120)))
                         logger.debug(
-                            "🕐 Timeout adaptatif: %ds (espacement: %.1fs)",
+                            "[TIMEOUT] Timeout adaptatif: %ds (espacement: %.1fs)",
                             adaptive_timeout,
                             current_spacing,
                         )
@@ -575,7 +575,7 @@ class SmartMultiWorkerAnalysisThread(threading.Thread):
                             )
                     except concurrent.futures.TimeoutError:
                         logger.error(
-                            "🕐 TIMEOUT WORKER: %s | Espacement: %.1fs | Timeout: %ds | Workers: %d",
+                            "[TIMEOUT] WORKER: %s | Espacement: %.1fs | Timeout: %ds | Workers: %d",
                             file_row.get("path", "unknown"),
                             current_spacing,
                             adaptive_timeout,
