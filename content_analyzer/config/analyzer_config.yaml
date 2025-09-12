@@ -1,14 +1,14 @@
 api_config:
+  adaptive_timeouts:
+    base_http_timeout: 60
+    enable: true
+    max_http_timeout: 180
+    worker_factor: 1.5
   batch_size: 1
+  http_timeout_seconds: 60
   max_tokens: 32000
   timeout_seconds: 300
-  http_timeout_seconds: 60
-  adaptive_timeouts:
-    enable: true
-    base_http_timeout: 60
-    worker_factor: 1.5
-    max_http_timeout: 180
-  token: sk-d88e3244ae2e4b64a5256c6f4946155a
+  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjYyNGRkNTU4LTU3NDAtNDI2Yi05Zjk4LTcwNjY0ODdlOTk4YyIsImV4cCI6MTc1ODA1NTk2MX0._IdGzA1Tvc6zHqYffpNHH3QQkH0IKfd6hviRbMadW_c
   url: http://localhost:8080
 circuit_config:
   expected_exception: requests.RequestException
@@ -71,6 +71,26 @@ modules:
   prompt_manager:
     backend: jinja2_yaml
     template_caching: true
+pipeline_config:
+  adaptive_spacing:
+    adjustment_step: 1
+    buffer_size: 2
+    enable_adaptive_spacing: true
+    initial_delay_seconds: 5
+    max_delay_seconds: 99
+    min_delay_seconds: 1
+    response_time_threshold: 5
+  upload_spacing:
+    adjustment_step: 2.0
+    buffer_size: 2
+    enable_adaptive_spacing: true
+    green_zone_factor: 0.6
+    initial_delay_seconds: 3.0
+    max_delay_seconds: 60.0
+    min_delay_seconds: 1.0
+    red_zone_factor: 3.0
+    reset_threshold_factor: 0.5
+    response_time_threshold: 5.0
 project:
   name: llm-content-analyzer
   stack_philosophy: minimal_dependencies_maximum_efficiency
@@ -90,36 +110,17 @@ scoring:
   type_weight: 40
 templates:
   comprehensive:
-    system_prompt: 'Tu es un expert en classification de documents d''entreprise avec
-      specialisation en securite informatique, conformite RGPD et analyse juridico-financiere.
-
-      REGLES ABSOLUES AUCUNE EXCEPTION AUTORISEE :
-
-      INTERDIT: Tout texte avant ou apres le JSON, Commentaires dans la reponse, Reponses
-      partielles ou incompletes
-
-      OBLIGATOIRE: JSON valide et complet uniquement, Tous les 4 domaines analyses,
-      Un resume 30-50 mots
-
-      VALIDATION REQUISE:
-
-      verifie que tu as:
-
-      Un resume present
-
-      Une classification securite
-
-      Une analyse RGPD
-
-      Une classification finance
-
-      Une classification legale
-
-      Un JSON syntaxiquement correctTu es un expert en analyse de documents pour entreprise.'
+    system_prompt: "Tu es un expert en analyse visuelle et classification de documents\
+      \ d'entreprise.\nETAPE 1: ANALYSE VISUELLE (si c'est une image)\nD\xE9cris d'abord\
+      \ clairement ce que tu vois dans l'image (personnes, objets, texte visible,\
+      \ contexte).      \nETAPE 2: CLASSIFICATION\nApplique ensuite la grille de classification\
+      \ standard bas\xE9e sur ce que tu observes.\nIMPORTANT: Si l'image contient\
+      \ du texte lisible, analyse-le. \nsi c'est une photo/image sans document, indique\
+      \ \"none\" pour les domaines non pertinents. tu r\xE9pondra en Fran\xE7ais."
     user_template: "Nom: {{ file_name }}\nTaille: {{ file_size_readable }}\nProprietaire:\
       \ {{ owner }}\nDerniere modification: {{ last_modified }}\nSignature: {{ file_signature\
       \ }}\nINSTRUCTIONS OBLIGATOIRES, Tu DOIS analyser EXACTEMENT 4 domaines (AUCUN\
-      \ OUBLI AUTORISE) :\n[DOMAINE 1/4] SECURITE - choix unique:\n- C0 (Public):\
+      \ OUBLI AUTORISE), \n[DOMAINE 1/4] SECURITE - choix unique:\n- C0 (Public):\
       \ Accessible a tous, aucune restriction\n- C1 (Interne): Personnel organisation\
       \ uniquement\n- C2 (Confidentiel): Acces restreint avec autorisation\n- C3 (Secret):\
       \ Acces tres restreint, hautement sensible\n- N/A : Fichier inaccessible/corrompu\n\
@@ -165,25 +166,3 @@ templates:
     system_prompt: "Tu es un expert en s\xE9curit\xE9 informatique."
     user_template: "Analyse s\xE9curitaire du fichier {{ file_name }}. Classification:\
       \ {{ metadata_summary }}"
-
-pipeline_config:
-  adaptive_spacing:
-    initial_delay_seconds: 5
-    min_delay_seconds: 1
-    max_delay_seconds: 99
-    response_time_threshold: 5
-    adjustment_step: 1
-    buffer_size: 2
-    enable_adaptive_spacing: true
-  upload_spacing:
-    initial_delay_seconds: 3.0
-    min_delay_seconds: 1.0
-    max_delay_seconds: 60.0
-    response_time_threshold: 5.0
-    adjustment_step: 2.0
-    buffer_size: 2
-    enable_adaptive_spacing: true
-    reset_threshold_factor: 0.5
-    green_zone_factor: 0.6
-    red_zone_factor: 3.0
-
