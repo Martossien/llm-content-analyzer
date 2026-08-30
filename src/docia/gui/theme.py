@@ -7,7 +7,7 @@ reconnaisse un C3 d'un écran à l'autre.
 
 from __future__ import annotations
 
-from pathlib import PurePath
+from pathlib import PurePosixPath
 
 FONT_FAMILY = "Segoe UI"
 FONT_SIZE = 13
@@ -101,8 +101,8 @@ def shorten_path(path: str, max_len: int = 60) -> str:
 def folder_of(path: str) -> str:
     """Dossier parent d'un chemin (Windows ou POSIX), sans le nom du fichier."""
     if "\\" in path and "/" not in path:
-        return path.rsplit("\\", 1)[0] if "\\" in path else ""
-    return str(PurePath(path).parent)
+        return path.rsplit("\\", 1)[0]
+    return str(PurePosixPath(path).parent)
 
 
 def format_bytes(value: int | float) -> str:
