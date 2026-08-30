@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,18 @@ from docia.models import BlockFile, DomainAnalysis, FileAnalysis
 logger = logging.getLogger(__name__)
 
 _REQUIRED_KEYS = ("file_ref", "resume", "security", "rgpd", "finance", "legal")
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def strip_thinking(content: str) -> str:
+    """Retire un bloc de raisonnement `<think>…</think>` laissé dans la réponse
+    (serveur sans `--reasoning-parser`), puis tout ce qui précède le premier `{`
+    si le modèle a bavardé avant le JSON."""
+    text = _THINK_BLOCK.sub("", content)
+    start = text.find("{")
+    return text[start:] if start > 0 else text
 
 
 class ParseError(Exception):
@@ -206,7 +219,7 @@ def parse_block_response(content: str, files: Sequence[BlockFile]) -> ParsedBloc
         ParseError: JSON illisible, racine non-objet ou clé `files` absente/non liste.
     """
     try:
-        data = json.loads(content)
+        data = json.loads(strip_thinking(content))
     except (json.JSONDecodeError, TypeError) as exc:
         raise ParseError(f"réponse JSON illisible : {exc}") from exc
     if not isinstance(data, dict):

@@ -218,3 +218,24 @@ async def test_usage_absent_vaut_zero() -> None:
     assert result.usage.completion_tokens == 0
     assert result.usage.latency_ms == 42
     assert result.finish_reason is None
+
+
+def test_thinking_adds_template_kwargs_and_budget(tmp_path: Path) -> None:
+    from docia.config import LLMConfig
+    from docia.llm.client import LLMClient
+    from docia.models import BlockFile, BlockSpec
+
+    block = tmp_path / "b.md"
+    block.write_text("## SOURCE: a.txt\n\ntexte\n", encoding="utf-8")
+    spec = BlockSpec(
+        path=block, files=[BlockFile(1, "a.txt", 1)], tokens_estimated=5, tokens_with_margin=6
+    )
+    cfg = LLMConfig(enable_thinking=True, thinking_budget_tokens=1234)
+    client = LLMClient(cfg, "system")
+    payload = client.build_payload(spec)
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert (
+        payload["max_tokens"]
+        == min(cfg.max_tokens_cap, cfg.max_tokens_floor + cfg.max_tokens_per_file) + 1234
+    )
+    assert "chat_template_kwargs" not in LLMClient(LLMConfig(), "s").build_payload(spec)

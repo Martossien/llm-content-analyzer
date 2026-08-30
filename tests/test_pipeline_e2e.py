@@ -226,25 +226,34 @@ def test_cli_end_to_end(
     assert main(["retry"]) == 0
 
 
-def test_block_over_model_context_is_not_sent(
+def test_file_over_model_context_is_segmented_and_aggregated(
     tmp_path: Path, corpus: tuple[Path, Path], fake_server
 ) -> None:  # type: ignore[no-untyped-def]
     src, csv_path = corpus
-    (src / "enorme.txt").write_text("Texte volumineux. " * 20_000, encoding="utf-8")
+    (src / "enorme.txt").write_text(
+        "".join(f"Paragraphe {i} : " + "texte volumineux " * 30 + "\n\n" for i in range(600)),
+        encoding="utf-8",
+    )
     csv_path.write_text(
         csv_path.read_text(encoding="utf-8") + _csv_line(src / "enorme.txt", "hashBIG") + "\n",
         encoding="utf-8",
     )
     cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
-    cfg.llm.max_context_tokens = 20_000
+    cfg.llm.max_context_tokens = 12_000  # → segments de ≤ 6 000 tokens
     with Database(cfg.db_path) as db:
         import_csv(db, csv_path)
         plan_files(db, cfg.filter)
         report = run_pipeline(db, cfg)
-        assert report.blocks_skipped == 1
-        assert (report.files_done, report.files_error) == (6, 1)
-        errored = list(db.iter_files(FileStatus.ERROR))
-        assert errored[0].name == "enorme.txt"
-        assert "hors plafond du modèle" in (errored[0].exclusion_reason or "")
-    calls = [r for r in fake_server.requests if "enorme.txt" in json.dumps(r)]
-    assert calls == []
+        assert report.blocks_skipped == 0
+        assert report.files_segmented == 1
+        assert (report.files_done, report.files_error) == (7, 0)
+        assert db.counts()["error"] == 0
+        rows = {r["name"]: r for r in db.latest_analyses()}
+        big = rows["enorme.txt"]
+        assert big["segments"] >= 2
+        assert big["resume"].startswith(f"Fichier analysé en {big['segments']} parties")
+        assert big["security_classification"]
+    refs = [
+        r for r in fake_server.requests if "enorme.txt [partie" in json.dumps(r, ensure_ascii=False)
+    ]
+    assert len(refs) == big["segments"]

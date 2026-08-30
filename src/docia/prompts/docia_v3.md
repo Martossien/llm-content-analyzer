@@ -11,6 +11,8 @@ Pour CHAQUE fichier du corpus, produis exactement une entrée JSON avec :
 
 Chaque champ `confidence` est un entier de 0 à 100 (100 = certain).
 
+Certains fichiers, trop volumineux pour tenir d'un seul tenant, sont fournis par **segments complets** : leur ligne SOURCE se termine par ` [partie i/K]` et le texte est la i-ème partie du document. Analyse ce segment pour lui-même (les analyses des K segments seront agrégées ensuite) et recopie la ligne SOURCE telle quelle, suffixe compris.
+
 Règles :
 - Ne saute aucun fichier, n'en invente aucun. Le nombre d'entrées doit être égal au nombre de lignes `## SOURCE:`.
 - Si un fichier est vide, illisible ou n'est qu'une note technique (« identique à… », « aucun texte »), renseigne `N/A` / `none` avec une confiance basse et dis-le dans le résumé.

@@ -18,6 +18,7 @@ from pathlib import Path
 from docia.blocks.builder import build_blocks
 from docia.config import Config
 from docia.db import Database
+from docia.llm.aggregate import aggregate_segments
 from docia.llm.client import LLMClient, LLMError
 from docia.llm.parse import ParseError, parse_block_response
 from docia.llm.schema import load_system_prompt, prompt_hash
@@ -26,6 +27,9 @@ from docia.models import BlockSpec, FileStatus
 logger = logging.getLogger(__name__)
 
 MAX_FILE_ATTEMPTS = 2
+PROMPT_RESERVE_TOKENS = 6_000
+"""Tokens gardés libres sous `llm.max_context_tokens` pour le prompt système, le
+gabarit et la réponse JSON quand un fichier tronqué occupe presque tout le contexte."""
 """Un fichier absent de la réponse ou dans un bloc en erreur est retenté une
 fois (dans un autre bloc), puis passe en `error` — jamais de boucle infinie."""
 
@@ -39,6 +43,7 @@ class RunReport:
     blocks_built: int = 0
     blocks_resumed: int = 0
     blocks_skipped: int = 0
+    files_segmented: int = 0
     blocks_done: int = 0
     blocks_error: int = 0
     prompt_tokens: int = 0
@@ -92,6 +97,9 @@ async def _run(
     )
     report = RunReport(run_id=run_id)
     work_dir = cfg.work_dir() / f"run_{run_id:04d}"
+    if cfg.blocks.max_file_tokens <= 0:
+        # Réserve pour le prompt système et la réponse JSON du fichier tronqué.
+        cfg.blocks.max_file_tokens = max(2_000, cfg.llm.max_context_tokens - PROMPT_RESERVE_TOKENS)
 
     # 1. Reprise : blocs d'un run précédent restés sans résultat, fichiers `queued` orphelins.
     requeued = db.requeue_stale()
@@ -119,10 +127,10 @@ async def _run(
             report.files_error += 1
         for spec in built.blocks:
             if spec.tokens_with_margin > cfg.llm.max_context_tokens:
-                # Un fichier seul plus grand que le contexte du modèle : inutile
-                # d'essayer (400 garanti). Signalé avec sa taille, jamais perdu.
+                # Ne devrait plus arriver : le builder tronque au-delà de
+                # `max_file_tokens`. Garde-fou explicite, jamais silencieux.
                 reason = (
-                    f"hors plafond du modèle : {spec.tokens_with_margin} tokens "
+                    f"hors plafond du modèle malgré troncature : {spec.tokens_with_margin} tokens "
                     f"> {cfg.llm.max_context_tokens} (llm.max_context_tokens)"
                 )
                 for bf in spec.files:
@@ -132,6 +140,7 @@ async def _run(
                 continue
             db.create_block(run_id, spec, prompt_hash=phash, model=cfg.llm.model)
             specs.append(spec)
+            report.files_segmented += sum(1 for bf in spec.files if bf.segment_index == 1)
         report.blocks_built += len(built.blocks)
         say(f"lot {label} : {len(built.blocks)} bloc(s), {len(built.failed)} échec(s) d'extraction")
 
@@ -169,6 +178,37 @@ async def _run(
                     _retry_or_fail(
                         db, bf.file_id, spec.block_id, reason or "absent de la réponse", report
                     )
+                    continue
+                if bf.is_segment:
+                    db.store_segment_analysis(
+                        bf.file_id,
+                        spec.block_id,
+                        bf.content_version,
+                        prompt_hash=phash,
+                        model=cfg.llm.model,
+                        segment_index=bf.segment_index,
+                        segment_count=bf.segment_count,
+                        raw=analysis.raw,
+                    )
+                    db.set_block_file_outcome(spec.block_id, bf.file_id, "segment done")
+                    done_segments = db.segment_analyses(
+                        bf.file_id, bf.content_version, prompt_hash=phash, model=cfg.llm.model
+                    )
+                    if len(done_segments) < bf.segment_count:
+                        continue  # on attend les autres segments (même run ou suivant)
+                    merged = aggregate_segments(
+                        bf.file_ref.rsplit(" [partie", 1)[0], [raw for _, _, raw in done_segments]
+                    )
+                    db.store_analysis(
+                        bf.file_id,
+                        spec.block_id,
+                        bf.content_version,
+                        prompt_hash=phash,
+                        model=cfg.llm.model,
+                        analysis=merged,
+                        segments=bf.segment_count,
+                    )
+                    report.files_done += 1
                     continue
                 db.store_analysis(
                     bf.file_id,

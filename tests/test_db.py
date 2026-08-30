@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from docia.db import Database
+from docia.db import SCHEMA_VERSION, Database
 from docia.models import (
     BlockFile,
     BlockSpec,
@@ -56,11 +56,11 @@ def _analysis(ref: str) -> FileAnalysis:
 
 def test_schema_and_path(tmp_path: Path) -> None:
     with Database(tmp_path / "x.sqlite") as db:
-        assert db.schema_version == 1
+        assert db.schema_version == SCHEMA_VERSION
         assert db.counts()["files"] == 0
     # ré-ouverture : pas de nouvelle migration
     with Database(tmp_path / "x.sqlite") as db:
-        assert db.schema_version == 1
+        assert db.schema_version == SCHEMA_VERSION
 
 
 def test_upsert_new_updated_unchanged_and_content_version(tmp_path: Path) -> None:

@@ -32,10 +32,16 @@ class LLMConfig:
     max_tokens_per_file: int = 400
     max_tokens_floor: int = 500
     max_tokens_cap: int = 16000
-    max_context_tokens: int = 60_000
-    """Plafond du modèle servi (tokens avec marge, prompt compris). Un fichier seul
-    au-delà (bloc « hors plafond ») n'est pas envoyé : il passe en erreur avec sa
-    taille, plutôt qu'un refus 400 du serveur. Aligner sur `--max-model-len`."""
+    max_context_tokens: int = 120_000
+    """Plafond du modèle servi (tokens avec marge, prompt compris) — aligner sur
+    `--max-model-len` (≥ 131072 recommandé). Un fichier seul au-delà n'est ni
+    tronqué ni mis en erreur : il est découpé en segments complets analysés
+    séparément puis agrégés (sévérité = max des segments)."""
+    enable_thinking: bool = False
+    """Modèles à raisonnement : envoie `chat_template_kwargs.enable_thinking` et
+    réserve `thinking_budget_tokens` en plus dans `max_tokens`. Le JSON reste
+    exigé dans la réponse finale ; un bloc `<think>…</think>` est ignoré."""
+    thinking_budget_tokens: int = 4_000
 
     def resolved_api_key(self) -> str:
         return self.api_key or os.environ.get("DOCIA_API_KEY", "") or "dummy"
@@ -52,6 +58,10 @@ class BlocksConfig:
     """Fichiers passés à DocFuse par appel (extraction parallèle interne)."""
     work_dir: str = ""
     """Dossier des blocs `.md` ; vide = `<db>.blocks/` à côté de la base."""
+    max_file_tokens: int = 0
+    """Budget (tokens avec marge) au-delà duquel un fichier seul est découpé en
+    segments. 0 = dérivé du pipeline : `llm.max_context_tokens` moins une réserve
+    pour le prompt et la réponse."""
     keep_blocks: bool = True
 
 
@@ -144,6 +154,13 @@ class Config:
             errors.append(f"blocks.tokenizer_engine inconnu : {self.blocks.tokenizer_engine}")
         if self.blocks.batch_files < 1:
             errors.append("blocks.batch_files doit être >= 1")
+        if self.llm.thinking_budget_tokens < 0:
+            errors.append("llm.thinking_budget_tokens doit être >= 0")
+        if self.llm.max_context_tokens < self.blocks.block_tokens:
+            errors.append(
+                "llm.max_context_tokens doit être >= blocks.block_tokens "
+                f"({self.llm.max_context_tokens} < {self.blocks.block_tokens})"
+            )
         return errors
 
     def work_dir(self) -> Path:
@@ -213,7 +230,9 @@ model = "qwen38"
 max_in_flight = 8
 timeout_s = 900
 max_retries = 3
-max_context_tokens = 60000         # plafond du modèle servi (--max-model-len) ; au-delà, fichier en erreur
+max_context_tokens = 120000        # plafond du modèle servi (--max-model-len ≥ 131072) ; au-delà, fichier découpé en segments agrégés
+enable_thinking = false            # true pour un modèle à raisonnement (thinking) ; + thinking_budget_tokens
+thinking_budget_tokens = 4000
 
 [blocks]
 block_tokens = 32000               # 16–64K recommandé

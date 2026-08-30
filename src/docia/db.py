@@ -26,7 +26,7 @@ from docia.models import (
     path_key,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _now() -> str:
@@ -155,7 +155,28 @@ CREATE INDEX IF NOT EXISTS idx_analyses_security ON analyses(security_classifica
 CREATE INDEX IF NOT EXISTS idx_analyses_rgpd ON analyses(rgpd_risk_level);
 """
 
-_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1)]
+_SCHEMA_V2 = """
+ALTER TABLE block_files ADD COLUMN segment_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE block_files ADD COLUMN segment_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE analyses ADD COLUMN segments INTEGER NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS segment_analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id),
+    block_id INTEGER REFERENCES blocks(id),
+    content_version INTEGER NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    model TEXT NOT NULL,
+    segment_index INTEGER NOT NULL,
+    segment_count INTEGER NOT NULL,
+    raw_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (file_id, content_version, prompt_hash, model, segment_index)
+);
+CREATE INDEX IF NOT EXISTS idx_segment_analyses_file ON segment_analyses(file_id);
+"""
+
+_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1), (2, _SCHEMA_V2)]
 
 
 class Database:
@@ -475,9 +496,18 @@ class Database:
             )
             block_id = int(cur.lastrowid or 0)
             conn.executemany(
-                "INSERT INTO block_files(block_id, file_id, file_ref, content_version, oversized) VALUES(?,?,?,?,?)",
+                "INSERT INTO block_files(block_id, file_id, file_ref, content_version, oversized,"
+                " segment_index, segment_count) VALUES(?,?,?,?,?,?,?)",
                 [
-                    (block_id, bf.file_id, bf.file_ref, bf.content_version, int(bf.oversized))
+                    (
+                        block_id,
+                        bf.file_id,
+                        bf.file_ref,
+                        bf.content_version,
+                        int(bf.oversized),
+                        bf.segment_index,
+                        bf.segment_count,
+                    )
                     for bf in spec.files
                 ],
             )
@@ -518,12 +548,18 @@ class Database:
 
     def block_files(self, block_id: int) -> list[BlockFile]:
         rows = self._conn.execute(
-            "SELECT file_id, file_ref, content_version, oversized FROM block_files WHERE block_id=? ORDER BY rowid",
+            "SELECT file_id, file_ref, content_version, oversized, segment_index, segment_count"
+            " FROM block_files WHERE block_id=? ORDER BY rowid",
             (block_id,),
         ).fetchall()
         return [
             BlockFile(
-                int(r["file_id"]), r["file_ref"], int(r["content_version"]), bool(r["oversized"])
+                int(r["file_id"]),
+                r["file_ref"],
+                int(r["content_version"]),
+                bool(r["oversized"]),
+                int(r["segment_index"]),
+                int(r["segment_count"]),
             )
             for r in rows
         ]
@@ -574,6 +610,7 @@ class Database:
         prompt_hash: str,
         model: str,
         analysis: FileAnalysis,
+        segments: int = 1,
     ) -> None:
         """Insère (ou remplace) l'analyse d'un fichier et le passe `done`, en une transaction."""
         with self.transaction() as conn:
@@ -582,8 +619,9 @@ class Database:
                    security_classification, security_confidence, security_justification,
                    rgpd_risk_level, rgpd_data_types, rgpd_confidence,
                    finance_document_type, finance_amounts, finance_confidence,
-                   legal_contract_type, legal_parties, legal_confidence, raw_json, created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   legal_contract_type, legal_parties, legal_confidence, raw_json, created_at,
+                   segments)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(file_id, content_version, prompt_hash, model) DO UPDATE SET
                    block_id=excluded.block_id, resume=excluded.resume,
                    security_classification=excluded.security_classification, security_confidence=excluded.security_confidence,
@@ -592,7 +630,8 @@ class Database:
                    finance_document_type=excluded.finance_document_type, finance_amounts=excluded.finance_amounts,
                    finance_confidence=excluded.finance_confidence, legal_contract_type=excluded.legal_contract_type,
                    legal_parties=excluded.legal_parties, legal_confidence=excluded.legal_confidence,
-                   raw_json=excluded.raw_json, created_at=excluded.created_at""",
+                   raw_json=excluded.raw_json, created_at=excluded.created_at,
+                   segments=excluded.segments""",
                 (
                     file_id,
                     block_id,
@@ -614,12 +653,68 @@ class Database:
                     analysis.legal.confidence,
                     json.dumps(analysis.raw, ensure_ascii=False),
                     _now(),
+                    segments,
                 ),
             )
             conn.execute(
                 "UPDATE files SET status='done', exclusion_reason=NULL, updated_at=? WHERE id=?",
                 (_now(), file_id),
             )
+
+    def store_segment_analysis(
+        self,
+        file_id: int,
+        block_id: int | None,
+        content_version: int,
+        *,
+        prompt_hash: str,
+        model: str,
+        segment_index: int,
+        segment_count: int,
+        raw: dict[str, object],
+    ) -> None:
+        """Analyse d'un segment d'un fichier découpé (le fichier reste `queued`
+        jusqu'à l'agrégation des K segments)."""
+        self._conn.execute(
+            """INSERT INTO segment_analyses(file_id, block_id, content_version, prompt_hash, model,
+               segment_index, segment_count, raw_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(file_id, content_version, prompt_hash, model, segment_index)
+               DO UPDATE SET block_id=excluded.block_id, raw_json=excluded.raw_json,
+               created_at=excluded.created_at""",
+            (
+                file_id,
+                block_id,
+                content_version,
+                prompt_hash,
+                model,
+                segment_index,
+                segment_count,
+                json.dumps(raw, ensure_ascii=False),
+                _now(),
+            ),
+        )
+        self._conn.commit()
+
+    def segment_analyses(
+        self, file_id: int, content_version: int, *, prompt_hash: str, model: str
+    ) -> list[tuple[int, int, dict[str, object]]]:
+        """Segments déjà analysés : (index, count, JSON brut), triés par index."""
+        rows = self._conn.execute(
+            """SELECT segment_index, segment_count, raw_json FROM segment_analyses
+               WHERE file_id=? AND content_version=? AND prompt_hash=? AND model=? ORDER BY segment_index""",
+            (file_id, content_version, prompt_hash, model),
+        ).fetchall()
+        out: list[tuple[int, int, dict[str, object]]] = []
+        for r in rows:
+            raw = json.loads(r["raw_json"])
+            out.append(
+                (
+                    int(r["segment_index"]),
+                    int(r["segment_count"]),
+                    raw if isinstance(raw, dict) else {},
+                )
+            )
+        return out
 
     def latest_analyses(self) -> Iterator[sqlite3.Row]:
         """Dernière analyse de chaque fichier (jointe au fichier), pour l'export."""
@@ -630,7 +725,8 @@ class Database:
                           a.security_classification, a.security_confidence, a.security_justification,
                           a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
                           a.finance_document_type, a.finance_amounts, a.finance_confidence,
-                          a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at
+                          a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at,
+                          a.segments
                    FROM files f LEFT JOIN analyses a ON a.id = (
                         SELECT id FROM analyses WHERE file_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1)
                    ORDER BY f.path"""

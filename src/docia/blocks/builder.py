@@ -19,10 +19,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from docfuse.core.context_counter import estimate_tokens
 from docfuse.core.orchestrator import run_analysis
 from docfuse.core.splitter import split_by_budget
 from docfuse.i18n import set_language
+from docfuse.models.extraction_result import ExtractedFile
 from docfuse.output.markdown_writer import write_markdown_corpus
+from docfuse.output.source_header import build_source_header
 
 from docia.config import BlocksConfig
 from docia.models import BlockFile, BlockSpec, FileRow, path_key
@@ -160,6 +163,27 @@ def _run_docfuse(
 
     blocks: list[BlockSpec] = []
     for part in parts:
+        if (
+            part.oversized
+            and cfg.max_file_tokens > 0
+            and part.tokens_with_margin > cfg.max_file_tokens
+            and len(part.file_indices) == 1
+            and part.file_indices[0] in rows_by_index
+        ):
+            # Fichier plus grand que le contexte du modèle : segments complets,
+            # un bloc par segment, agrégés ensuite par le pipeline (jamais tronqué).
+            index = part.file_indices[0]
+            blocks.extend(
+                _segment_blocks(
+                    result.files[index],
+                    rows_by_index[index],
+                    cfg,
+                    work_dir,
+                    f"{batch_label}_{part.index:03d}",
+                    engine=result.engine,
+                )
+            )
+            continue
         block_files = [
             BlockFile(
                 file_id=rows_by_index[index].id,
@@ -187,6 +211,100 @@ def _run_docfuse(
             )
         )
     return blocks
+
+
+def _segment_blocks(
+    extracted: ExtractedFile,
+    row: FileRow,
+    cfg: BlocksConfig,
+    work_dir: Path,
+    label: str,
+    *,
+    engine: object,
+) -> list[BlockSpec]:
+    """Découpe le texte d'un fichier en K segments ≤ `cfg.max_file_tokens` (tokens
+    avec marge), aux limites de paragraphes, et écrit un bloc par segment avec
+    `## SOURCE: <ref> [partie i/K]`. Chaque segment est complet : la réunion des
+    K segments est exactement le texte extrait."""
+    from copy import copy
+
+    from docfuse.core.tokenizers.base import TokenizerEngine
+
+    text: str = extracted.text
+    relative_path: str = extracted.relative_path
+    eng = engine if isinstance(engine, TokenizerEngine) else None
+    # Budget de texte par segment : le plafond moins l'en-tête SOURCE (~80 tokens).
+    budget = max(500, cfg.max_file_tokens - 200)
+    pieces = _split_text(text, budget, cfg.margin, eng)
+    k = len(pieces)
+    specs: list[BlockSpec] = []
+    for i, piece in enumerate(pieces, 1):
+        seg = copy(extracted)
+        seg.text = piece
+        seg.relative_path = f"{relative_path} [partie {i}/{k}]"
+        est = estimate_tokens(piece, cfg.margin, eng)
+        header = build_source_header(seg, cfg.margin, est.tokens_estimated, est.tokens_with_margin)
+        path = work_dir / f"{label}_seg{i:03d}.md"
+        body = f"# Corpus DocFuse — segment {i}/{k}\n\n---\n\n{header}\n\n{piece}\n\n---\n"
+        path.write_bytes(body.encode("utf-8"))
+        block_file = BlockFile(
+            file_id=row.id,
+            file_ref=f"{relative_path} [partie {i}/{k}]",
+            content_version=row.content_version,
+            oversized=True,
+            segment_index=i,
+            segment_count=k,
+        )
+        _verify_source_lines(path, [block_file])
+        specs.append(
+            BlockSpec(
+                path=path,
+                files=[block_file],
+                tokens_estimated=est.tokens_estimated,
+                tokens_with_margin=est.tokens_with_margin,
+                oversized=True,
+            )
+        )
+    logger.info(
+        "%s : fichier découpé en %d segments (%d tokens)",
+        relative_path,
+        k,
+        sum(s.tokens_with_margin for s in specs),
+    )
+    return specs
+
+
+def _split_text(text: str, budget_tokens: int, margin: float, engine: object) -> list[str]:
+    """Découpe `text` en morceaux ≤ `budget_tokens` (avec marge), en coupant de
+    préférence sur une ligne vide, sinon une fin de ligne, sinon un espace."""
+    from docfuse.core.tokenizers.base import TokenizerEngine
+
+    eng = engine if isinstance(engine, TokenizerEngine) else None
+
+    def tokens(s: str) -> int:
+        return estimate_tokens(s, margin, eng).tokens_with_margin
+
+    pieces: list[str] = []
+    rest = text
+    while rest:
+        if tokens(rest) <= budget_tokens:
+            pieces.append(rest)
+            break
+        # Estimation proportionnelle puis ajustement descendant.
+        ratio = budget_tokens / max(1, tokens(rest))
+        cut = max(1, int(len(rest) * ratio * 0.95))
+        while cut > 1 and tokens(rest[:cut]) > budget_tokens:
+            cut = int(cut * 0.9)
+        # Reculer jusqu'à une frontière naturelle (dans les 20 % précédents).
+        floor = int(cut * 0.8)
+        for sep in ("\n\n", "\n", " "):
+            pos = rest.rfind(sep, floor, cut)
+            if pos > 0:
+                cut = pos + len(sep)
+                break
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    return [p for p in pieces if p.strip()] or [text]
 
 
 def _path_keys(raw: str) -> list[str]:

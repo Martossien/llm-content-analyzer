@@ -287,3 +287,41 @@ def test_source_ambigue_leve_une_erreur(tmp_path: Path) -> None:
             tmp_path / "blocs",
             batch_label="lot",
         )
+
+
+def test_oversized_file_is_split_into_complete_segments(tmp_path: Path) -> None:
+    """Un fichier plus grand que `max_file_tokens` devient K segments complets,
+    un bloc chacun, `## SOURCE: nom [partie i/K]` — jamais tronqué."""
+    from docia.config import BlocksConfig
+    from docia.models import FileRow, FileStatus
+
+    big = tmp_path / "gros.txt"
+    paragraphs = [f"Paragraphe {i} : " + ("mot " * 40) + "\n\n" for i in range(400)]
+    big.write_text("".join(paragraphs), encoding="utf-8")
+    row = FileRow(
+        id=1,
+        path=str(big),
+        name="gros.txt",
+        extension="txt",
+        size_bytes=big.stat().st_size,
+        fast_hash="h",
+        last_write_time="",
+        content_version=1,
+        status=FileStatus.PENDING,
+    )
+    cfg = BlocksConfig(block_tokens=1_000, max_file_tokens=3_000)
+    result = build_blocks([row], cfg, tmp_path / "work", batch_label="b")
+
+    assert result.failed == []
+    segs = [b for b in result.blocks if b.files[0].is_segment]
+    assert len(segs) >= 3
+    k = segs[0].files[0].segment_count
+    assert [b.files[0].segment_index for b in segs] == list(range(1, k + 1))
+    assert all(b.tokens_with_margin <= 3_000 for b in segs)
+    # Réunion des segments = texte complet (jamais de perte, jamais de troncature).
+    rebuilt = ""
+    for b in segs:
+        text = b.path.read_text(encoding="utf-8")
+        assert f"## SOURCE: gros.txt [partie {b.files[0].segment_index}/{k}]" in text
+        rebuilt += text.split("---\n", 3)[-1].rsplit("\n\n---", 1)[0].lstrip("\n")
+    assert rebuilt.replace("\n", "") == big.read_text(encoding="utf-8").replace("\n", "")

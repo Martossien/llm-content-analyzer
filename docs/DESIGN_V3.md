@@ -69,9 +69,16 @@ d'`ALTER` implicite ailleurs.
    tokenizer_engine=…, recursive=False)` puis `split_by_budget(result)`.
 3. Une partie = un bloc : `write_markdown_corpus(result, path, margin, part=…)` dans
    `work_dir/run_<id>/block_<n>.md` ; `block_files` reçoit `file_ref = result.files[i].relative_path`.
-4. Fichiers non extraits (`result.ignored`, statut `error`) → `files.status = error` + raison ;
-   partie `oversized` → bloc envoyé quand même (le plafond serveur peut être plus grand), sinon
-   `error: hors plafond`.
+4. Fichiers non extraits (`result.ignored`, statut `error`) → `files.status = error` + raison.
+5. **Très gros fichiers — ni tronqués, ni en erreur.** Un fichier seul au-delà de
+   `blocks.max_file_tokens` (dérivé de `llm.max_context_tokens`, défaut 120 000, à aligner sur
+   `--max-model-len` ≥ 131072) est découpé en K **segments complets** aux limites de paragraphes,
+   un bloc par segment (`## SOURCE: nom [partie i/K]`). Les K analyses vont dans
+   `segment_analyses`, puis `llm/aggregate.py` produit l'analyse du fichier (`analyses.segments = K`)
+   par règle **conservatrice** : sécurité et RGPD = maximum des segments, finance/juridique = type
+   non-`none` le plus sûr, listes = union, résumé « analysé en K parties » + résumés. La sévérité ne
+   peut être que sur-estimée. Décision utilisateur du 30/08 : une analyse partielle présentée comme
+   complète serait une mauvaise interprétation en puissance — refusée.
 
 ## 6. LLM
 
@@ -83,6 +90,9 @@ d'`ALTER` implicite ailleurs.
   clé API `Authorization: Bearer sk-…` ; la clé `sources` de la réponse est ignorée.
 - Concurrence : `asyncio.Semaphore(max_in_flight)` ; timeouts (connect 10 s, read
   `timeout_s`, défaut 900) ; retries 3 avec backoff sur 5xx / 429 / timeouts, jamais sur 4xx.
+- Modèles à raisonnement : `llm.enable_thinking` envoie `chat_template_kwargs.enable_thinking`
+  et ajoute `thinking_budget_tokens` à `max_tokens` ; `parse.strip_thinking` ignore un bloc
+  `<think>…</think>` resté dans la réponse (serveur sans `--reasoning-parser`).
 - `prompt_hash = sha256(prompt + schéma + modèle)[:16]`.
 
 ## 7. Validation de la réponse

@@ -114,7 +114,10 @@ class LLMClient:
     def max_tokens_for(self, spec: BlockSpec) -> int:
         """Budget de sortie : plancher + quota par fichier, plafonné."""
         wanted = self.cfg.max_tokens_floor + self.cfg.max_tokens_per_file * len(spec.files)
-        return min(self.cfg.max_tokens_cap, wanted)
+        budget = min(self.cfg.max_tokens_cap, wanted)
+        if self.cfg.enable_thinking:
+            budget += self.cfg.thinking_budget_tokens
+        return budget
 
     def build_payload(self, spec: BlockSpec) -> dict[str, Any]:
         """Corps JSON de la requête, selon le transport configuré."""
@@ -124,6 +127,11 @@ class LLMClient:
             "temperature": self.cfg.temperature,
             "max_tokens": max_tokens,
             "response_format": response_format(),
+            **(
+                {"chat_template_kwargs": {"enable_thinking": True}}
+                if self.cfg.enable_thinking
+                else {}
+            ),
             "stream": False,
         }
         if self.cfg.transport == "openwebui":

@@ -112,6 +112,15 @@ class BlockFile:
     file_ref: str
     content_version: int
     oversized: bool = False
+    segment_index: int = 0
+    """> 0 : ce `BlockFile` est le segment n° i (1..K) d'un fichier trop grand pour le
+    contexte, découpé en K morceaux **complets** analysés séparément puis agrégés
+    (jamais de troncature)."""
+    segment_count: int = 1
+
+    @property
+    def is_segment(self) -> bool:
+        return self.segment_count > 1
 
 
 @dataclass

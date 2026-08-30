@@ -161,3 +161,12 @@ def test_bloc_vide_tout_est_manquant() -> None:
     parsed = parse_block_response('{"files": []}', block_files())
     assert parsed.analyses == {}
     assert len(parsed.missing) == 3
+
+
+def test_thinking_block_is_ignored() -> None:
+    from docia.llm.parse import strip_thinking
+
+    content = '<think>je réfléchis\nlonguement</think>\n{"files": []}'
+    assert strip_thinking(content) == '{"files": []}'
+    assert strip_thinking('Voici le JSON :\n{"files": []}') == '{"files": []}'
+    assert strip_thinking('{"files": []}') == '{"files": []}'
