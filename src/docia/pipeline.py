@@ -241,6 +241,14 @@ async def _run(
 
     # 3. Envoi asynchrone, N en vol (sémaphore dans le client).
     async with LLMClient(cfg.llm, system_prompt) as client:
+        served = await client.server_max_model_len()
+        if served is not None and served != cfg.llm.max_context_tokens:
+            say(
+                f"attention : llm.max_context_tokens={cfg.llm.max_context_tokens} mais le serveur "
+                f"sert {served} (--max-model-len) — la valeur du serveur fait foi"
+            )
+            if served < cfg.llm.max_context_tokens:
+                cfg.llm.max_context_tokens = served
         if not await client.health():
             db.finish_run(run_id, "error")
             report.errors.append(f"serveur LLM injoignable : {cfg.llm.base_url}")

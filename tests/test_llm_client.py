@@ -405,3 +405,17 @@ async def test_count_tokens_and_check_fits(fake_server: FakeOpenAIServer, tmp_pa
     cfg_owui = cfg_for(fake_server.base_url_vllm, transport="openwebui")
     async with LLMClient(cfg_owui, "s") as client:
         assert await client.count_tokens("abcd") is None
+
+
+@pytest.mark.asyncio
+async def test_server_max_model_len(fake_server: FakeOpenAIServer) -> None:
+    """`GET /v1/models` : longueur servie lue quand vLLM la publie, None sinon."""
+    from docia.llm.client import LLMClient
+
+    cfg = cfg_for(fake_server.base_url_vllm)
+    async with LLMClient(cfg, "s") as client:
+        assert await client.server_max_model_len() is None  # non publiée
+        fake_server.max_model_len = 262_144
+        assert await client.server_max_model_len() == 262_144
+    async with LLMClient(cfg_for(fake_server.base_url_vllm, transport="openwebui"), "s") as client:
+        assert await client.server_max_model_len() is None

@@ -109,6 +109,7 @@ class FakeOpenAIServer(ThreadingHTTPServer):
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
         self.tokens_per_char: float = 0.25
+        self.max_model_len: int | None = None
         self.tokenize_calls: int = 0
         self.mode: str = "ok"
         self.handler_delay: float = 0.0
@@ -179,7 +180,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path in ("/v1/models", "/api/models"):
-            self._send_json(200, {"object": "list", "data": [{"id": "qwen38"}]})
+            entry: dict[str, Any] = {"id": "qwen38"}
+            if self.state.max_model_len is not None:
+                entry["max_model_len"] = self.state.max_model_len
+            self._send_json(200, {"object": "list", "data": [entry]})
         else:
             self._send_text(404, "not found")
 

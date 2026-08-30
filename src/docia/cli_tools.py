@@ -239,6 +239,28 @@ def doctor_report(cfg: Config) -> dict[str, Any]:
             report["tesseract_langs"] = [lang for lang in langs if lang and " " not in lang]
     except Exception as exc:  # noqa: BLE001
         report["ocr"] = f"ÉCHEC : {exc}"
+    if cfg.llm.transport == "vllm":
+        try:
+            import httpx
+
+            data = httpx.get(cfg.llm.base_url.rstrip("/") + "/models", timeout=5).json()
+            served = next(
+                (
+                    m.get("max_model_len")
+                    for m in data.get("data", [])
+                    if isinstance(m, dict) and m.get("id") == cfg.llm.model
+                ),
+                None,
+            )
+            if served is not None:
+                match = (
+                    "identique"
+                    if served == cfg.llm.max_context_tokens
+                    else (f"≠ config {cfg.llm.max_context_tokens} — la valeur du serveur fait foi")
+                )
+                report["llm_contexte_servi"] = f"{served} ({match})"
+        except Exception as exc:  # noqa: BLE001 — serveur éteint : information, pas une erreur
+            report["llm_contexte_servi"] = f"serveur injoignable ({type(exc).__name__})"
     scanner = find_smbeagle(cfg.scan.smbeagle_path)
     report["smbeagle"] = (
         str(scanner) if scanner else "introuvable (à côté de l'exe ou scan.smbeagle_path)"

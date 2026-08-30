@@ -139,9 +139,19 @@ pratique pour vérifier un document avant de le déposer.
 - **Prompt** : le texte des consignes données à l'IA est modifiable, enregistrable par profil,
   testable sur un fichier ; tout changement est tracé (les fichiers analysés avec un autre prompt
   seront réanalysés à la demande).
-- **Serveur & performances** : adresse et modèle, raisonnement (effort et budget), contexte,
-  chemin du scanner, dates d'accès préservées pendant le scan, **Mesurer la vitesse de la LLM**
-  (fichiers/heure, JSON valides).
+- **Serveur & performances** : adresse et modèle, raisonnement, contexte, chemin du scanner,
+  dates d'accès préservées pendant le scan, **Mesurer la vitesse de la LLM** (fichiers/heure,
+  JSON valides). Les réglages sont de deux natures :
+  - **Envoyés à chaque requête** (ils pilotent, quel que soit le lancement du serveur) :
+    *Tokens par bloc* = combien de contenu docia regroupe par requête (32 000 : moins de requêtes,
+    échecs isolés) ; *Budget de raisonnement* = plafond de « réflexion » **imposé** au modèle par
+    requête (6 000 : coupé net au-delà, la réponse JSON garde toujours sa place) et l'*Effort*
+    (medium mesuré = même qualité que xhigh, 2–3× plus rapide) ; *Température* ; *Fichiers par lot
+    DocFuse* = rythme d'extraction sur le poste (local, le serveur n'y est pour rien).
+  - **Descriptifs du serveur** (doivent correspondre au lancement, sinon erreurs) : adresse, nom du
+    modèle, clé, et *Contexte du modèle*. Ce dernier est **auto-vérifié** : au début de chaque
+    analyse, docia lit la valeur réellement servie et s'y borne en avertissant si la config diverge
+    (`docia doctor` l'affiche aussi).
 - Ligne de commande : `Docia.exe doctor`, `scan`, `run`, `report`, `export`, `backup`,
   `restore`, `reanalyze`, `campaigns` (voir README).
 

@@ -317,3 +317,22 @@ def test_big_file_resplit_when_exact_count_exceeds_context(
         assert big["segments"] >= 2
         assert big["security_classification"]
     assert fake_server.tokenize_calls >= 2
+
+
+def test_pipeline_clamps_to_served_context(
+    fake_server: FakeOpenAIServer, corpus: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """`max_context_tokens` décrit le serveur : si le serveur sert moins, le run s'y borne
+    en le disant — pas d'erreurs 400 silencieuses."""
+    src, csv_path = corpus
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 200_000
+    fake_server.max_model_len = 50_000
+    lines: list[str] = []
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg, progress=lines.append)
+        assert report.files_error == 0
+    assert cfg.llm.max_context_tokens == 50_000
+    assert any("la valeur du serveur fait foi" in line for line in lines)

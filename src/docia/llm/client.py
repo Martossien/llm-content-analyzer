@@ -362,6 +362,30 @@ class LLMClient:
             finish_reason=finish if isinstance(finish, str) else None,
         )
 
+    async def server_max_model_len(self) -> int | None:
+        """`--max-model-len` réellement servi (`GET /v1/models`, vLLM) ; None si inconnu.
+
+        `llm.max_context_tokens` ne pilote pas le serveur : il doit le DÉCRIRE. Le
+        pipeline compare les deux au début du run et se borne à la valeur du serveur."""
+        if self.cfg.transport != "vllm":
+            return None
+        try:
+            response = await self._http.get(self._url("models"), headers=self._headers())
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError):
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        items = data.get("data") if isinstance(data, dict) else None
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and item.get("id") == self.cfg.model:
+                value = item.get("max_model_len")
+                return int(value) if isinstance(value, int) and value > 0 else None
+        return None
+
     async def health(self) -> bool:
         """`GET {base_url}/models` : True si le serveur répond 200."""
         url = self._url("models")
