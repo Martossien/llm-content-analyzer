@@ -28,7 +28,10 @@ HEADER = (
 
 
 def fast_hash(path: Path) -> str:
-    head = path.read_bytes()[: 64 * 1024]
+    # Lire SEULEMENT les 64 premiers Ko (comme SMBeagle) — jamais le fichier
+    # entier : un modèle de 7 Go dans le dossier bloquerait tout.
+    with path.open("rb") as fh:
+        head = fh.read(64 * 1024)
     try:
         import xxhash  # type: ignore[import-not-found]
 
