@@ -10,8 +10,16 @@ sans argument) — une console reste ouverte derrière la fenêtre, c'est voulu.
     pip install -e ".[dev,gui]" pyinstaller
     pyinstaller --noconfirm Docia.spec          → dist/Docia.exe
 
-Le nom suit DOCIA_APP_NAME (défaut Docia). L'OCR Tesseract n'est pas embarqué :
-DocFuse le détecte s'il est installé sur le poste (ou voir DocFuse-OCR.spec).
+Le nom suit DOCIA_APP_NAME (défaut Docia).
+
+**OCR embarqué** (décision utilisateur du 30/08 : sans OCR, les PDF scannés — courriers,
+factures numérisées — sortent vides et sont mal classés) : Tesseract (binaire, DLL,
+tessdata fra+eng) est embarqué exactement comme dans `DocFuse-OCR.spec`, sous
+`tesseract/tesseract.exe` + `tesseract/tessdata/` — l'arborescence que
+`docfuse.core.ocr.tesseract._bundled_binary_path` attend dans `sys._MEIPASS`.
+Le build exige `TESSERACT_HOME` (défaut `C:\Program Files\Tesseract-OCR`, préparé
+par la CI : `choco install tesseract` + `fra.traineddata`) et échoue sinon ;
+`DOCIA_NO_OCR=1` permet un build local sans OCR, explicitement.
 """
 
 import os
@@ -34,6 +42,28 @@ if _python_dlls_dir.is_dir():
 _datas = [
     (str(_SRC / "docia" / "prompts"), "docia/prompts"),
 ]
+
+# Tesseract embarqué (même recette que DocFuse-OCR.spec : tout le dossier
+# d'installation, les noms de DLL variant selon la version de build).
+_tesseract_home = Path(os.environ.get("TESSERACT_HOME", r"C:\Program Files\Tesseract-OCR"))
+if os.environ.get("DOCIA_NO_OCR") == "1":
+    print("Docia.spec : build SANS OCR (DOCIA_NO_OCR=1) — les PDF scannés ne seront pas lus")
+else:
+    if not _tesseract_home.is_dir():
+        raise FileNotFoundError(
+            f"Tesseract introuvable dans TESSERACT_HOME={_tesseract_home} — l'OCR fait partie "
+            "de Docia.exe : installez Tesseract (+ fra.traineddata) avant le build, "
+            "ou DOCIA_NO_OCR=1 pour un build local sans OCR."
+        )
+    for _f in sorted(_tesseract_home.glob("*.exe")) + sorted(_tesseract_home.glob("*.dll")):
+        _extra_binaries.append((str(_f), "tesseract"))
+    _tessdata = sorted((_tesseract_home / "tessdata").glob("*.traineddata"))
+    if not any(t.name == "fra.traineddata" for t in _tessdata):
+        raise FileNotFoundError(
+            f"fra.traineddata absent de {_tesseract_home / 'tessdata'} — l'OCR français est requis."
+        )
+    for _t in _tessdata:
+        _datas.append((str(_t), "tesseract/tessdata"))
 _datas += collect_data_files("docfuse")  # i18n/*.json, assets/*.ttf, vocabulaires tokenizers
 _datas += collect_data_files("customtkinter")
 _datas += collect_data_files("tiktoken_ext")

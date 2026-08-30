@@ -238,3 +238,12 @@ démarrait puis plantait au premier .docx/.pdf. `Docia.spec` les ratisse (`colle
 binaires natifs compris) et la CI Windows exécute l'exe sur les fixtures DocFuse (`quick --dry-run`)
 et ouvre/ferme la fenêtre (`gui --smoke`, onglets admin compris) : un paquet manquant casse la CI,
 pas le poste de l'utilisateur.
+
+**OCR embarqué (30/08, correction demandée par l'utilisateur : « sinon tu ne peux pas classer
+les documents proprement »)** : `Docia.spec` embarque Tesseract comme `DocFuse-OCR.spec`
+(`tesseract/tesseract.exe` + `tesseract/tessdata/`, chemin attendu par DocFuse dans `_MEIPASS`,
+`TESSDATA_PREFIX` posé par DocFuse) ; le build échoue si `TESSERACT_HOME` ou `fra.traineddata`
+manquent (`DOCIA_NO_OCR=1` = build local explicitement sans OCR). L'OCR est automatique côté
+DocFuse (pages classées ocr/mixed, moteur résolu s'il est disponible). La CI génère un PDF
+image-only (`scripts/make_scanned_pdf.py`), retire Tesseract du PATH et exige que le bloc
+produit par `Docia.exe quick --dry-run` contienne le texte reconnu.

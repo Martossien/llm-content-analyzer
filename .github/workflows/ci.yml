@@ -44,7 +44,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,gui]"
           pip install pyinstaller
+      - name: Installer Tesseract (OCR embarqué dans Docia.exe)
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          $tessHome = "C:\Program Files\Tesseract-OCR"
+          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/fra.traineddata" -OutFile "$tessHome\tessdata\fra.traineddata"
+          & "$tessHome\tesseract.exe" --version
+          & "$tessHome\tesseract.exe" --list-langs
       - name: Build Docia.exe
+        env:
+          TESSERACT_HOME: C:\Program Files\Tesseract-OCR
         run: pyinstaller --noconfirm Docia.spec
       - name: Smoke test de l'exe (CLI)
         run: |
@@ -58,6 +68,19 @@ jobs:
           git clone --depth 1 https://github.com/Martossien/DocFuse.git docfuse-src
           dist\Docia.exe --config smoke.toml quick --dry-run docfuse-src\tests\fixtures
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test de l'exe (OCR embarqué sur un PDF scanné)
+        # Un PDF image-only généré ici (aucun texte natif) : seul l'OCR peut en sortir
+        # les mots. On lit le bloc DocFuse produit par l'exe et on exige ces mots.
+        shell: pwsh
+        run: |
+          python scripts/make_scanned_pdf.py smoke-scan\courrier_scanne.pdf "FACTURE SCANNEE NUMERO 4711"
+          # Tesseract retiré du PATH : seul le binaire embarqué peut répondre.
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Tesseract' }) -join ';'
+          dist\Docia.exe --config smoke.toml quick --dry-run --keep-db smoke-scan\ocr.sqlite smoke-scan\courrier_scanne.pdf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hits = Get-ChildItem -Recurse smoke-scan\ocr.sqlite.blocks -Filter *.md | Select-String -Pattern "4711"
+          if (-not $hits) { Write-Error "OCR embarqué : le texte du PDF scanné n'a pas été lu"; exit 1 }
+          Write-Host "OCR OK :" $hits[0].Line
       - name: Smoke test de l'exe (interface graphique)
         run: dist\Docia.exe --config smoke.toml gui --smoke
       - uses: actions/upload-artifact@v4

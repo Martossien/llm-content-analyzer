@@ -72,6 +72,14 @@ web de pilotage à distance (v4) passent tous par cette couche.
 Serveur LLM : voir `~/Doc-IA/bench_vllm/serve_qwen38.sh` (vLLM + Qwen3.8-27B) ou open-webui 0.11
 (`transport = "openwebui"`, `base_url = "http://serveur:8080/api"`, clé `sk-`).
 
+## OCR embarqué
+
+`Docia.exe` embarque **Tesseract** (fra + eng, recette `DocFuse-OCR.spec`) : les PDF scannés,
+courriers et factures numérisés sont lus par OCR automatiquement (pages sans texte natif),
+sans rien installer sur le poste. Le build exige `TESSERACT_HOME` (la CI l'installe) ; la CI
+prouve l'OCR de l'exe sur un PDF image généré (`scripts/make_scanned_pdf.py`), Tesseract retiré
+du PATH. En développement (Linux/Windows), DocFuse utilise le `tesseract` du système s'il existe.
+
 ## Scanner SMBeagle_enriched (étape 0)
 
 `SMBeagle.exe` ([smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched)) est un programme
