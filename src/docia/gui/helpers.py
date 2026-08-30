@@ -135,3 +135,75 @@ def result_rows_v31(rows: Iterable[Any], limit: int = 500) -> list[dict[str, str
             }
         )
     return out
+
+
+# ---------------------------------------------------------------- avancement (v3.2 GUI)
+def progress_fraction(counts: dict[str, int]) -> float:
+    """Part des fichiers traités (analysés + en erreur) parmi ceux retenus par le plan."""
+    total = sum(counts.get(k, 0) for k in ("pending", "queued", "done", "error"))
+    if total <= 0:
+        return 0.0
+    done = counts.get("done", 0) + counts.get("error", 0)
+    return max(0.0, min(1.0, done / total))
+
+
+def eta_seconds(done_delta: int, elapsed_s: float, remaining: int) -> float | None:
+    """Temps restant estimé à partir du débit observé depuis le début du run ; None si inconnu."""
+    if done_delta <= 0 or elapsed_s <= 0 or remaining <= 0:
+        return None
+    return remaining * elapsed_s / done_delta
+
+
+def rate_per_hour(done_delta: int, elapsed_s: float) -> float:
+    if done_delta <= 0 or elapsed_s <= 0:
+        return 0.0
+    return done_delta * 3600.0 / elapsed_s
+
+
+def campaign_title(db_path: str) -> str:
+    """Nom lisible d'une campagne = nom du fichier SQLite sans extension."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    pure = PureWindowsPath(db_path) if "\\" in db_path else PurePosixPath(db_path)
+    return pure.stem or "campagne"
+
+
+def pretty_list(raw: object) -> str:
+    """Liste JSON (`["identite","rh"]`) ou texte → `identite, rh` ; vide → `—`."""
+    items = _as_list(raw)
+    return ", ".join(str(i) for i in items) if items else "—"
+
+
+def pretty_amounts(raw: object) -> str:
+    """Montants JSON (`[{"value":3766.65,"currency":"EUR","context":"Salaire brut"}]`)
+    → `3 766,65 EUR (Salaire brut) ; …`."""
+    items = _as_list(raw)
+    parts: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            value = item.get("value")
+            try:
+                number = f"{float(str(value)):,.2f}".replace(",", " ").replace(".", ",")
+            except ValueError:
+                number = str(value or "")
+            currency = str(item.get("currency") or "").strip()
+            context = str(item.get("context") or "").strip()
+            text = f"{number} {currency}".strip()
+            parts.append(f"{text} ({context})" if context else text)
+        else:
+            parts.append(str(item))
+    return " ; ".join(parts) if parts else "—"
+
+
+def _as_list(raw: object) -> list[Any]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return [raw]
+        return data if isinstance(data, list) else [data]
+    return [raw]

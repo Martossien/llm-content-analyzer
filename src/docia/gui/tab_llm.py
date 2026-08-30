@@ -1,4 +1,5 @@
-"""Onglet LLM & bench : réglages du serveur et des blocs, test de connexion, banc de vitesse."""
+"""Onglet Serveur & performances (administrateur) : réglages du serveur LLM et des blocs,
+test de connexion, banc de vitesse (fichiers/heure, JSON valides)."""
 
 from __future__ import annotations
 
@@ -21,8 +22,13 @@ class LLMTab:
     def build(self) -> None:
         ctk, p = self.ctk, self.parent
         c: Config = self.app.config
+        ctk.CTkLabel(
+            p,
+            text="Réglages avancés — réservés à l'administrateur. « Enregistrer » écrit docia.toml.",
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(8, 0))
         grid = ctk.CTkFrame(p)
-        grid.pack(fill="x", padx=10, pady=(10, 6))
+        grid.pack(fill="x", padx=10, pady=(6, 6))
         self.transport_var = ctk.StringVar(value=c.llm.transport)
         self.url_var = ctk.StringVar(value=c.llm.base_url)
         self.key_var = ctk.StringVar(value=c.llm.api_key)
@@ -98,7 +104,7 @@ class LLMTab:
         btns.pack(fill="x", padx=10, pady=(0, 6))
         self.test_button = ctk.CTkButton(btns, text="Tester la connexion", command=self._test)
         self.test_button.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btns, text="Enregistrer la config", command=self.app.save_config).pack(
+        ctk.CTkButton(btns, text="Enregistrer les réglages", command=self.app.save_config).pack(
             side="left", padx=(0, 16)
         )
         ctk.CTkLabel(btns, text="Bench : blocs").pack(side="left")

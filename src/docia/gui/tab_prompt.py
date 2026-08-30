@@ -24,7 +24,7 @@ class PromptTab:
         ctk, p = self.ctk, self.parent
         top = ctk.CTkFrame(p, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(10, 4))
-        ctk.CTkLabel(top, text="Profil").pack(side="left")
+        ctk.CTkLabel(top, text="Profil de prompt").pack(side="left")
         self.profile_var = ctk.StringVar(value=_EMBEDDED)
         self.profile_menu = ctk.CTkOptionMenu(
             top,
@@ -39,32 +39,51 @@ class PromptTab:
         self.tokens_label = ctk.CTkLabel(top, text="")
         self.tokens_label.pack(side="right")
 
-        self.editor = ctk.CTkTextbox(p, height=340, wrap="word")
+        self.editor = ctk.CTkTextbox(
+            p, height=300, wrap="word", font=ctk.CTkFont(family="Consolas", size=12)
+        )
         self.editor.pack(fill="both", expand=True, padx=10, pady=4)
         self.editor.bind("<KeyRelease>", lambda _e: self._update_tokens())
 
         btns = ctk.CTkFrame(p, fg_color="transparent")
         btns.pack(fill="x", padx=10, pady=6)
-        ctk.CTkLabel(btns, text="Nom").pack(side="left")
+        ctk.CTkLabel(btns, text="Nom du profil").pack(side="left")
         self.name_var = ctk.StringVar(value="")
-        ctk.CTkEntry(btns, textvariable=self.name_var, width=180).pack(side="left", padx=(4, 10))
-        ctk.CTkButton(btns, text="Enregistrer", command=self._save).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(btns, textvariable=self.name_var, width=200).pack(side="left", padx=(4, 10))
+        ctk.CTkButton(btns, text="Enregistrer", width=110, command=self._save).pack(
+            side="left", padx=(0, 6)
+        )
         ctk.CTkButton(
-            btns, text="Enregistrer et activer", command=lambda: self._save(activate=True)
+            btns,
+            text="Enregistrer et activer",
+            width=170,
+            command=lambda: self._save(activate=True),
         ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btns, text="Activer", command=self._activate).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btns, text="Prompt embarqué", command=self._reset).pack(
+        ctk.CTkButton(btns, text="Activer ce profil", width=130, command=self._activate).pack(
             side="left", padx=(0, 6)
         )
-        ctk.CTkButton(btns, text="Importer…", command=self._import_file).pack(
-            side="left", padx=(0, 6)
-        )
-        ctk.CTkButton(btns, text="Exporter…", command=self._export_file).pack(
-            side="left", padx=(0, 6)
-        )
-        ctk.CTkButton(btns, text="Supprimer", command=self._delete, fg_color="#7f1d1d").pack(
-            side="left"
-        )
+        btns2 = ctk.CTkFrame(p, fg_color="transparent")
+        btns2.pack(fill="x", padx=10, pady=(0, 6))
+        ctk.CTkButton(
+            btns2,
+            text="Revenir au prompt embarqué",
+            width=200,
+            fg_color="#6b7280",
+            command=self._reset,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            btns2,
+            text="Importer un fichier…",
+            width=150,
+            fg_color="#6b7280",
+            command=self._import_file,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            btns2, text="Exporter…", width=110, fg_color="#6b7280", command=self._export_file
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            btns2, text="Supprimer le profil", width=150, command=self._delete, fg_color="#7f1d1d"
+        ).pack(side="right")
 
         test = ctk.CTkFrame(p, fg_color="transparent")
         test.pack(fill="x", padx=10, pady=(4, 4))
@@ -109,7 +128,7 @@ class PromptTab:
                 active_row = db.active_prompt()
                 active = active_row[0] if active_row else None
         self.profile_menu.configure(values=names)
-        self.active_label.configure(text=f"actif : {active or _EMBEDDED}")
+        self.active_label.configure(text=f"profil utilisé par l'analyse : {active or _EMBEDDED}")
 
     def _load_selected(self) -> None:
         name = self.profile_var.get()

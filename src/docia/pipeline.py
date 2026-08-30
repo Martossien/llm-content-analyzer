@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -56,6 +57,11 @@ class RunReport:
 
 
 ProgressCallback = Callable[[str], None]
+"""Journal texte destiné à l'humain (CLI, GUI)."""
+
+ProgressEventCallback = Callable[[dict[str, object]], None]
+"""Progression structurée : un dictionnaire par étape (voir `_run`), pour la
+couche service (`service.run_campaign`) et, demain, l'API REST."""
 
 
 def resolve_system_prompt(db: Database, cfg: Config) -> str:
@@ -75,6 +81,7 @@ def run_pipeline(
     limit: int | None = None,
     dry_run: bool = False,
     progress: ProgressCallback | None = None,
+    on_progress: ProgressEventCallback | None = None,
     cancel: threading.Event | None = None,
 ) -> RunReport:
     """Exécute un run complet (synchrone pour l'appelant ; asyncio à l'intérieur).
@@ -84,7 +91,15 @@ def run_pipeline(
     run suivant) et les fichiers en vol sont remis `pending` par `requeue_stale`.
     """
     return asyncio.run(
-        _run(db, cfg, limit=limit, dry_run=dry_run, progress=progress, cancel=cancel)
+        _run(
+            db,
+            cfg,
+            limit=limit,
+            dry_run=dry_run,
+            progress=progress,
+            on_progress=on_progress,
+            cancel=cancel,
+        )
     )
 
 
@@ -95,9 +110,11 @@ async def _run(
     limit: int | None,
     dry_run: bool,
     progress: ProgressCallback | None,
+    on_progress: ProgressEventCallback | None = None,
     cancel: threading.Event | None = None,
 ) -> RunReport:
     say = progress or (lambda _m: None)
+    started_at = time.monotonic()
     cancelled = cancel.is_set if cancel is not None else (lambda: False)
     system_prompt = resolve_system_prompt(db, cfg)
     phash = prompt_hash(system_prompt, cfg.llm.model)
@@ -127,6 +144,27 @@ async def _run(
     say(f"{len(selected)} fichier(s) à analyser")
     specs: list[BlockSpec] = list(leftover)
     duplicates: list[tuple[int, int]] = []
+
+    def emit(kind: str, message: str = "", **extra: object) -> None:
+        """Événement structuré vers `on_progress` (compteurs vivants du rapport)."""
+        if on_progress is None:
+            return
+        payload: dict[str, object] = {
+            "event": kind,
+            "message": message,
+            "files_total": report.files_selected,
+            "files_done": report.files_done,
+            "files_error": report.files_error,
+            "blocks_total": len(specs),
+            "blocks_done": report.blocks_done,
+            "blocks_error": report.blocks_error,
+            "elapsed_s": round(time.monotonic() - started_at, 3),
+            "finished": False,
+            "cancelled": False,
+        }
+        payload.update(extra)
+        on_progress(payload)
+
     for start in range(0, len(selected), cfg.blocks.batch_files):
         if cancelled():
             say("annulation demandée : construction des blocs interrompue")
@@ -137,6 +175,7 @@ async def _run(
         for failed in built.failed:
             db.set_file_status(failed.file_id, FileStatus.ERROR, failed.reason)
             report.files_error += 1
+            emit("file_error", f"extraction impossible : {failed.reason}")
         duplicates.extend(built.duplicates)
         for spec in built.blocks:
             if spec.tokens_with_margin > cfg.llm.max_context_tokens:
@@ -157,11 +196,14 @@ async def _run(
             report.files_segmented += sum(1 for bf in spec.files if bf.segment_index == 1)
         say(f"lot {label} : {len(built.blocks)} bloc(s), {len(built.failed)} échec(s) d'extraction")
 
+    emit("start", f"{len(selected)} fichier(s) à analyser, {len(specs)} bloc(s) construit(s)")
+
     if dry_run:
         say("dry-run : blocs construits, aucun envoi")
         for dup_id, _orig in duplicates:
             db.set_file_status(dup_id, FileStatus.PENDING)
         db.finish_run(run_id, "dry-run")
+        emit("finished", "dry-run : blocs construits, aucun envoi", finished=True)
         return report
 
     # 3. Envoi asynchrone, N en vol (sémaphore dans le client).
@@ -169,6 +211,7 @@ async def _run(
         if not await client.health():
             db.finish_run(run_id, "error")
             report.errors.append(f"serveur LLM injoignable : {cfg.llm.base_url}")
+            emit("finished", f"serveur LLM injoignable : {cfg.llm.base_url}", finished=True)
             return report
 
         async def one(spec: BlockSpec) -> None:
@@ -180,11 +223,13 @@ async def _run(
                 result = await client.analyze_block(spec)
             except LLMError as exc:
                 _fail_block(db, spec, f"LLM : {exc}", report)
+                emit("block_error", f"bloc {spec.block_id} : LLM : {exc}")
                 return
             try:
                 parsed = parse_block_response(result.content, spec.files)
             except ParseError as exc:
                 _fail_block(db, spec, f"réponse illisible : {exc}", report)
+                emit("block_error", f"bloc {spec.block_id} : réponse illisible : {exc}")
                 return
             for bf in spec.files:
                 analysis = parsed.analyses.get(bf.file_id)
@@ -245,10 +290,12 @@ async def _run(
             report.blocks_done += 1
             report.prompt_tokens += result.usage.prompt_tokens
             report.completion_tokens += result.usage.completion_tokens
-            say(
+            message = (
                 f"bloc {spec.block_id} : {len(parsed.analyses)}/{len(spec.files)} fichiers, "
                 f"{result.usage.prompt_tokens} tok prompt, {result.usage.latency_ms} ms"
             )
+            say(message)
+            emit("block_done", message)
 
         await asyncio.gather(*(one(spec) for spec in specs))
 
@@ -275,8 +322,11 @@ async def _run(
     if cancelled():
         db.finish_run(run_id, "cancelled")
         say("run annulé — relancer pour reprendre")
+        emit("cancelled", "run annulé — relancer pour reprendre", cancelled=True)
+        emit("finished", "run annulé", finished=True, cancelled=True)
     else:
         db.finish_run(run_id, "done" if not report.errors else "error")
+        emit("finished", f"run {run_id} terminé", finished=True)
     return report
 
 

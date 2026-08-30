@@ -8,6 +8,8 @@ des méthodes explicites ; aucun `ALTER` implicite hors `_MIGRATIONS`.
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -27,6 +29,16 @@ from docia.models import (
 )
 
 SCHEMA_VERSION = 4
+
+BACKUP_DIR_SUFFIX = ".backups"
+"""Suffixe du dossier de sauvegardes, à côté de la base (`docia.sqlite.backups`)."""
+
+logger = logging.getLogger(__name__)
+
+
+def backup_dir_for(db_path: Path) -> Path:
+    """Dossier de sauvegardes d'une base : `<base>.backups` (à côté du fichier)."""
+    return db_path.with_name(db_path.name + BACKUP_DIR_SUFFIX)
 
 
 def _now() -> str:
@@ -264,12 +276,53 @@ class Database:
         """Exécute un `SELECT` et rend les lignes (accès lecture seule pour `views.py`)."""
         return list(self._conn.execute(sql, params))
 
+    def backup_to(self, path: str | Path) -> None:
+        """Copie cohérente de la base vers `path` (API `sqlite3.Connection.backup`).
+
+        Utilisable pendant un run : SQLite garantit un instantané cohérent.
+        """
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        dest = sqlite3.connect(str(target))
+        try:
+            self._conn.backup(dest)
+        finally:
+            dest.close()
+
     @property
     def schema_version(self) -> int:
         row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         return int(row["value"]) if row else 0
 
+    def _backup_before_migration(self) -> None:
+        """Copie la base telle quelle avant d'appliquer une migration de schéma.
+
+        Ne fait rien pour une base neuve (aucune table) ni pour une base déjà à
+        jour. Une copie impossible (disque plein, droits) est journalisée sans
+        interrompre l'ouverture : la migration reste possible.
+        """
+        names = {
+            str(r[0])
+            for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if not names:
+            return  # base neuve : rien à sauvegarder
+        current = self.schema_version if "meta" in names else 0
+        if current >= SCHEMA_VERSION:
+            return
+        target = (
+            backup_dir_for(self.path) / f"{self.path.stem}_avant_migration_v{SCHEMA_VERSION}.sqlite"
+        )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.path, target)
+        except OSError as exc:  # pragma: no cover - dépend du système de fichiers
+            logger.warning("sauvegarde avant migration impossible (%s) : %s", target, exc)
+            return
+        logger.info("sauvegarde avant migration v%s → %s", SCHEMA_VERSION, target)
+
     def _migrate(self) -> None:
+        self._backup_before_migration()
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
@@ -813,6 +866,33 @@ class Database:
                 (_now(), dst_file_id),
             )
         return True
+
+    def delete_analyses(self, file_ids: Sequence[int], *, prompt_hash: str, model: str) -> int:
+        """Supprime analyses et segments de ces fichiers pour ce prompt et ce modèle.
+
+        Une seule transaction (par paquets de 500 identifiants, limite SQLite sur
+        le nombre de paramètres). Rend le nombre de lignes `analyses` supprimées.
+        """
+        if not file_ids:
+            return 0
+        deleted = 0
+        with self.transaction() as conn:
+            for start in range(0, len(file_ids), 500):
+                chunk = tuple(file_ids[start : start + 500])
+                marks = ",".join("?" for _ in chunk)
+                params: tuple[object, ...] = (*chunk, prompt_hash, model)
+                conn.execute(
+                    f"DELETE FROM segment_analyses WHERE file_id IN ({marks})"  # noqa: S608
+                    " AND prompt_hash=? AND model=?",
+                    params,
+                )
+                cur = conn.execute(
+                    f"DELETE FROM analyses WHERE file_id IN ({marks})"  # noqa: S608
+                    " AND prompt_hash=? AND model=?",
+                    params,
+                )
+                deleted += int(cur.rowcount)
+        return deleted
 
     def latest_analyses(self) -> Iterator[sqlite3.Row]:
         """Dernière analyse de chaque fichier (jointe au fichier), pour l'export."""

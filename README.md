@@ -52,13 +52,21 @@ docia prompt list|show|save|use     # le prompt est une variable : profils nomm�
 docia review ID --status validated  # vérification humaine (validé / corrigé + commentaire)
 docia report --format html          # rapport autonome : hygiène (doublons, ancienneté…) et risque
 docia export --format xlsx|powerbi  # classeur Excel ; dossier CSV au schéma stable pour Power BI
-docia gui                           # interface : Source / Prompt / Analyse / Résultats & vérification / Statistiques / LLM & bench
+docia backup [--out DIR]            # sauvegarde horodatée de la base (<base>.backups/, rotation 10)
+docia restore SAUVEGARDE.sqlite     # restaure par-dessus la base (l'actuelle est d'abord sauvegardée)
+docia reanalyze --scope errors|all|filter [--where security=C3]  # relancer : erreurs, tout, ou une sélection
+docia campaigns                     # campagnes récentes et leur avancement
+docia gui                           # interface : Accueil (4 étapes, relance) / Résultats & vérification / Statistiques / Rapports ; mode admin : Prompt, Serveur & performances
 ```
 
 Cinq domaines par fichier : sécurité (C0–C3), RGPD, finance, juridique, **conservation**
 (durée, fondement : valeur probante, légal, fiscal, RH, contractuel). Très gros fichiers : découpés
 en segments complets puis agrégés (jamais tronqués). Doublons exacts : héritent de l'analyse de
 l'original. Raisonnement (thinking) activé par défaut.
+
+Couche service (`docia.service`) : campagnes, run avec événements de progression (durée, débit,
+reste à faire), réanalyse ciblée, sauvegarde/restauration. La CLI, l'interface et le futur serveur
+web de pilotage à distance (v4) passent tous par cette couche.
 
 Serveur LLM : voir `~/Doc-IA/bench_vllm/serve_qwen38.sh` (vLLM + Qwen3.8-27B) ou open-webui 0.11
 (`transport = "openwebui"`, `base_url = "http://serveur:8080/api"`, clé `sk-`).

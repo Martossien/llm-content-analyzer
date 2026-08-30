@@ -1,4 +1,5 @@
-"""CLI `docia` : init | ingest | plan | run | status | export | report | retry.
+"""CLI `docia` : init | ingest | plan | run | status | export | report | retry
+| backup | restore | reanalyze | campaigns.
 
 Codes retour : 0 OK, 1 erreur (config, base, LLM injoignable), 2 erreurs partielles
 (des blocs ou fichiers en erreur — les résultats obtenus sont persistés).
@@ -17,6 +18,9 @@ from docia import __version__
 from docia.config import DEFAULT_CONFIG_NAME, Config, default_toml, load_config
 from docia.db import Database
 from docia.models import FileStatus
+
+DEFAULT_KEEP_BACKUPS = 10
+"""Sauvegardes conservées par `docia backup` (voir `service.DEFAULT_KEEP_BACKUPS`)."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +78,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("retry", help="remet les fichiers en erreur à « à analyser »")
     sub.add_parser("gui", help="ouvre l'interface graphique (extra docia[gui])")
+
+    p = sub.add_parser("backup", help="sauvegarde horodatée de la base (rotation)")
+    p.add_argument("--out", type=Path, default=None, help="dossier (défaut : <base>.backups)")
+    p.add_argument("--label", default="", help="étiquette ajoutée au nom du fichier")
+    p.add_argument("--keep", type=int, default=DEFAULT_KEEP_BACKUPS, help="copies conservées")
+
+    p = sub.add_parser("restore", help="restaure une sauvegarde par-dessus la base")
+    p.add_argument("backup", type=Path, help="fichier de sauvegarde à restaurer")
+    p.add_argument("--yes", action="store_true", help="confirme le remplacement de la base")
+
+    p = sub.add_parser("reanalyze", help="force la réanalyse de fichiers déjà traités")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--all", action="store_true", help="toute la campagne (hors exclus)")
+    g.add_argument("--errors", action="store_true", help="seulement les fichiers en erreur")
+    g.add_argument("--pending-only", action="store_true", help="seulement les fichiers à analyser")
+    p.add_argument(
+        "--where",
+        action="append",
+        default=None,
+        metavar="CLÉ=VALEUR",
+        help="critère répétable : security, rgpd, owner, extension, path_like",
+    )
+    p.add_argument(
+        "--no-backup", action="store_true", help="ne pas sauvegarder avant (déconseillé)"
+    )
+
+    sub.add_parser("campaigns", help="campagnes récentes et leur avancement")
 
     p = sub.add_parser("prompt", help="profils de prompt (le prompt est une variable)")
     ps = p.add_subparsers(dest="prompt_cmd", required=True)
@@ -183,15 +214,31 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
+    from dataclasses import asdict
+
+    from docia.service import campaign_status
+
     with Database(cfg.db_path) as db:
         counts = db.counts()
         classes = db.classification_summary()
+        state = campaign_status(db)
     if args.json:
         print(
-            json.dumps({"counts": counts, "classifications": classes}, ensure_ascii=False, indent=2)
+            json.dumps(
+                {
+                    "counts": counts,
+                    "classifications": classes,
+                    "active_prompt": state.active_prompt,
+                    "schema_version": state.schema_version,
+                    "reviews": {"reviewed": state.reviewed, "to_review": state.to_review},
+                    "last_run": asdict(state.last_run) if state.last_run else None,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         )
         return 0
-    print(f"base : {cfg.db_path}")
+    print(f"base : {cfg.db_path}  (schéma {state.schema_version})")
     print(
         f"fichiers : {counts['files']}  ("
         + ", ".join(f"{s.value} {counts[s.value]}" for s in FileStatus)
@@ -204,6 +251,16 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     for domain, dist in classes.items():
         if dist:
             print(f"{domain:>9} : " + ", ".join(f"{k} {v}" for k, v in sorted(dist.items())))
+    print(f"prompt actif : {state.active_prompt}")
+    print(f"revues : {state.reviewed} vérifiée(s), {state.to_review} à vérifier")
+    run = state.last_run
+    if run is not None:
+        print(
+            f"dernier run : {run.run_id} ({run.status}) — {run.files} fichier(s), "
+            f"{run.blocks_done}/{run.blocks} bloc(s), {run.duration_s:.0f} s, modèle {run.model}"
+        )
+    else:
+        print("dernier run : aucun")
     return 0
 
 
@@ -362,6 +419,120 @@ def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_backup(args: argparse.Namespace, cfg: Config) -> int:
+    """`backup` : copie horodatée de la base, avec rotation."""
+    from docia.service import ServiceError, backup_database, list_backups
+
+    try:
+        path = backup_database(
+            Path(cfg.db_path), out_dir=args.out, label=args.label, keep=args.keep
+        )
+    except ServiceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"sauvegarde → {path}")
+    kept = list_backups(Path(cfg.db_path))
+    if kept:
+        print(f"{len(kept)} sauvegarde(s) conservée(s) dans {kept[0].parent}")
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace, cfg: Config) -> int:
+    """`restore` : remplace la base par une sauvegarde (`--yes` obligatoire)."""
+    from docia.service import ServiceError, restore_database
+
+    target = Path(cfg.db_path)
+    if not args.yes:
+        print(f"remplacerait {target} par {args.backup}")
+        print("aucune modification : relancer avec --yes pour confirmer", file=sys.stderr)
+        return 1
+    try:
+        path = restore_database(target, args.backup)
+    except ServiceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    with Database(path) as db:
+        counts = db.counts()
+    print(
+        f"base restaurée : {path} — {counts['files']} fichier(s), {counts['analyses']} analyse(s)"
+    )
+    return 0
+
+
+def _parse_where(items: list[str] | None) -> dict[str, str]:
+    """`["security=C3", "owner=X"]` → dictionnaire ; lève `ValueError` si mal formé."""
+    out: dict[str, str] = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ValueError(f"critère mal formé : « {item} » (attendu clé=valeur)")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def cmd_reanalyze(args: argparse.Namespace, cfg: Config) -> int:
+    """`reanalyze` : remet des fichiers à analyser après une sauvegarde automatique."""
+    from docia.service import ServiceError, reanalyze
+
+    try:
+        where = _parse_where(args.where)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.all:
+        scope = "all"
+    elif args.errors:
+        scope = "errors"
+    elif args.pending_only:
+        scope = "pending_only"
+    elif where:
+        scope = "filter"
+    else:
+        print(
+            "préciser --all, --errors, --pending-only ou au moins un --where clé=valeur",
+            file=sys.stderr,
+        )
+        return 1
+    if where and scope != "filter":
+        print("--where ne se combine pas avec --all/--errors/--pending-only", file=sys.stderr)
+        return 1
+    try:
+        with Database(cfg.db_path) as db:
+            count = reanalyze(db, cfg, scope=scope, where=where or None, backup=not args.no_backup)
+    except ServiceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"{count} fichier(s) remis à analyser — lancer « docia run » pour les traiter")
+    return 0
+
+
+def cmd_campaigns(_args: argparse.Namespace, _cfg: Config) -> int:
+    """`campaigns` : campagnes récentes, avec l'avancement des bases encore présentes."""
+    from docia.service import campaign_status, recent_campaigns
+
+    entries = recent_campaigns()
+    if not entries:
+        print("aucune campagne récente")
+        return 0
+    for entry in entries:
+        if not entry.db_path.exists():
+            print(f"  {entry.db_path}  (base absente)")
+            continue
+        try:
+            with Database(entry.db_path) as db:
+                state = campaign_status(db)
+        except Exception as exc:  # noqa: BLE001 - une base illisible ne doit pas tout arrêter
+            print(f"  {entry.db_path}  (illisible : {exc})")
+            continue
+        label = f" « {entry.label} »" if entry.label else ""
+        print(
+            f"  {entry.db_path}{label}  {state.done}/{state.files} analysé(s), "
+            f"{state.pending} à analyser, {state.error} en erreur — "
+            f"prompt {state.active_prompt} — ouvert {entry.last_opened}"
+        )
+    return 0
+
+
 def cmd_retry(_args: argparse.Namespace, cfg: Config) -> int:
     with Database(cfg.db_path) as db:
         n = db.reset_errors()
@@ -402,6 +573,10 @@ def main(argv: list[str] | None = None) -> int:
         "retry": cmd_retry,
         "prompt": cmd_prompt,
         "review": cmd_review,
+        "backup": cmd_backup,
+        "restore": cmd_restore,
+        "reanalyze": cmd_reanalyze,
+        "campaigns": cmd_campaigns,
     }
     from docia.cli_tools import cmd_bench, cmd_quick
 
