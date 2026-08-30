@@ -716,6 +716,44 @@ class Database:
             )
         return out
 
+    def copy_analysis(
+        self,
+        src_file_id: int,
+        dst_file_id: int,
+        dst_content_version: int,
+        *,
+        prompt_hash: str,
+        model: str,
+    ) -> bool:
+        """Copie l'analyse courante de `src` vers `dst` (contenu identique — doublon
+        DocFuse) et passe `dst` en `done`. False si `src` n'a pas d'analyse."""
+        src = self._conn.execute(
+            """SELECT * FROM analyses WHERE file_id=? AND prompt_hash=? AND model=?
+               AND content_version=(SELECT content_version FROM files WHERE id=?)
+               ORDER BY id DESC LIMIT 1""",
+            (src_file_id, prompt_hash, model, src_file_id),
+        ).fetchone()
+        if src is None:
+            return False
+        cols = [  # noqa: SIM118 — sqlite3.Row : itérer donne les VALEURS, pas les clés
+            k for k in src.keys() if k not in ("id", "file_id", "content_version", "created_at")
+        ]
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM analyses WHERE file_id=? AND content_version=? AND prompt_hash=? AND model=?",
+                (dst_file_id, dst_content_version, prompt_hash, model),
+            )
+            conn.execute(
+                f"INSERT INTO analyses(file_id, content_version, created_at, {', '.join(cols)}) "  # noqa: S608
+                f"VALUES(?, ?, ?, {', '.join('?' for _ in cols)})",
+                (dst_file_id, dst_content_version, _now(), *[src[c] for c in cols]),
+            )
+            conn.execute(
+                "UPDATE files SET status='done', exclusion_reason=NULL, updated_at=? WHERE id=?",
+                (_now(), dst_file_id),
+            )
+        return True
+
     def latest_analyses(self) -> Iterator[sqlite3.Row]:
         """Dernière analyse de chaque fichier (jointe au fichier), pour l'export."""
         return iter(

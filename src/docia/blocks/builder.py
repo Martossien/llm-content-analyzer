@@ -50,6 +50,9 @@ class BuildResult:
 
     blocks: list[BlockSpec] = field(default_factory=list)
     failed: list[FileOutcome] = field(default_factory=list)
+    duplicates: list[tuple[int, int]] = field(default_factory=list)
+    """(file_id, original_file_id) : contenu strictement identique à un autre fichier
+    du lot (détection DocFuse) — pas envoyé, hérite de l'analyse de l'original."""
 
 
 def build_blocks(
@@ -93,10 +96,14 @@ def build_blocks(
         inputs.append(Path(row.path))
 
     blocks: list[BlockSpec] = []
+    duplicates: dict[int, int] = {}
     if inputs:
-        blocks = _run_docfuse(inputs, cfg, work_dir, rows_by_key, outcomes, batch_label, lang)
+        blocks = _run_docfuse(
+            inputs, cfg, work_dir, rows_by_key, outcomes, duplicates, batch_label, lang
+        )
 
     placed = {block_file.file_id for block in blocks for block_file in block.files}
+    placed |= set(duplicates)
     for row in files:
         if row.id not in placed:
             outcomes.setdefault(row.id, "absent du résultat DocFuse")
@@ -113,7 +120,7 @@ def build_blocks(
         logger.debug(
             "Lot %s : fichier %d écarté (%s)", batch_label, outcome.file_id, outcome.reason
         )
-    return BuildResult(blocks=blocks, failed=failed)
+    return BuildResult(blocks=blocks, failed=failed, duplicates=sorted(duplicates.items()))
 
 
 def _run_docfuse(
@@ -122,10 +129,11 @@ def _run_docfuse(
     work_dir: Path,
     rows_by_key: dict[str, FileRow],
     outcomes: dict[int, str],
+    duplicates: dict[int, int],
     batch_label: str,
     lang: str,
 ) -> list[BlockSpec]:
-    """Extrait, découpe et écrit les blocs ; alimente `outcomes` au passage."""
+    """Extrait, découpe et écrit les blocs ; alimente `outcomes` et `duplicates`."""
     set_language(lang)
     result = run_analysis(
         input_path=inputs,
@@ -144,10 +152,29 @@ def _run_docfuse(
     # Fichiers exploitables, par indice dans `result.files` (aligné sur les
     # `file_indices` des parties).
     rows_by_index: dict[int, FileRow] = {}
+    index_by_ref = {f.relative_path: i for i, f in enumerate(result.files)}
     for index, extracted in enumerate(result.files):
         row = _row_for(rows_by_key, extracted.path)
         if row is None:
             logger.warning("Fichier rendu par DocFuse sans ligne connue : %s", extracted.path)
+            continue
+        original_ref = extracted.extra_metadata.get("duplicate_of")
+        if original_ref:
+            # Doublon exact (D-064 DocFuse) : le texte est remplacé par un renvoi.
+            # On n'envoie pas le renvoi à la LLM ; le pipeline copie l'analyse
+            # de l'original.
+            original = rows_by_index.get(index_by_ref.get(original_ref, -1))
+            if original is None:
+                orig_idx = index_by_ref.get(original_ref)
+                original = (
+                    _row_for(rows_by_key, result.files[orig_idx].path)
+                    if orig_idx is not None
+                    else None
+                )
+            if original is not None:
+                duplicates[row.id] = original.id
+                continue
+            outcomes.setdefault(row.id, f"doublon de {original_ref} (original hors lot)")
             continue
         if not extracted.status.is_extracted():
             detail = extracted.error_message or str(extracted.status)

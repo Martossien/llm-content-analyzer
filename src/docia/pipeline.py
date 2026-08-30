@@ -44,6 +44,7 @@ class RunReport:
     blocks_resumed: int = 0
     blocks_skipped: int = 0
     files_segmented: int = 0
+    files_duplicates: int = 0
     blocks_done: int = 0
     blocks_error: int = 0
     prompt_tokens: int = 0
@@ -115,6 +116,7 @@ async def _run(
     report.files_selected = len(selected)
     say(f"{len(selected)} fichier(s) à analyser")
     specs: list[BlockSpec] = list(leftover)
+    duplicates: list[tuple[int, int]] = []
     for start in range(0, len(selected), cfg.blocks.batch_files):
         if cancelled():
             say("annulation demandée : construction des blocs interrompue")
@@ -125,6 +127,7 @@ async def _run(
         for failed in built.failed:
             db.set_file_status(failed.file_id, FileStatus.ERROR, failed.reason)
             report.files_error += 1
+        duplicates.extend(built.duplicates)
         for spec in built.blocks:
             if spec.tokens_with_margin > cfg.llm.max_context_tokens:
                 # Ne devrait plus arriver : le builder tronque au-delà de
@@ -146,6 +149,8 @@ async def _run(
 
     if dry_run:
         say("dry-run : blocs construits, aucun envoi")
+        for dup_id, _orig in duplicates:
+            db.set_file_status(dup_id, FileStatus.PENDING)
         db.finish_run(run_id, "dry-run")
         return report
 
@@ -236,6 +241,23 @@ async def _run(
             )
 
         await asyncio.gather(*(one(spec) for spec in specs))
+
+    # Doublons exacts : héritent de l'analyse de leur original (même contenu).
+    for dup_id, orig_id in duplicates:
+        dup = db.get_file(dup_id)
+        if dup is None:
+            continue
+        if db.copy_analysis(
+            orig_id, dup_id, dup.content_version, prompt_hash=phash, model=cfg.llm.model
+        ):
+            report.files_done += 1
+            report.files_duplicates += 1
+        else:
+            # Original pas (encore) analysé : le doublon sera analysé pour
+            # lui-même au prochain run (l'original ne sera plus dans le lot).
+            db.set_file_status(dup_id, FileStatus.PENDING)
+    if report.files_duplicates:
+        say(f"{report.files_duplicates} doublon(s) exact(s) : analyse héritée de l'original")
 
     if not cfg.blocks.keep_blocks:
         for spec in specs:

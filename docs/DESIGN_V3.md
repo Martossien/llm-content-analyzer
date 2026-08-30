@@ -70,6 +70,10 @@ d'`ALTER` implicite ailleurs.
 3. Une partie = un bloc : `write_markdown_corpus(result, path, margin, part=…)` dans
    `work_dir/run_<id>/block_<n>.md` ; `block_files` reçoit `file_ref = result.files[i].relative_path`.
 4. Fichiers non extraits (`result.ignored`, statut `error`) → `files.status = error` + raison.
+4 bis. **Doublons exacts** (DocFuse remplace le texte du doublon par un renvoi, D-064) : le doublon
+   n'est pas envoyé ; le pipeline **copie l'analyse de l'original** (`db.copy_analysis`) — jamais
+   « N/A ». Si l'original n'est pas encore analysé, le doublon repasse `pending` et sera analysé
+   pour lui-même au run suivant.
 5. **Très gros fichiers — ni tronqués, ni en erreur.** Un fichier seul au-delà de
    `blocks.max_file_tokens` (dérivé de `llm.max_context_tokens`, défaut 250 000, aligné sur
    `--max-model-len` = contexte natif du modèle, 262144 pour Qwen3.8 — on ne se bride pas) est découpé en K **segments complets** aux limites de paragraphes,

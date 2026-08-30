@@ -257,3 +257,30 @@ def test_file_over_model_context_is_segmented_and_aggregated(
         r for r in fake_server.requests if "enorme.txt [partie" in json.dumps(r, ensure_ascii=False)
     ]
     assert len(refs) == big["segments"]
+
+
+def test_exact_duplicate_inherits_original_analysis(
+    tmp_path: Path, corpus: tuple[Path, Path], fake_server
+) -> None:  # type: ignore[no-untyped-def]
+    src, csv_path = corpus
+    original = src / "rh" / "contrat_dupont.txt"
+    copy = src / "compta" / "contrat_dupont_copie.txt"
+    copy.write_text(original.read_text(encoding="utf-8"), encoding="utf-8")
+    csv_path.write_text(
+        csv_path.read_text(encoding="utf-8") + _csv_line(copy, "hashDUP") + "\n", encoding="utf-8"
+    )
+    cfg = _config(tmp_path, fake_server.base_url_vllm)
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg)
+        assert report.files_duplicates == 1
+        assert (report.files_done, report.files_error) == (7, 0)
+        rows = {r["name"]: r for r in db.latest_analyses()}
+        assert (
+            rows["contrat_dupont_copie.txt"]["security_classification"]
+            == rows["contrat_dupont.txt"]["security_classification"]
+        )
+        assert rows["contrat_dupont_copie.txt"]["status"] == "done"
+    sent = json.dumps(fake_server.requests, ensure_ascii=False)
+    assert "contrat_dupont_copie.txt" not in sent or "Contenu identique" in sent
