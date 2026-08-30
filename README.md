@@ -1,106 +1,112 @@
-# Doc-IA analyzer v3 (`docia`)
+# Doc-IA analyzer (`docia`)
 
-Classification **RGPD / finance / sécurité / juridique** des fichiers d'un partage réseau par une
-LLM locale, à partir d'un scan [SMBeagle](https://github.com/Martossien/smbeagle_enriched) et de
-blocs de texte produits par [DocFuse](https://github.com/Martossien/DocFuse).
+Audit du contenu d'un partage de fichiers par une **LLM locale** (rien ne quitte l'organisme).
+Pour chaque fichier : **sensibilité (C0–C3)**, **données personnelles (RGPD)**, **finance**,
+**juridique**, **durée de conservation** — plus l'hygiène du partage : **doublons (espace
+récupérable)**, **fichiers non accédés depuis N ans**, **candidats au nettoyage**. Restitution :
+interface graphique, rapport HTML pour la direction, classeur Excel, CSV pour Power BI Report Server.
 
-> Version 3 : réécriture complète du POC (conservé dans `legacy/` pour référence). Conception :
-> [`docs/DESIGN_V3.md`](docs/DESIGN_V3.md). Contexte du projet :
-> `~/Doc-IA/docs/ANALYSE_2026-08-30.md`.
+📖 **[Guide de l'utilisateur illustré](docs/GUIDE_UTILISATEUR.md)** — installation, les 4 étapes,
+lecture des résultats, vérification humaine, FAQ.
 
-**Guide de l'utilisateur (illustré)** : [`docs/GUIDE_UTILISATEUR.md`](docs/GUIDE_UTILISATEUR.md).
+![Accueil de Doc-IA](docs/images/01_accueil.png)
+
+## Installation sur un poste Windows (utilisateur)
+
+1. Copier dans un même dossier : **`Docia.exe`** (artefact `Docia-windows-x64` de la
+   [CI](../../actions)) et **`SMBeagle.exe`** (release
+   [smbeagle_enriched v4.2.0](https://github.com/Martossien/smbeagle_enriched/releases/tag/v4.2.0)).
+2. Lancer `Docia.exe` (double-clic = interface ; en console, `Docia.exe doctor` vérifie que tout
+   est en place : DocFuse, pdfium, **OCR Tesseract embarqué** — rien d'autre à installer, ni .NET
+   ni Tesseract).
+3. Mode administrateur (interrupteur en haut à droite) → *Serveur & performances* : adresse du
+   serveur LLM, **Tester la connexion**, Enregistrer.
+
+Le mode de scan standard est le **scan local Windows** : un lecteur réseau mappé (`P:\`) ou un
+dossier (`\\serveur\partage\Finance`), avec le compte de la session (droit de lecture suffisant).
 
 ## Principe
 
 ```
-CSV SMBeagle ──ingest──▶ SQLite (files) ──plan──▶ fichiers à analyser
-                                                    │
-                     DocFuse (bibliothèque, sur le poste) : extraction + OCR + blocs ≤ N tokens
-                                                    │  block_001.md … (## SOURCE: par fichier)
-                          LLM (vLLM direct ou open-webui natif) ── JSON multi-fichiers (schéma imposé)
-                                                    │
-                                          SQLite (analyses) ──export──▶ CSV / JSON
+SMBeagle.exe (scan local Win32, piloté par docia) ──▶ CSV 19 colonnes + manifeste
+        │ docia scan : import + préparation (exclusions, priorité)
+        ▼
+SQLite « campagne » (un fichier .sqlite par périmètre audité)
+        │ docia run (reprenable ; rescan = seulement les fichiers modifiés)
+        ▼
+DocFuse (bibliothèque, sur le poste) : extraction + OCR + blocs ≤ N tokens
+        │ seul du TEXTE part vers le serveur, jamais les documents
+        ▼
+LLM locale (vLLM direct, ou open-webui natif) ── JSON garanti par json_schema
+        │ comptage exact /tokenize avant envoi ; gros fichiers en segments complets agrégés
+        ▼
+SQLite (analyses, revues humaines) ──▶ GUI · rapport HTML · Excel · Power BI · CSV/JSON
 ```
 
-- Le poste Windows fait l'extraction (il a l'accès SMB et le CPU) ; **seul du texte** part vers
-  le serveur, jamais les documents.
-- Le JSON est garanti par `response_format` (json_schema) — aucune « réparation » côté client.
-- **Reprise** : une analyse est liée à la version de contenu du fichier, au prompt et au modèle ;
-  relancer `run` ne renvoie que ce qui manque. Un rescan ne réanalyse que les fichiers modifiés.
+- **Reprise partout** : une analyse est liée au contenu du fichier, au prompt et au modèle ;
+  relancer ne refait que ce qui manque. Les doublons exacts héritent de l'analyse de l'original.
+- **Jamais tronqué, jamais « trop long »** : les très gros fichiers sont découpés en segments
+  complets puis agrégés ; chaque bloc est compté exactement par le serveur avant envoi et
+  re-découpé au besoin dans le même run.
+- **Dates d'accès honnêtes** : l'ancienneté (« non accédé depuis N ans ») s'appuie sur la première
+  date observée — l'audit lui-même (hachage, OCR, extraction) ne « rajeunit » pas les fichiers.
+- **Raisonnement (thinking)** activé par défaut, effort `medium`, budget **imposé** (6 000 tokens)
+  — réglages mesurés sur banc, modifiables dans l'onglet Serveur.
 
-## Installation
-
-```bash
-pip install "docia @ git+https://github.com/Martossien/llm-content-analyzer"   # cœur (CLI)
-# développement :
-uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e /chemin/DocFuse -e ".[dev]"
-```
-
-Python ≥ 3.11. Dépendances : `docfuse` ≥ 0.2.0, `httpx`.
-
-## Utilisation
+## Ligne de commande
 
 ```bash
 docia init                          # écrit docia.toml (config commentée)
-docia scan --local-path D:\\partage   # étape 0 : lance SMBeagle_enriched (à côté de Docia.exe), importe et prépare
+docia doctor                        # état du poste : DocFuse, pdfium, OCR, scanner, serveur
+docia scan --local-path "P:\\"      # étape 0 : scanner → import → préparation (SMBeagle piloté)
 docia ingest scan.csv               # ou : import d'un CSV SMBeagle déjà produit (19 colonnes)
-docia plan                          # exclusions + score de priorité
 docia run --limit 500               # blocs DocFuse → LLM → analyses (reprend où il s'était arrêté)
 docia status                        # compteurs par statut, blocs, classifications
-docia export --format csv -o resultats.csv
-docia retry                         # remet les fichiers en erreur à « à analyser »
-docia quick DOSSIER                 # analyse immédiate d'un fichier/dossier, sans CSV
-docia bench                         # vitesse de la LLM : prefill/decode, JSON valides, fichiers/heure
+docia report --format html          # rapport autonome (hygiène + risque + conservation)
+docia export --format csv|json|xlsx|powerbi -o SORTIE
+docia quick DOSSIER                 # analyse immédiate d'un fichier/dossier, sans scan
 docia prompt list|show|save|use     # le prompt est une variable : profils nommés en base
 docia review ID --status validated  # vérification humaine (validé / corrigé + commentaire)
-docia report --format html          # rapport autonome : hygiène (doublons, ancienneté…) et risque
-docia export --format xlsx|powerbi  # classeur Excel ; dossier CSV au schéma stable pour Power BI
-docia backup [--out DIR]            # sauvegarde horodatée de la base (<base>.backups/, rotation 10)
-docia restore SAUVEGARDE.sqlite     # restaure par-dessus la base (l'actuelle est d'abord sauvegardée)
-docia reanalyze --scope errors|all|filter [--where security=C3]  # relancer : erreurs, tout, ou une sélection
+docia reanalyze --scope errors|all|filter [--where security=C3]
+docia backup [--out DIR]            # sauvegarde horodatée (<base>.backups/, rotation 10)
+docia restore SAUVEGARDE.sqlite     # restauration (l'actuelle est d'abord sauvegardée)
 docia campaigns                     # campagnes récentes et leur avancement
-docia gui                           # interface : Accueil (scanner ou CSV, 4 étapes, relance) / Résultats & vérification / Statistiques / Rapports ; mode admin : Prompt, Serveur & performances
+docia retry                         # remet les fichiers en erreur à « à analyser »
+docia bench                         # vitesse de la LLM : prefill/decode, raisonnement, fichiers/heure
+docia gui                           # interface (aussi : double-clic sur Docia.exe)
 ```
 
-Cinq domaines par fichier : sécurité (C0–C3), RGPD, finance, juridique, **conservation**
-(durée, fondement : valeur probante, légal, fiscal, RH, contractuel). Très gros fichiers : découpés
-en segments complets puis agrégés (jamais tronqués). Doublons exacts : héritent de l'analyse de
-l'original. Raisonnement (thinking) activé par défaut.
+Toutes ces opérations passent par la couche **`docia.service`** (campagnes, événements de
+progression avec temps restant, réanalyse, sauvegardes) — la même que l'interface et, demain,
+le serveur web de pilotage à distance (v4).
 
-Couche service (`docia.service`) : campagnes, run avec événements de progression (durée, débit,
-reste à faire), réanalyse ciblée, sauvegarde/restauration. La CLI, l'interface et le futur serveur
-web de pilotage à distance (v4) passent tous par cette couche.
+## Serveur LLM
 
-Serveur LLM : voir `~/Doc-IA/bench_vllm/serve_qwen38.sh` (vLLM + Qwen3.8-27B) ou open-webui 0.11
-(`transport = "openwebui"`, `base_url = "http://serveur:8080/api"`, clé `sk-`).
+Référence : vLLM + Qwen3.8-27B, contexte natif 262 144, structured outputs xgrammar,
+`--reasoning-parser qwen3` (budget de raisonnement imposé par requête) — script
+`~/Doc-IA/bench_vllm/serve_qwen38.sh`. Alternative : open-webui ≥ 0.11 en API native
+(`transport = "openwebui"`, `base_url = "http://serveur:8080/api"`, clé `sk-`) — dans ce mode le
+budget de raisonnement n'est pas relayé, seul le renvoi à budget doublé protège.
 
-## OCR embarqué
+## Qualité
 
-`Docia.exe` embarque **Tesseract** (fra + eng, recette `DocFuse-OCR.spec`) : les PDF scannés,
-courriers et factures numérisés sont lus par OCR automatiquement (pages sans texte natif),
-sans rien installer sur le poste. Le build exige `TESSERACT_HOME` (la CI l'installe) ; la CI
-prouve l'OCR de l'exe sur un PDF image généré (`scripts/make_scanned_pdf.py`), Tesseract retiré
-du PATH. En développement (Linux/Windows), DocFuse utilise le `tesseract` du système s'il existe.
+- `scripts/check.sh` : ruff + mypy strict + pytest (234 tests), **VERDICT** explicite — rien n'est
+  poussé sans `VERDICT: OK`.
+- CI GitHub (Ubuntu + Windows) : lint/tests 3.11–3.13, build de `Docia.exe` (PyInstaller,
+  bibliothèques des extracteurs et **Tesseract embarqués**), puis l'exe est **exécuté** sur le
+  runner : `doctor`, extraction réelle de 11 formats bureautiques, **OCR d'un PDF scanné généré**
+  (Tesseract retiré du PATH), ouverture/fermeture de l'interface.
+- `scripts/e2e_local.sh` : test complet sur la machine de développement (scanner → OCR → vLLM →
+  base → rapports, 28 vérifications automatiques — 28/28 au 30/08).
 
-## Scanner SMBeagle_enriched (étape 0)
+Conception détaillée : [`docs/DESIGN_V3.md`](docs/DESIGN_V3.md) (§13 budget de raisonnement,
+§14 étape scanner, §15 comptage exact). POC d'origine conservé dans `legacy/`.
 
-`SMBeagle.exe` ([smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched)) est un programme
-séparé : docia le pilote en sous-processus (`docia scan`, onglet Accueil → « Scanner maintenant »).
-Placer l'exécutable **à côté de `Docia.exe`** (ou `scan.smbeagle_path`). Options envoyées :
-`--sizefile --access-time --fileattributes --ownerfile --fasthash --file-signature`
-`--preserve-access-time --progress-json --manifest`. Le CSV et le manifeste sont rangés dans
-`<base>.scans/`, le scan importé garde le manifeste (`scans.kind='scan'`).
-
-**Rescan** : seuls les fichiers nouveaux ou modifiés (empreinte, taille, date) repartent en analyse ;
-la date de dernier accès retenue pour « non accédé depuis N ans » est la **première observée**
-(`access_time_first`), pour que le hachage et l'extraction de l'audit ne rajeunissent pas les fichiers.
-
-## Développement
+## Installation développeur
 
 ```bash
-.venv/bin/ruff check src tests && .venv/bin/ruff format --check src tests
-.venv/bin/mypy --strict src/docia
-.venv/bin/python -m pytest
+uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e /chemin/DocFuse -e ".[dev,gui]"
+bash scripts/check.sh        # doit finir par VERDICT: OK
 ```
 
-Licence Apache 2.0.
+Python ≥ 3.11. Dépendances cœur : `docfuse` ≥ 0.2.0, `httpx`. Licence Apache 2.0.
