@@ -56,10 +56,13 @@ src/docia/
 | `runs` | un `run` (config figée en JSON, modèle, prompt_hash) |
 | `blocks` | une partie DocFuse : chemin du `.md`, tokens, statut built / sent / done / error, tentatives, usage, latence |
 | `block_files` | fichiers d'un bloc : `file_ref` exact, statut d'extraction, `oversized` |
-| `analyses` | résultat par fichier : 4 domaines à plat + JSON brut ; UNIQUE (`file_id`, `content_version`, `prompt_hash`, `model`) |
+| `analyses` | résultat par fichier : 5 domaines à plat (sécurité, RGPD, finance, juridique, **conservation**) + JSON brut + `segments` ; UNIQUE (`file_id`, `content_version`, `prompt_hash`, `model`) |
+| `segment_analyses` | analyses par segment d'un fichier découpé (agrégées ensuite) |
+| `prompts` | profils de prompt nommés (texte, empreinte, actif) — le prompt est une variable |
+| `reviews` | vérification humaine : `to_review` / `validated` / `corrected`, corrections, commentaire, vérificateur |
 
-Migrations : liste ordonnée de fonctions `migrate_<n>` appliquées à `init`/ouverture ; jamais
-d'`ALTER` implicite ailleurs.
+Migrations : liste ordonnée `_MIGRATIONS` (v1 socle, v2 segments, v3 conservation/prompts/revues, v4 index)
+appliquée à l'ouverture ; jamais d'`ALTER` implicite ailleurs. Vues partagées CLI/GUI/rapport : `views.py`.
 
 ## 5. Blocs (DocFuse)
 

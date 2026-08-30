@@ -46,7 +46,19 @@ docia run --limit 500               # blocs DocFuse → LLM → analyses (repren
 docia status                        # compteurs par statut, blocs, classifications
 docia export --format csv -o resultats.csv
 docia retry                         # remet les fichiers en erreur à « à analyser »
+docia quick DOSSIER                 # analyse immédiate d'un fichier/dossier, sans CSV
+docia bench                         # vitesse de la LLM : prefill/decode, JSON valides, fichiers/heure
+docia prompt list|show|save|use     # le prompt est une variable : profils nommés en base
+docia review ID --status validated  # vérification humaine (validé / corrigé + commentaire)
+docia report --format html          # rapport autonome : hygiène (doublons, ancienneté…) et risque
+docia export --format xlsx|powerbi  # classeur Excel ; dossier CSV au schéma stable pour Power BI
+docia gui                           # interface : Source / Prompt / Analyse / Résultats & vérification / Statistiques / LLM & bench
 ```
+
+Cinq domaines par fichier : sécurité (C0–C3), RGPD, finance, juridique, **conservation**
+(durée, fondement : valeur probante, légal, fiscal, RH, contractuel). Très gros fichiers : découpés
+en segments complets puis agrégés (jamais tronqués). Doublons exacts : héritent de l'analyse de
+l'original. Raisonnement (thinking) activé par défaut.
 
 Serveur LLM : voir `~/Doc-IA/bench_vllm/serve_qwen38.sh` (vLLM + Qwen3.8-27B) ou open-webui 0.11
 (`transport = "openwebui"`, `base_url = "http://serveur:8080/api"`, clé `sk-`).

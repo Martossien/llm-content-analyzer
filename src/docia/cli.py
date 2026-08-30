@@ -1,4 +1,4 @@
-"""CLI `docia` : init | ingest | plan | run | status | export | retry.
+"""CLI `docia` : init | ingest | plan | run | status | export | report | retry.
 
 Codes retour : 0 OK, 1 erreur (config, base, LLM injoignable), 2 erreurs partielles
 (des blocs ou fichiers en erreur — les résultats obtenus sont persistés).
@@ -48,8 +48,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("export", help="exporte la dernière analyse de chaque fichier")
-    p.add_argument("--format", choices=["csv", "json"], default="csv")
+    p.add_argument(
+        "--format",
+        choices=["csv", "json", "xlsx", "powerbi"],
+        default="csv",
+        help="csv/json : un fichier ; xlsx : classeur Excel ; powerbi : dossier de CSV",
+    )
     p.add_argument("--out", "-o", type=Path, required=True)
+
+    p = sub.add_parser("report", help="rapport de restitution (HTML autonome ou Markdown)")
+    p.add_argument("--format", choices=["html", "md"], default="html")
+    p.add_argument(
+        "--out",
+        "-o",
+        type=Path,
+        default=None,
+        help="défaut : <base>_rapport.html à côté de la base",
+    )
+    p.add_argument(
+        "--cleanup-years",
+        type=int,
+        default=5,
+        help="seuil d'ancienneté des candidats au nettoyage (défaut 5)",
+    )
 
     p = sub.add_parser("retry", help="remet les fichiers en erreur à « à analyser »")
     sub.add_parser("gui", help="ouvre l'interface graphique (extra docia[gui])")
@@ -71,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--name", default=None)
     q = ps.add_parser("delete", help="supprime un profil")
     q.add_argument("name")
+
+    from docia.cli_tools import register as register_tools
+
+    register_tools(sub)
 
     p = sub.add_parser("review", help="statut de vérification humaine d'un fichier")
     p.add_argument("file_id", type=int)
@@ -183,6 +208,8 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_export(args: argparse.Namespace, cfg: Config) -> int:
+    if args.format in ("xlsx", "powerbi"):
+        return _cmd_export_workbook(args, cfg)
     with Database(cfg.db_path) as db:
         rows = [dict(r) for r in db.latest_analyses()]
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -200,6 +227,49 @@ def cmd_export(args: argparse.Namespace, cfg: Config) -> int:
             writer.writeheader()
             writer.writerows(rows)
     print(f"{len(rows)} ligne(s) → {args.out}")
+    return 0
+
+
+def _cmd_export_workbook(args: argparse.Namespace, cfg: Config) -> int:
+    """`export --format xlsx|powerbi` : classeur Excel ou dossier Power BI."""
+    try:
+        from docia.report import export_powerbi, write_workbook
+    except ImportError as exc:  # pragma: no cover - openpyxl fourni par DocFuse
+        print(f"export indisponible ({exc})", file=sys.stderr)
+        return 1
+    with Database(cfg.db_path) as db:
+        if args.format == "xlsx":
+            path = write_workbook(db, args.out)
+            print(f"classeur Excel → {path}")
+            return 0
+        written = export_powerbi(db, args.out)
+    print(f"export Power BI → {args.out}")
+    for path in written:
+        print(f"  {path.name}")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
+    """`report` : rapport HTML autonome ou Markdown, à partir des vues partagées."""
+    from docia.report import collect, render_html, render_markdown
+
+    out: Path | None = args.out
+    if out is None:
+        base = Path(cfg.db_path)
+        suffix = "html" if args.format == "html" else "md"
+        out = base.with_name(f"{base.stem}_rapport.{suffix}")
+    with Database(cfg.db_path) as db:
+        data = collect(db, cleanup_years=args.cleanup_years)
+        text = (
+            render_html(db, data=data) if args.format == "html" else render_markdown(db, data=data)
+        )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    o = data.overview
+    print(
+        f"rapport → {out} — {o.total_files} fichier(s), {o.analyzed} analysé(s), "
+        f"{o.sensitive_files} sensible(s), {o.duplicate_families} famille(s) de doublons"
+    )
     return 0
 
 
@@ -328,10 +398,15 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run,
         "status": cmd_status,
         "export": cmd_export,
+        "report": cmd_report,
         "retry": cmd_retry,
         "prompt": cmd_prompt,
         "review": cmd_review,
     }
+    from docia.cli_tools import cmd_bench, cmd_quick
+
+    handlers["bench"] = cmd_bench
+    handlers["quick"] = cmd_quick
     return handlers[args.command](args, cfg)
 
 

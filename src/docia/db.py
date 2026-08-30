@@ -26,7 +26,7 @@ from docia.models import (
     path_key,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _now() -> str:
@@ -205,7 +205,23 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 """
 
-_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3)]
+_SCHEMA_V4 = """
+CREATE INDEX IF NOT EXISTS idx_files_hash_size ON files(fast_hash, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner);
+CREATE INDEX IF NOT EXISTS idx_files_access_time ON files(access_time);
+CREATE INDEX IF NOT EXISTS idx_files_last_write ON files(last_write_time);
+CREATE INDEX IF NOT EXISTS idx_files_base ON files(base);
+CREATE INDEX IF NOT EXISTS idx_analyses_retention ON analyses(retention_required);
+CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
+"""
+"""v4 : index de restitution (`views.py`) — doublons, ancienneté, propriétaire, partage."""
+
+_MIGRATIONS: list[tuple[int, str]] = [
+    (1, _SCHEMA_V1),
+    (2, _SCHEMA_V2),
+    (3, _SCHEMA_V3),
+    (4, _SCHEMA_V4),
+]
 
 REVIEW_STATUSES = ("to_review", "validated", "corrected")
 
@@ -243,6 +259,10 @@ class Database:
         except BaseException:
             self._conn.execute("ROLLBACK")
             raise
+
+    def query(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
+        """Exécute un `SELECT` et rend les lignes (accès lecture seule pour `views.py`)."""
+        return list(self._conn.execute(sql, params))
 
     @property
     def schema_version(self) -> int:
@@ -808,7 +828,7 @@ class Database:
                           a.retention_justification, a.retention_confidence,
                           r.status AS review_status, r.comment AS review_comment,
                           r.corrected_security, r.corrected_rgpd, r.corrected_retention_years,
-                          r.reviewer, r.updated_at AS reviewed_at
+                          r.reviewer, r.updated_at AS reviewed_at, f.id AS id
                    FROM files f LEFT JOIN analyses a ON a.id = (
                         SELECT id FROM analyses WHERE file_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1)
                    LEFT JOIN reviews r ON r.file_id = f.id
