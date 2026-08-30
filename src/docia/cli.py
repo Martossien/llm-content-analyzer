@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", "-o", type=Path, required=True)
 
     p = sub.add_parser("retry", help="remet les fichiers en erreur à « à analyser »")
+    sub.add_parser("gui", help="ouvre l'interface graphique (extra docia[gui])")
     return parser
 
 
@@ -193,6 +194,17 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if args.command == "init":
         return cmd_init(args)
+    if args.command == "gui":
+        try:
+            from docia.gui import launch
+        except ImportError as exc:
+            print(
+                f'interface graphique non installée (pip install "docia[gui]") : {exc}',
+                file=sys.stderr,
+            )
+            return 1
+        launch(args.config)
+        return 0
     cfg = _load(args)
     handlers = {
         "ingest": cmd_ingest,

@@ -1,0 +1,87 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""Spec PyInstaller pour Doc-IA analyzer (`Docia.exe`, Windows x64, --onefile).
+
+Reprend les recettes éprouvées de DocFuse.spec (D-054/D-055 : ratisser les DLL
+de Python pour les extensions natives ; hiddenimports des extracteurs chargés
+dynamiquement ; données i18n/assets de DocFuse embarquées). `console=True` :
+le même exécutable sert la CLI (`Docia.exe run …`) et la GUI (`Docia.exe`
+sans argument) — une console reste ouverte derrière la fenêtre, c'est voulu.
+
+    pip install -e ".[dev,gui]" pyinstaller
+    pyinstaller --noconfirm Docia.spec          → dist/Docia.exe
+
+Le nom suit DOCIA_APP_NAME (défaut Docia). L'OCR Tesseract n'est pas embarqué :
+DocFuse le détecte s'il est installé sur le poste (ou voir DocFuse-OCR.spec).
+"""
+
+import os
+import sys
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+_APP_NAME = (os.environ.get("DOCIA_APP_NAME") or "Docia").strip() or "Docia"
+_ROOT = Path(SPECPATH)
+_SRC = _ROOT / "src"
+
+# DLL natives de Python (tcl/tk, sqlite3, ssl, ffi…) — non auto-collectées.
+_extra_binaries: list[tuple[str, str]] = []
+_python_dlls_dir = Path(getattr(sys, "base_prefix", sys.prefix)) / "DLLs"
+if _python_dlls_dir.is_dir():
+    for _dll_path in sorted(_python_dlls_dir.glob("*.dll")):
+        _extra_binaries.append((str(_dll_path), "."))
+
+_datas = [
+    (str(_SRC / "docia" / "prompts"), "docia/prompts"),
+]
+_datas += collect_data_files("docfuse")  # i18n/*.json, assets/*.ttf, vocabulaires tokenizers
+_datas += collect_data_files("customtkinter")
+_datas += collect_data_files("tiktoken_ext")
+
+_hidden = (
+    collect_submodules("docfuse.extractors")
+    + collect_submodules("docfuse.core")
+    + collect_submodules("tiktoken_ext")
+    + ["tkinter", "customtkinter", "charset_normalizer", "tiktoken", "sqlite3", "httpx", "anyio", "h11"]
+)
+
+block_cipher = None
+
+a = Analysis(
+    [str(_SRC / "docia" / "__main__.py")],
+    pathex=[str(_SRC)],
+    binaries=_extra_binaries,
+    datas=_datas,
+    hiddenimports=_hidden,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["pytest", "mypy", "ruff", "tkinterdnd2"],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name=_APP_NAME,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

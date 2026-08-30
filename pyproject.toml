@@ -24,7 +24,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "docfuse>=0.2.0",
+    # DocFuse n'est pas sur PyPI : référence directe vers le dépôt (PEP 508).
+    "docfuse @ git+https://github.com/Martossien/DocFuse.git@main",
     "httpx>=0.27",
 ]
 
@@ -41,6 +42,9 @@ dev = [
 
 [project.scripts]
 docia = "docia.cli:main"
+
+[project.gui-scripts]
+docia-gui = "docia.gui:launch"
 
 [tool.setuptools.packages.find]
 where = ["src"]

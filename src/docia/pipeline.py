@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -57,9 +58,17 @@ def run_pipeline(
     limit: int | None = None,
     dry_run: bool = False,
     progress: ProgressCallback | None = None,
+    cancel: threading.Event | None = None,
 ) -> RunReport:
-    """Exécute un run complet (synchrone pour l'appelant ; asyncio à l'intérieur)."""
-    return asyncio.run(_run(db, cfg, limit=limit, dry_run=dry_run, progress=progress))
+    """Exécute un run complet (synchrone pour l'appelant ; asyncio à l'intérieur).
+
+    `cancel` (GUI) : positionné, il arrête la construction des blocs et n'envoie
+    plus de nouveau bloc ; les blocs déjà construits restent `built` (repris au
+    run suivant) et les fichiers en vol sont remis `pending` par `requeue_stale`.
+    """
+    return asyncio.run(
+        _run(db, cfg, limit=limit, dry_run=dry_run, progress=progress, cancel=cancel)
+    )
 
 
 async def _run(
@@ -69,8 +78,10 @@ async def _run(
     limit: int | None,
     dry_run: bool,
     progress: ProgressCallback | None,
+    cancel: threading.Event | None = None,
 ) -> RunReport:
     say = progress or (lambda _m: None)
+    cancelled = cancel.is_set if cancel is not None else (lambda: False)
     system_prompt = load_system_prompt(Path(cfg.prompt_path) if cfg.prompt_path else None)
     phash = prompt_hash(system_prompt, cfg.llm.model)
     run_id = db.start_run(
@@ -96,6 +107,9 @@ async def _run(
     say(f"{len(selected)} fichier(s) à analyser")
     specs: list[BlockSpec] = list(leftover)
     for start in range(0, len(selected), cfg.blocks.batch_files):
+        if cancelled():
+            say("annulation demandée : construction des blocs interrompue")
+            break
         batch = selected[start : start + cfg.blocks.batch_files]
         label = f"b{start // cfg.blocks.batch_files + 1:04d}"
         built = build_blocks(batch, cfg.blocks, work_dir, batch_label=label)
@@ -122,6 +136,8 @@ async def _run(
 
         async def one(spec: BlockSpec) -> None:
             assert spec.block_id is not None
+            if cancelled():
+                return  # reste `built`, repris au prochain run
             db.mark_block_sent(spec.block_id)
             try:
                 result = await client.analyze_block(spec)
@@ -171,7 +187,11 @@ async def _run(
     if not cfg.blocks.keep_blocks:
         for spec in specs:
             spec.path.unlink(missing_ok=True)
-    db.finish_run(run_id, "done" if not report.errors else "error")
+    if cancelled():
+        db.finish_run(run_id, "cancelled")
+        say("run annulé — relancer pour reprendre")
+    else:
+        db.finish_run(run_id, "done" if not report.errors else "error")
     return report
 
 
