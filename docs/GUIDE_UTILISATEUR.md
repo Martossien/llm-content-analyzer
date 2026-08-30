@@ -11,6 +11,22 @@ un classeur Excel et un jeu de fichiers pour Power BI.
 > dans un seul fichier `.sqlite` que vous choisissez au départ ; vous pouvez le rouvrir, le
 > sauvegarder, le relancer plus tard.
 
+## Comment ça marche (en deux mots)
+
+1. **Le scanner** inventorie les fichiers du lecteur (noms, tailles, dates, propriétaires,
+   empreintes) — il ne lit que les en-têtes.
+2. **Le poste extrait le texte** : Doc-IA ouvre chaque document (Word, Excel, PDF, mails…) ; les
+   pages scannées passent par l'**OCR intégré**. Les textes sont regroupés en paquets.
+3. **Seul ce texte part** vers le serveur IA de l'organisme (connexion directe au serveur GPU, par
+   défaut) — **jamais les documents eux-mêmes**, et jamais vers l'extérieur.
+4. L'IA renvoie pour chaque fichier une réponse structurée : résumé, sensibilité, RGPD, finance,
+   juridique, conservation.
+5. Doc-IA vérifie cette réponse et l'enregistre dans la campagne — c'est ce que montrent les
+   onglets Résultats, Statistiques et Rapports, et ce que l'humain peut ensuite valider ou corriger.
+
+Si l'analyse est interrompue (poste éteint, arrêt volontaire), rien n'est perdu : la relance
+reprend au point exact. Un fichier déjà analysé n'est jamais renvoyé tant qu'il n'a pas changé.
+
 ## 1. Installation (poste Windows)
 
 1. Copier dans un même dossier : `Docia.exe` et `SMBeagle.exe` (le scanner).
