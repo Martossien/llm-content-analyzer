@@ -140,8 +140,8 @@ async def _run(
                 continue
             db.create_block(run_id, spec, prompt_hash=phash, model=cfg.llm.model)
             specs.append(spec)
+            report.blocks_built += 1
             report.files_segmented += sum(1 for bf in spec.files if bf.segment_index == 1)
-        report.blocks_built += len(built.blocks)
         say(f"lot {label} : {len(built.blocks)} bloc(s), {len(built.failed)} échec(s) d'extraction")
 
     if dry_run:
