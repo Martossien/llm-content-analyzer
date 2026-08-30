@@ -20,7 +20,7 @@ from docia.blocks.builder import build_blocks
 from docia.config import Config, LLMConfig
 from docia.db import Database
 from docia.llm.aggregate import aggregate_segments
-from docia.llm.client import LLMClient, LLMError
+from docia.llm.client import BlockTooLongError, LLMClient, LLMError
 from docia.llm.parse import ParseError, parse_block_response
 from docia.llm.schema import load_system_prompt, prompt_hash
 from docia.models import BlockSpec, FileStatus
@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 MAX_FILE_ATTEMPTS = 2
 SYSTEM_PROMPT_RESERVE_TOKENS = 2_000
 """Tokens gardés libres pour le prompt système et le gabarit de conversation."""
+SEGMENT_SAFETY = {"approx": 0.6, "openai": 0.85, "mistral": 0.85}
+"""Part du contexte utilisable par un segment, selon le moteur de comptage : `approx`
+(octets/4) sous-estime le tokenizer Qwen de ~30 % sur du texte français chiffré (banc
+du 30/08 : 202 388 estimés → 266 402 réels) ; o200k/tekken restent à ±15 %. Le comptage
+exact (`/tokenize`) avant envoi et la seconde passe corrigent le reste."""
+RESPLIT_SAFETY = 0.9
+"""Après un `BlockTooLongError`, budget de re-découpage = budget / ratio × 0.9."""
+
+
+def segment_budget(cfg: Config) -> int:
+    """Budget de tokens (avec marge) d'un segment de gros fichier."""
+    room = cfg.llm.max_context_tokens - output_reserve_tokens(cfg.llm)
+    safety = SEGMENT_SAFETY.get(cfg.blocks.tokenizer_engine, SEGMENT_SAFETY["approx"])
+    return max(2_000, int(room * safety))
 
 
 def output_reserve_tokens(llm: LLMConfig) -> int:
@@ -52,6 +66,8 @@ fois (dans un autre bloc), puis passe en `error` — jamais de boucle infinie.""
 @dataclass
 class RunReport:
     run_id: int
+    files_resplit: int = 0
+    """Fichiers re-découpés en seconde passe après un comptage exact trop long."""
     files_selected: int = 0
     files_done: int = 0
     files_error: int = 0
@@ -141,9 +157,7 @@ async def _run(
     work_dir = cfg.work_dir() / f"run_{run_id:04d}"
     if cfg.blocks.max_file_tokens <= 0:
         # Réserve pour le prompt système et la réponse JSON du fichier tronqué.
-        cfg.blocks.max_file_tokens = max(
-            2_000, cfg.llm.max_context_tokens - output_reserve_tokens(cfg.llm)
-        )
+        cfg.blocks.max_file_tokens = segment_budget(cfg)
 
     # 1. Reprise : blocs d'un run précédent restés sans résultat, fichiers `queued` orphelins.
     requeued = db.requeue_stale()
@@ -160,6 +174,9 @@ async def _run(
     say(f"{len(selected)} fichier(s) à analyser")
     specs: list[BlockSpec] = list(leftover)
     duplicates: list[tuple[int, int]] = []
+    too_long: dict[int, float] = {}
+    """`file_id` → ratio réel/estimé mesuré par `/tokenize` : ces fichiers sont
+    re-découpés plus finement dans une seconde passe du même run."""
 
     def emit(kind: str, message: str = "", **extra: object) -> None:
         """Événement structuré vers `on_progress` (compteurs vivants du rapport)."""
@@ -237,6 +254,18 @@ async def _run(
             db.mark_block_sent(spec.block_id)
             try:
                 result = await client.analyze_block(spec)
+            except BlockTooLongError as exc:
+                # Refusé AVANT envoi : ce n'est pas une tentative du modèle. Le fichier
+                # repart `pending` sans consommer d'essai (un gros fichier a K segments :
+                # compter K échecs le mettrait en erreur avant même la seconde passe).
+                db.mark_block_error(spec.block_id, f"comptage exact : {exc}")
+                report.blocks_error += 1
+                for bf in spec.files:
+                    too_long[bf.file_id] = max(too_long.get(bf.file_id, 0.0), exc.ratio)
+                    db.set_block_file_outcome(spec.block_id, bf.file_id, "too long: re-découpage")
+                    db.set_file_status(bf.file_id, FileStatus.PENDING, None)
+                emit("block_error", f"bloc {spec.block_id} : {exc} — re-découpage automatique")
+                return
             except LLMError as exc:
                 _fail_block(db, spec, f"LLM : {exc}", report)
                 emit("block_error", f"bloc {spec.block_id} : LLM : {exc}")
@@ -314,6 +343,44 @@ async def _run(
             emit("block_done", message)
 
         await asyncio.gather(*(one(spec) for spec in specs))
+
+        # 4. Seconde passe : fichiers dont un bloc était trop long au comptage exact.
+        #    Re-découpage avec le ratio mesuré, même run — jamais de fichier en erreur
+        #    pour une estimation de tokens. `_retry_or_fail` a remis ces fichiers
+        #    `pending` (attempt 1 sur MAX_FILE_ATTEMPTS).
+        if too_long and not cancelled():
+            retry_rows = [
+                row
+                for fid in sorted(too_long)
+                if (row := db.get_file(fid)) is not None and row.status == FileStatus.PENDING
+            ]
+            if retry_rows:
+                worst = max(too_long[row.id] for row in retry_rows)
+                from dataclasses import replace
+
+                budget = max(2_000, int(cfg.blocks.max_file_tokens / worst * RESPLIT_SAFETY))
+                retry_cfg = replace(
+                    cfg.blocks,
+                    max_file_tokens=budget,
+                    block_tokens=min(cfg.blocks.block_tokens, budget),
+                )
+                say(
+                    f"seconde passe : {len(retry_rows)} fichier(s) re-découpé(s) "
+                    f"(ratio réel/estimé {worst:.2f}, budget {budget} tokens)"
+                )
+                db.set_files_status([row.id for row in retry_rows], FileStatus.QUEUED)
+                retry_specs: list[BlockSpec] = []
+                built = build_blocks(retry_rows, retry_cfg, work_dir, batch_label="r0001")
+                for failed in built.failed:
+                    db.set_file_status(failed.file_id, FileStatus.ERROR, failed.reason)
+                    report.files_error += 1
+                for spec in built.blocks:
+                    db.create_block(run_id, spec, prompt_hash=phash, model=cfg.llm.model)
+                    specs.append(spec)
+                    retry_specs.append(spec)
+                    report.blocks_built += 1
+                    report.files_resplit += sum(1 for bf in spec.files if bf.segment_index == 1)
+                await asyncio.gather(*(one(spec) for spec in retry_specs))
 
     # Doublons exacts : héritent de l'analyse de leur original (même contenu).
     for dup_id, orig_id in duplicates:

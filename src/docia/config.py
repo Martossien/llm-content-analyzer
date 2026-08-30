@@ -64,8 +64,10 @@ class BlocksConfig:
     block_tokens: int = 32_000
     """Plafond par bloc (tokens avec marge). 16–64K recommandé (banc du 30/08)."""
     margin: float = 0.15
-    tokenizer_engine: str = "approx"
-    """`approx` | `mistral` | `openai` (moteurs DocFuse)."""
+    tokenizer_engine: str = "openai"
+    """`openai` (tiktoken o200k, embarqué dans l'exe) | `mistral` (tekken) | `approx`
+    (octets/4). Défaut `openai` depuis le banc du 30/08 : `approx` sous-estime Qwen de
+    ~30 % sur du texte français chiffré et faisait dépasser le contexte aux segments."""
     batch_files: int = 200
     """Fichiers passés à DocFuse par appel (extraction parallèle interne)."""
     work_dir: str = ""
@@ -272,7 +274,7 @@ reasoning_effort = "medium"        # low | medium | xhigh — Qwen3.8 (xhigh : s
 [blocks]
 block_tokens = 32000               # 16–64K recommandé
 margin = 0.15
-tokenizer_engine = "approx"        # approx | mistral | openai
+tokenizer_engine = "openai"        # openai (o200k, précis) | mistral | approx (octets/4, sous-estime ~30 %)
 batch_files = 200
 work_dir = ""                      # vide = <db>.blocks/
 keep_blocks = true

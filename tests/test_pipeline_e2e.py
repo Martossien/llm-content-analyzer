@@ -18,6 +18,7 @@ from docia.filter import plan_files
 from docia.ingest.smbeagle_csv import import_csv
 from docia.models import FileStatus
 from docia.pipeline import run_pipeline
+from tests.fake_openai import FakeOpenAIServer
 
 HEADER = (
     "Name,Host,Extension,Username,Hostname,UNCDirectory,CreationTime,LastWriteTime,Readable,"
@@ -284,3 +285,35 @@ def test_exact_duplicate_inherits_original_analysis(
         assert rows["contrat_dupont_copie.txt"]["status"] == "done"
     sent = json.dumps(fake_server.requests, ensure_ascii=False)
     assert "contrat_dupont_copie.txt" not in sent or "Contenu identique" in sent
+
+
+def test_big_file_resplit_when_exact_count_exceeds_context(
+    fake_server: FakeOpenAIServer, corpus: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Le comptage exact du serveur dépasse l'estimation : les segments trop longs ne sont
+    pas envoyés, le fichier est re-découpé dans le même run et finit `done` — jamais `error`."""
+    src, csv_path = corpus
+    (src / "enorme.txt").write_text(
+        "".join(f"Paragraphe {i} : " + "texte volumineux " * 30 + "\n\n" for i in range(600)),
+        encoding="utf-8",
+    )
+    csv_path.write_text(
+        csv_path.read_text(encoding="utf-8") + _csv_line(src / "enorme.txt", "hashBIG") + "\n",
+        encoding="utf-8",
+    )
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 12_000
+    cfg.llm.enable_thinking = False
+    fake_server.tokens_per_char = 0.5  # deux fois plus de tokens que l'estimation octets/4
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg)
+        assert report.files_resplit >= 1
+        assert report.blocks_error >= 1  # les premiers segments, refusés avant envoi
+        assert (report.files_done, report.files_error) == (7, 0)
+        assert db.counts()["error"] == 0
+        big = {r["name"]: r for r in db.latest_analyses()}["enorme.txt"]
+        assert big["segments"] >= 2
+        assert big["security_classification"]
+    assert fake_server.tokenize_calls >= 2

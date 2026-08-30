@@ -58,6 +58,15 @@ def main(work: Path) -> int:
         for r in db.execute("SELECT status, COUNT(*) n FROM files GROUP BY status")
     }
     check("aucun fichier en erreur", counts.get("error", 0) == 0, str(counts))
+    blocks = {
+        r["status"]: r["n"]
+        for r in db.execute("SELECT status, COUNT(*) n FROM blocks GROUP BY status")
+    }
+    check(
+        "aucun bloc en erreur (comptage exact + re-découpage)",
+        blocks.get("error", 0) == 0,
+        str(blocks),
+    )
     check(
         "tout analysé (hors exclus)",
         counts.get("pending", 0) == 0 and counts.get("queued", 0) == 0,

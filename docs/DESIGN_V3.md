@@ -203,7 +203,7 @@ au-delà (sonde : budget 40 → 40 tokens de raisonnement, réponse quand même 
 `thinking_token_budget` (transport vLLM) **et** réservé dans `max_tokens` ; `xhigh` reste
 disponible (onglet Serveur) mais n'est sûr qu'avec le budget imposé, pour 2–3× le temps et sans
 gain de classification observé. Le renvoi à budget doublé sur `finish_reason=length` est conservé
-comme filet. `docia bench` mesure désormais le raisonnement (`reasoning_content`).
+comme filet. `docia bench` mesure désormais le raisonnement (`reasoning_content`). Voir aussi §15 (comptage exact avant envoi).
 
 **Corollaire corrigé.** `llm.max_context_tokens` = longueur servie (`--max-model-len`, 262 144) ;
 le pipeline réserve en dessous `2 000 + 2 × (plancher + quota/fichier + budget de raisonnement)`
@@ -247,3 +247,22 @@ manquent (`DOCIA_NO_OCR=1` = build local explicitement sans OCR). L'OCR est auto
 DocFuse (pages classées ocr/mixed, moteur résolu s'il est disponible). La CI génère un PDF
 image-only (`scripts/make_scanned_pdf.py`), retire Tesseract du PATH et exige que le bloc
 produit par `Docia.exe quick --dry-run` contienne le texte reconnu.
+
+## 15. Test complet local et comptage exact des tokens (30/08, nuit)
+
+`scripts/e2e_local.sh` (+ `scripts/e2e_check.py`, 28 contrôles) rejoue toute la chaîne sur cette
+machine : build du scanner, corpus (fixtures DocFuse + **PDF scanné généré** + doublon exact + gros
+fichier), vLLM démarré puis arrêté, `docia scan` → `run` → rapport HTML / Excel / Power BI, puis
+vérifications en base : OCR relu par la LLM (bulletin scanné → paie, RGPD élevé, conservation RH),
+doublon hérité, OLE hachés, segments agrégés, 0 fichier et 0 bloc en erreur, documents produits.
+Premier passage : 25/27 — le gros fichier échouait : `approx` (octets/4) estimait 202 388 tokens là
+où le tokenizer réel en comptait 266 402 (> 262 144) → vLLM 400 sur chaque segment.
+
+**Correctifs** : `blocks.tokenizer_engine = "openai"` (o200k, embarqué) et coefficient de sécurité
+des segments (`SEGMENT_SAFETY` : 0,85 o200k/tekken, 0,6 approx) ; surtout, **comptage exact avant
+envoi** : `LLMClient.check_fits` interroge vLLM `/tokenize` (transport vllm) et lève
+`BlockTooLongError` (réel, place, ratio) sans envoyer ; le pipeline mémorise le ratio réel/estimé
+par fichier, remet le fichier `pending` **sans consommer de tentative**, puis lance une **seconde
+passe** dans le même run avec `max_file_tokens / ratio × 0,9` (`RunReport.files_resplit`).
+Testé avec le faux serveur (`tokens_per_char` = 0,5 : segments refusés puis re-découpés, fichier
+`done`, 0 erreur).

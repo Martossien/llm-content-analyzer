@@ -108,6 +108,8 @@ class FakeOpenAIServer(ThreadingHTTPServer):
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
+        self.tokens_per_char: float = 0.25
+        self.tokenize_calls: int = 0
         self.mode: str = "ok"
         self.handler_delay: float = 0.0
         """Retard artificiel (s) pour observer la concurrence."""
@@ -182,6 +184,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_text(404, "not found")
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/tokenize":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+            prompt = str(payload.get("prompt", ""))
+            with self.state.lock:
+                self.state.tokenize_calls += 1
+            # `tokens_per_char` : 0.25 ≈ octets/4 ; plus haut = tokenizer « gourmand »
+            self._send_json(200, {"count": int(len(prompt) * self.state.tokens_per_char)})
+            return
         if self.path not in ("/v1/chat/completions", "/api/chat/completions"):
             self._send_text(404, "not found")
             return

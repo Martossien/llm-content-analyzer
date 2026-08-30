@@ -379,3 +379,29 @@ def test_output_reserve_covers_doubled_retry() -> None:
     assert output_reserve_tokens(llm) == SYSTEM_PROMPT_RESERVE_TOKENS + 2 * (800 + 700 + 6_000)
     llm.enable_thinking = False
     assert output_reserve_tokens(llm) == SYSTEM_PROMPT_RESERVE_TOKENS + 2 * (800 + 700)
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_and_check_fits(fake_server: FakeOpenAIServer, tmp_path: Path) -> None:
+    """`/tokenize` compte exactement ; un bloc trop long n'est pas envoyé (BlockTooLongError)."""
+    from docia.llm.client import BlockTooLongError, LLMClient
+    from docia.models import BlockFile, BlockSpec
+
+    cfg = cfg_for(fake_server.base_url_vllm, max_context_tokens=4_000, enable_thinking=False)
+    block = tmp_path / "b.md"
+    block.write_text("## SOURCE: a.txt\n\n" + "x" * 3_000 + "\n", encoding="utf-8")
+    spec = BlockSpec(
+        path=block, files=[BlockFile(1, "a.txt", 1)], tokens_estimated=700, tokens_with_margin=800
+    )
+    async with LLMClient(cfg, "s") as client:
+        assert await client.count_tokens("abcd" * 10) == 10  # 0.25 token/caractère
+        await client.check_fits(spec)  # ≈ 760 tokens < place disponible
+        fake_server.tokens_per_char = 1.0  # tokenizer « gourmand » : 3 000 > place
+        with pytest.raises(BlockTooLongError) as info:
+            await client.analyze_block(spec)
+        assert info.value.real_tokens > info.value.room
+        assert info.value.ratio > 3
+    assert fake_server.post_count == 0  # jamais envoyé au modèle
+    cfg_owui = cfg_for(fake_server.base_url_vllm, transport="openwebui")
+    async with LLMClient(cfg_owui, "s") as client:
+        assert await client.count_tokens("abcd") is None

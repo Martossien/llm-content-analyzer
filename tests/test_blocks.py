@@ -99,13 +99,23 @@ def test_lot_entier_dans_un_bloc(corpus: list[Path], tmp_path: Path) -> None:
 def test_plafond_serre_produit_trois_blocs(corpus: list[Path], tmp_path: Path) -> None:
     """(b) Plafond calibré sur deux fichiers : trois blocs, ordre du corpus préservé."""
     rows = _rows(corpus)
+    # Comptage `approx` (octets/4) : les six fichiers du corpus pèsent exactement pareil,
+    # ce que le test exploite pour calibrer « deux par bloc » (o200k varierait par fichier).
     entier = build_blocks(
-        rows, BlocksConfig(block_tokens=100_000), tmp_path / "ref", batch_label="ref"
+        rows,
+        BlocksConfig(block_tokens=100_000, tokenizer_engine="approx"),
+        tmp_path / "ref",
+        batch_label="ref",
     )
     budget = entier.blocks[0].tokens_with_margin // 3  # six fichiers égaux → deux par bloc
 
     work_dir = tmp_path / "serre"
-    result = build_blocks(rows, BlocksConfig(block_tokens=budget), work_dir, batch_label="serre")
+    result = build_blocks(
+        rows,
+        BlocksConfig(block_tokens=budget, tokenizer_engine="approx"),
+        work_dir,
+        batch_label="serre",
+    )
 
     assert result.failed == []
     assert len(result.blocks) == 3

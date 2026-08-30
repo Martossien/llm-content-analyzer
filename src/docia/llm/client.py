@@ -44,6 +44,26 @@ class LLMRequestError(LLMError):
         self.body = body
 
 
+class BlockTooLongError(LLMError):
+    """Le bloc, compté exactement par le serveur (`/tokenize`), ne tient pas dans le
+    contexte avec sa réponse : il n'est PAS envoyé. Le pipeline re-découpe le
+    fichier avec le ratio mesuré (réel / estimé) et renvoie."""
+
+    def __init__(self, real_tokens: int, room: int, estimated: int) -> None:
+        super().__init__(
+            f"bloc trop long pour le contexte : {real_tokens} tokens réels > {room} disponibles "
+            f"(estimation {estimated})"
+        )
+        self.real_tokens = real_tokens
+        self.room = room
+        self.estimated = estimated
+
+    @property
+    def ratio(self) -> float:
+        """Réel / estimé — sert à re-découper avec un budget corrigé."""
+        return self.real_tokens / max(1, self.estimated)
+
+
 class LLMTransportError(LLMError):
     """Échec réseau ou serveur après épuisement des tentatives."""
 
@@ -186,6 +206,44 @@ class LLMClient:
             kwargs["reasoning_effort"] = self.cfg.reasoning_effort
         return kwargs
 
+    def prompt_room(self, spec: BlockSpec) -> int:
+        """Tokens de prompt admissibles pour ce bloc : contexte servi moins la réponse
+        (raisonnement compris) moins une marge de gabarit."""
+        return self.cfg.max_context_tokens - self.max_tokens_for(spec) - _SYSTEM_PROMPT_TOKENS // 3
+
+    async def count_tokens(self, text: str) -> int | None:
+        """Comptage exact par le serveur (`POST /tokenize`, vLLM) ; None si indisponible
+        (autre transport, endpoint absent, erreur réseau) — on ne bloque jamais dessus."""
+        if self.cfg.transport != "vllm":
+            return None
+        base = self.cfg.base_url.rstrip("/")
+        root = base[: -len("/v1")] if base.endswith("/v1") else base
+        try:
+            response = await self._http.post(
+                f"{root}/tokenize",
+                json={"model": self.cfg.model, "prompt": text},
+                headers=self._headers(),
+            )
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError):
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        count = data.get("count") if isinstance(data, dict) else None
+        return int(count) if isinstance(count, int) else None
+
+    async def check_fits(self, spec: BlockSpec) -> None:
+        """Lève `BlockTooLongError` si le comptage exact dépasse la place disponible."""
+        real = await self.count_tokens(self.system_prompt + "\n" + spec.text)
+        if real is None:
+            return
+        room = self.prompt_room(spec)
+        if real > room:
+            raise BlockTooLongError(real, room, spec.tokens_with_margin)
+
     async def analyze_block(self, spec: BlockSpec) -> LLMResult:
         """Analyse un bloc ; sérialisé par le sémaphore `max_in_flight`.
 
@@ -194,6 +252,7 @@ class LLMClient:
         `LLMResponseError` explicite — jamais un JSON illisible mystérieux.
         """
         async with self._semaphore:
+            await self.check_fits(spec)
             result = await self._analyze(spec)
             if result.finish_reason != "length":
                 return result
