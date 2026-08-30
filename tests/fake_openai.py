@@ -75,6 +75,13 @@ def make_entry(file_ref: str, *, bad_enum: bool = False) -> dict[str, Any]:
             "confidence": 60,
         },
         "legal": {"contract_type": LEGAL_TYPES[0], "parties": ["ACME"], "confidence": 50},
+        "retention": {
+            "required": True,
+            "years": 10,
+            "basis": "fiscal",
+            "justification": "Pièce comptable.",
+            "confidence": 65,
+        },
     }
 
 

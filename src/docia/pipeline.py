@@ -58,6 +58,16 @@ class RunReport:
 ProgressCallback = Callable[[str], None]
 
 
+def resolve_system_prompt(db: Database, cfg: Config) -> str:
+    """Prompt système effectif : fichier `prompt_path` > profil actif en base > prompt embarqué."""
+    if cfg.prompt_path:
+        return load_system_prompt(Path(cfg.prompt_path))
+    active = db.active_prompt()
+    if active is not None:
+        return active[1]
+    return load_system_prompt(None)
+
+
 def run_pipeline(
     db: Database,
     cfg: Config,
@@ -89,7 +99,7 @@ async def _run(
 ) -> RunReport:
     say = progress or (lambda _m: None)
     cancelled = cancel.is_set if cancel is not None else (lambda: False)
-    system_prompt = load_system_prompt(Path(cfg.prompt_path) if cfg.prompt_path else None)
+    system_prompt = resolve_system_prompt(db, cfg)
     phash = prompt_hash(system_prompt, cfg.llm.model)
     run_id = db.start_run(
         model=cfg.llm.model,

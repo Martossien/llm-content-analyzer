@@ -128,6 +128,20 @@ def aggregate_segments(file_ref: str, raws: Sequence[dict[str, object]]) -> File
     if len(resume) > RESUME_MAX_CHARS:
         resume = resume[: RESUME_MAX_CHARS - 1] + "…"
 
+    # Conservation : la durée la plus longue l'emporte, avec son fondement.
+    ret_candidates = [
+        (
+            int(_int(dom(r, "retention").get("years"))),
+            str(dom(r, "retention").get("basis", "none")),
+            bool(dom(r, "retention").get("required", False)),
+            _int(dom(r, "retention").get("confidence")),
+            str(dom(r, "retention").get("justification", "")),
+        )
+        for r in raws
+    ]
+    ret_years, ret_basis, ret_required, ret_conf, ret_just = max(
+        ret_candidates, key=lambda c: (c[2], c[0], c[3])
+    )
     data_types = _union([dom(r, "rgpd").get("data_types") for r in raws], MAX_LIST)
     amounts = _union([dom(r, "finance").get("amounts") for r in raws], MAX_AMOUNTS)
     parties = _union([dom(r, "legal").get("parties") for r in raws], MAX_LIST)
@@ -143,6 +157,13 @@ def aggregate_segments(file_ref: str, raws: Sequence[dict[str, object]]) -> File
         "rgpd": {"risk_level": rgpd[0], "data_types": data_types, "confidence": rgpd[1]},
         "finance": {"document_type": fin[0], "amounts": amounts, "confidence": fin[1]},
         "legal": {"contract_type": leg[0], "parties": parties, "confidence": leg[1]},
+        "retention": {
+            "required": ret_required,
+            "years": ret_years,
+            "basis": ret_basis,
+            "justification": ret_just,
+            "confidence": ret_conf,
+        },
         "segment_raws": list(raws),
     }
     return FileAnalysis(
@@ -153,4 +174,9 @@ def aggregate_segments(file_ref: str, raws: Sequence[dict[str, object]]) -> File
         finance=DomainAnalysis(fin[0], fin[1], {"amounts": amounts}),
         legal=DomainAnalysis(leg[0], leg[1], {"parties": parties}),
         raw=raw_out,
+        retention=DomainAnalysis(
+            ret_basis,
+            ret_conf,
+            {"required": ret_required, "years": ret_years, "justification": ret_just},
+        ),
     )

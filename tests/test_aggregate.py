@@ -84,3 +84,32 @@ def test_all_none_stays_none_and_garbage_is_tolerated() -> None:
 def test_empty_raises() -> None:
     with pytest.raises(ValueError, match="aucun segment"):
         aggregate_segments("x", [])
+
+
+def test_retention_keeps_longest_required_duration() -> None:
+    segs = [_seg("C1", "low"), _seg("C1", "low"), _seg("C1", "low")]
+    segs[0]["retention"] = {
+        "required": False,
+        "years": 0,
+        "basis": "none",
+        "justification": "",
+        "confidence": 60,
+    }
+    segs[1]["retention"] = {
+        "required": True,
+        "years": 10,
+        "basis": "fiscal",
+        "justification": "facture",
+        "confidence": 80,
+    }
+    segs[2]["retention"] = {
+        "required": True,
+        "years": 5,
+        "basis": "contractual",
+        "justification": "contrat",
+        "confidence": 90,
+    }
+    a = aggregate_segments("x", segs)
+    assert a.retention.label == "fiscal"
+    assert a.retention.details == {"required": True, "years": 10, "justification": "facture"}
+    assert a.retention.confidence == 80

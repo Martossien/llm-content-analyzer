@@ -26,7 +26,7 @@ from docia.models import (
     path_key,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -176,7 +176,38 @@ CREATE TABLE IF NOT EXISTS segment_analyses (
 CREATE INDEX IF NOT EXISTS idx_segment_analyses_file ON segment_analyses(file_id);
 """
 
-_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1), (2, _SCHEMA_V2)]
+_SCHEMA_V3 = """
+ALTER TABLE analyses ADD COLUMN retention_required INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE analyses ADD COLUMN retention_years INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE analyses ADD COLUMN retention_basis TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE analyses ADD COLUMN retention_justification TEXT NOT NULL DEFAULT '';
+ALTER TABLE analyses ADD COLUMN retention_confidence INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    text TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id),
+    status TEXT NOT NULL DEFAULT 'to_review',
+    comment TEXT NOT NULL DEFAULT '',
+    corrected_security TEXT,
+    corrected_rgpd TEXT,
+    corrected_retention_years INTEGER,
+    reviewer TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+"""
+
+_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3)]
+
+REVIEW_STATUSES = ("to_review", "validated", "corrected")
 
 
 class Database:
@@ -620,8 +651,9 @@ class Database:
                    rgpd_risk_level, rgpd_data_types, rgpd_confidence,
                    finance_document_type, finance_amounts, finance_confidence,
                    legal_contract_type, legal_parties, legal_confidence, raw_json, created_at,
-                   segments)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   segments, retention_required, retention_years, retention_basis,
+                   retention_justification, retention_confidence)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(file_id, content_version, prompt_hash, model) DO UPDATE SET
                    block_id=excluded.block_id, resume=excluded.resume,
                    security_classification=excluded.security_classification, security_confidence=excluded.security_confidence,
@@ -631,7 +663,10 @@ class Database:
                    finance_confidence=excluded.finance_confidence, legal_contract_type=excluded.legal_contract_type,
                    legal_parties=excluded.legal_parties, legal_confidence=excluded.legal_confidence,
                    raw_json=excluded.raw_json, created_at=excluded.created_at,
-                   segments=excluded.segments""",
+                   segments=excluded.segments, retention_required=excluded.retention_required,
+                   retention_years=excluded.retention_years, retention_basis=excluded.retention_basis,
+                   retention_justification=excluded.retention_justification,
+                   retention_confidence=excluded.retention_confidence""",
                 (
                     file_id,
                     block_id,
@@ -654,6 +689,11 @@ class Database:
                     json.dumps(analysis.raw, ensure_ascii=False),
                     _now(),
                     segments,
+                    int(bool(analysis.retention.details.get("required", False))),
+                    int(str(analysis.retention.details.get("years", 0)) or 0),
+                    analysis.retention.label,
+                    str(analysis.retention.details.get("justification", "")),
+                    analysis.retention.confidence,
                 ),
             )
             conn.execute(
@@ -764,12 +804,110 @@ class Database:
                           a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
                           a.finance_document_type, a.finance_amounts, a.finance_confidence,
                           a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at,
-                          a.segments
+                          a.segments, a.retention_required, a.retention_years, a.retention_basis,
+                          a.retention_justification, a.retention_confidence,
+                          r.status AS review_status, r.comment AS review_comment,
+                          r.corrected_security, r.corrected_rgpd, r.corrected_retention_years,
+                          r.reviewer, r.updated_at AS reviewed_at
                    FROM files f LEFT JOIN analyses a ON a.id = (
                         SELECT id FROM analyses WHERE file_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1)
+                   LEFT JOIN reviews r ON r.file_id = f.id
                    ORDER BY f.path"""
             )
         )
+
+    # ------------------------------------------------------------------ prompts
+    def save_prompt(self, name: str, text: str, *, activate: bool = False) -> int:
+        """Crée ou met à jour un profil de prompt nommé."""
+        import hashlib
+
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        now = _now()
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO prompts(name, text, hash, active, created_at, updated_at)
+                   VALUES(?,?,?,0,?,?)
+                   ON CONFLICT(name) DO UPDATE SET text=excluded.text, hash=excluded.hash,
+                   updated_at=excluded.updated_at""",
+                (name, text, digest, now, now),
+            )
+            if activate:
+                conn.execute("UPDATE prompts SET active=0")
+                conn.execute("UPDATE prompts SET active=1 WHERE name=?", (name,))
+            row = conn.execute("SELECT id FROM prompts WHERE name=?", (name,)).fetchone()
+        return int(row["id"])
+
+    def list_prompts(self) -> list[sqlite3.Row]:
+        return list(
+            self._conn.execute(
+                "SELECT id, name, hash, active, length(text) AS chars, created_at, updated_at"
+                " FROM prompts ORDER BY name"
+            )
+        )
+
+    def get_prompt(self, name: str) -> str | None:
+        row = self._conn.execute("SELECT text FROM prompts WHERE name=?", (name,)).fetchone()
+        return str(row["text"]) if row else None
+
+    def set_active_prompt(self, name: str | None) -> bool:
+        """Active un profil (None = aucun : prompt embarqué). False si inconnu."""
+        with self.transaction() as conn:
+            conn.execute("UPDATE prompts SET active=0")
+            if name is None:
+                return True
+            cur = conn.execute("UPDATE prompts SET active=1 WHERE name=?", (name,))
+            return cur.rowcount == 1
+
+    def active_prompt(self) -> tuple[str, str] | None:
+        """(nom, texte) du profil actif, ou None (prompt embarqué)."""
+        row = self._conn.execute("SELECT name, text FROM prompts WHERE active=1 LIMIT 1").fetchone()
+        return (str(row["name"]), str(row["text"])) if row else None
+
+    def delete_prompt(self, name: str) -> bool:
+        cur = self._conn.execute("DELETE FROM prompts WHERE name=?", (name,))
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    # ------------------------------------------------------------------ reviews
+    def set_review(
+        self,
+        file_id: int,
+        status: str,
+        *,
+        comment: str = "",
+        reviewer: str = "",
+        corrected_security: str | None = None,
+        corrected_rgpd: str | None = None,
+        corrected_retention_years: int | None = None,
+    ) -> None:
+        """Statut de vérification humaine d'un fichier (`to_review` / `validated` / `corrected`)."""
+        if status not in REVIEW_STATUSES:
+            raise ValueError(f"statut de revue inconnu : {status}")
+        self._conn.execute(
+            """INSERT INTO reviews(file_id, status, comment, corrected_security, corrected_rgpd,
+               corrected_retention_years, reviewer, updated_at) VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(file_id) DO UPDATE SET status=excluded.status, comment=excluded.comment,
+               corrected_security=excluded.corrected_security, corrected_rgpd=excluded.corrected_rgpd,
+               corrected_retention_years=excluded.corrected_retention_years,
+               reviewer=excluded.reviewer, updated_at=excluded.updated_at""",
+            (
+                file_id,
+                status,
+                comment,
+                corrected_security,
+                corrected_rgpd,
+                corrected_retention_years,
+                reviewer,
+                _now(),
+            ),
+        )
+        self._conn.commit()
+
+    def review_counts(self) -> dict[str, int]:
+        out = dict.fromkeys(REVIEW_STATUSES, 0)
+        for r in self._conn.execute("SELECT status, COUNT(*) AS n FROM reviews GROUP BY status"):
+            out[str(r["status"])] = int(r["n"])
+        return out
 
     # ------------------------------------------------------------------ stats
     def counts(self) -> dict[str, int]:

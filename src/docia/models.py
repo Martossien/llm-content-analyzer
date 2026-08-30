@@ -159,6 +159,10 @@ class FileAnalysis:
     finance: DomainAnalysis
     legal: DomainAnalysis
     raw: dict[str, object]
+    retention: DomainAnalysis = field(
+        default_factory=lambda: DomainAnalysis("none", 0, {"required": False, "years": 0})
+    )
+    """Conservation : `label` = fondement (`basis`), `details` = {required, years, justification}."""
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,9 @@ SECURITY_CLASSES = ["C0", "C1", "C2", "C3", "N/A"]
 RGPD_LEVELS = ["none", "low", "medium", "high", "critical", "N/A"]
 FINANCE_TYPES = ["none", "invoice", "contract", "budget", "accounting", "payment", "N/A"]
 LEGAL_TYPES = ["none", "employment", "lease", "sale", "nda", "compliance", "litigation", "N/A"]
+RETENTION_BASIS = ["none", "proof", "legal", "fiscal", "rh", "contractual", "N/A"]
+"""Fondement d'une durée de conservation : valeur probante (`proof`), obligation
+légale, fiscale, RH, contractuelle — `none` si le fichier n'a pas à être gardé."""
 
 _CONFIDENCE = {"type": "integer", "minimum": 0, "maximum": 100}
 
@@ -88,8 +91,27 @@ OUTPUT_SCHEMA: dict[str, object] = {
                         },
                         "required": ["contract_type", "parties", "confidence"],
                     },
+                    "retention": {
+                        "type": "object",
+                        "properties": {
+                            "required": {"type": "boolean"},
+                            "years": {"type": "integer", "minimum": 0, "maximum": 100},
+                            "basis": {"type": "string", "enum": RETENTION_BASIS},
+                            "justification": {"type": "string"},
+                            "confidence": _CONFIDENCE,
+                        },
+                        "required": ["required", "years", "basis", "justification", "confidence"],
+                    },
                 },
-                "required": ["file_ref", "resume", "security", "rgpd", "finance", "legal"],
+                "required": [
+                    "file_ref",
+                    "resume",
+                    "security",
+                    "rgpd",
+                    "finance",
+                    "legal",
+                    "retention",
+                ],
             },
         }
     },

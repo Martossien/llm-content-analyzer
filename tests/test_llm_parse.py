@@ -170,3 +170,24 @@ def test_thinking_block_is_ignored() -> None:
     assert strip_thinking(content) == '{"files": []}'
     assert strip_thinking('Voici le JSON :\n{"files": []}') == '{"files": []}'
     assert strip_thinking('{"files": []}') == '{"files": []}'
+
+
+def test_retention_is_validated() -> None:
+    import json
+
+    from docia.llm.parse import parse_block_response
+    from docia.models import BlockFile
+    from tests.fake_openai import make_entry
+
+    files = [BlockFile(1, "a.txt", 1), BlockFile(2, "b.txt", 1)]
+    good = make_entry("a.txt")
+    bad = make_entry("b.txt")
+    bad["retention"]["years"] = 250
+    parsed = parse_block_response(json.dumps({"files": [good, bad]}), files)
+    assert parsed.analyses[1].retention.label == "fiscal"
+    assert parsed.analyses[1].retention.details["years"] == 10
+    assert [ref for ref, _ in parsed.invalid] == ["b.txt"]
+    missing = make_entry("b.txt")
+    del missing["retention"]
+    parsed2 = parse_block_response(json.dumps({"files": [missing]}), files)
+    assert parsed2.invalid and "retention" in parsed2.invalid[0][1]

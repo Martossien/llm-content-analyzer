@@ -14,12 +14,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from docia.llm.schema import FINANCE_TYPES, LEGAL_TYPES, RGPD_LEVELS, SECURITY_CLASSES
+from docia.llm.schema import (
+    FINANCE_TYPES,
+    LEGAL_TYPES,
+    RETENTION_BASIS,
+    RGPD_LEVELS,
+    SECURITY_CLASSES,
+)
 from docia.models import BlockFile, DomainAnalysis, FileAnalysis
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_KEYS = ("file_ref", "resume", "security", "rgpd", "finance", "legal")
+_REQUIRED_KEYS = ("file_ref", "resume", "security", "rgpd", "finance", "legal", "retention")
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
@@ -160,6 +166,7 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
         ("rgpd", "risk_level", RGPD_LEVELS),
         ("finance", "document_type", FINANCE_TYPES),
         ("legal", "contract_type", LEGAL_TYPES),
+        ("retention", "basis", RETENTION_BASIS),
     )
     for key, label_key, allowed in specs:
         block, reason = _domain(entry, key)
@@ -188,11 +195,24 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
             if amounts is None:
                 return None, "`finance.amounts` doit être une liste de montants valides"
             details = {"amounts": amounts}
-        else:
+        elif key == "legal":
             parties = _as_str_list(block.get("parties"))
             if parties is None:
                 return None, "`legal.parties` doit être une liste de chaînes"
             details = {"parties": parties}
+        else:
+            required = block.get("required")
+            years = block.get("years")
+            justification = block.get("justification", "")
+            if not isinstance(required, bool):
+                return None, "`retention.required` doit être un booléen"
+            if isinstance(years, float) and years.is_integer():
+                years = int(years)
+            if not isinstance(years, int) or isinstance(years, bool) or not (0 <= years <= 100):
+                return None, "`retention.years` doit être un entier 0–100"
+            if not isinstance(justification, str):
+                return None, "`retention.justification` doit être une chaîne"
+            details = {"required": required, "years": years, "justification": justification}
         domains[key] = DomainAnalysis(label=label, confidence=confidence, details=details)
 
     return (
@@ -204,6 +224,7 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
             finance=domains["finance"],
             legal=domains["legal"],
             raw=dict(entry),
+            retention=domains["retention"],
         ),
         "",
     )

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from docia.db import SCHEMA_VERSION, Database
 from docia.models import (
     BlockFile,
@@ -193,3 +195,40 @@ def test_apply_plan_and_reset_errors(tmp_path: Path) -> None:
         db.set_file_status(a.id, FileStatus.ERROR, "x")
         assert db.reset_errors() == 1
         assert db.get_file(a.id).status == FileStatus.PENDING  # type: ignore[union-attr]
+
+
+def test_prompt_profiles_and_reviews(tmp_path: Path) -> None:
+    with Database(tmp_path / "x.sqlite") as db:
+        assert db.schema_version == SCHEMA_VERSION
+        assert db.active_prompt() is None
+        db.save_prompt("audit-rh", "Prompt RH " * 20)
+        db.save_prompt("audit-fin", "Prompt finance " * 20, activate=True)
+        assert db.active_prompt() is not None
+        assert db.active_prompt()[0] == "audit-fin"  # type: ignore[index]
+        names = [r["name"] for r in db.list_prompts()]
+        assert names == ["audit-fin", "audit-rh"]
+        assert db.set_active_prompt("audit-rh") is True
+        assert db.set_active_prompt("inconnu") is False
+        assert db.active_prompt() is None  # l'échec a désactivé tout profil
+        db.save_prompt("audit-rh", "Prompt RH v2 " * 20)  # mise à jour, même nom
+        assert len(db.list_prompts()) == 2
+        assert db.get_prompt(
+            "audit-rh",
+        ).startswith("Prompt RH v2")  # type: ignore[union-attr]
+        assert db.delete_prompt("audit-fin") is True
+        assert db.delete_prompt("audit-fin") is False
+
+        scan = db.start_scan("a.csv")
+        db.upsert_files([_row("a.txt")], scan)
+        a = next(db.iter_files())
+        db.store_analysis(a.id, None, 1, prompt_hash="p", model="m", analysis=_analysis("a.txt"))
+        db.set_review(
+            a.id, "corrected", comment="C2 plutôt", corrected_security="C2", reviewer="moi"
+        )
+        rows = list(db.latest_analyses())
+        assert rows[0]["review_status"] == "corrected"
+        assert rows[0]["corrected_security"] == "C2"
+        assert rows[0]["retention_basis"] == "none"
+        assert db.review_counts()["corrected"] == 1
+        with pytest.raises(ValueError, match="statut de revue inconnu"):
+            db.set_review(a.id, "bidon")
