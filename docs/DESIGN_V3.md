@@ -134,3 +134,25 @@ Le cœur (v3.0) analysait sans donner à l'humain les moyens de piloter ni de v�
 | D — GUI | onglets Source / Prompt (éditeur, compteur de tokens, tester sur un fichier) / Analyse / Résultats & vérification (fiche fichier, statut de revue) / Statistiques / LLM & bench | `gui/` (découpé par onglet) |
 
 Règles : une seule source de vérité (vues SQL) pour CLI, GUI et rapport ; aucune trace Python à l'écran ; tout changement de prompt est visible (l'empreinte fait partie de la clé d'analyse). Thinking activé par défaut (qualité).
+
+## 11. Pilotage à distance (prévu), campagnes, sauvegarde (30/08, retour utilisateur)
+
+- **Couche service** (`service.py`) : toute opération est une fonction typée sans Tk ni argparse
+  (`open_campaign`, `import_scan`, `plan`, `run_campaign` avec événements de progression,
+  `reanalyze`, `backup_database` / `restore_database`, `campaign_status`, `recent_campaigns`).
+  CLI et GUI sont des clients minces. Étape suivante (v4) : `docia serve` = API REST (FastAPI)
+  exposant ces fonctions 1 : 1 ; un serveur web central pilote les briques ; les postes Windows
+  deviennent des **agents d'extraction** (DocFuse) qui envoient des blocs et reçoivent des ordres ;
+  base centrale PostgreSQL (le SQL est standard, aucune astuce SQLite dans les vues).
+- **Campagne** = une base SQLite par périmètre (partage, service, date), liste des récentes
+  (`%APPDATA%/docia/recent.json` ou `~/.config/docia/`). Relancer : *rescan* (nouveau CSV, seuls
+  les fichiers modifiés repartent), *nouveau prompt/modèle* (automatique via l'empreinte),
+  *réanalyse forcée* (`docia reanalyze --all | --errors | --where security=C3`) précédée d'une
+  sauvegarde automatique.
+- **Sauvegarde** : API `sqlite3.Connection.backup` (cohérente pendant un run), fichiers horodatés
+  `<db>.backups/<db>_AAAAMMJJ-HHMM.sqlite`, rotation (10 par défaut), automatique avant migration
+  de schéma et avant toute opération destructive ; `docia backup` / `docia restore`.
+- **GUI (a, refonte rapide, à revoir en v4 web)** : parcours en 4 étapes (Source · Analyse ·
+  Vérification · Restitution) sur un tableau de bord, vocabulaire métier, thème clair,
+  tuiles colorées par sévérité, progression avec temps restant, **mode administrateur** qui révèle
+  Serveur & performances / Journal & runs / Prompts.
