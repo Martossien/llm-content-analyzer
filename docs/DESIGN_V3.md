@@ -118,3 +118,16 @@ bloc plus petit, puis `error`). Entrées en trop → journalisées, ignorées.
 - 4a (ce chantier) : cœur + CLI + tests (serveur OpenAI factice) + test d'intégration contre
   vLLM/open-webui s'ils tournent.
 - 4b : GUI CustomTkinter (calquée sur DocFuse), PyInstaller `Docia.spec`, banc réel sur un partage.
+
+## 10. v3.1 — utilisateur et administrateur (30/08, retour utilisateur)
+
+Le cœur (v3.0) analysait sans donner à l'humain les moyens de piloter ni de vérifier. Ajouts :
+
+| Lot | Contenu | Modules |
+|---|---|---|
+| A — socle | 5ᵉ domaine **`retention`** (`required`, `years`, `basis` ∈ proof/legal/fiscal/rh/contractual/none, `justification`, `confidence`) ; **profils de prompt** en base (`prompts` : nom, texte, hash, date, actif) avec CLI `docia prompt list/show/save/use/reset` ; table **`reviews`** (statut à vérifier/validé/corrigé + commentaire + correction de classe) ; schéma v3 | `llm/schema.py`, `db.py`, `llm/aggregate.py`, `llm/parse.py`, `prompts/`, `cli.py` |
+| B — restitution | **vues SQL** partagées (`views.py`) ; `docia report` → HTML autonome + Markdown : classification × partage/répertoire/propriétaire/extension, top sensibles, familles de doublons (FastHash+taille, volume récupérable), âge/taille, erreurs/exclusions ; export **Excel** | `report/`, `cli.py` |
+| C — outils | `docia bench` (débit LLM : N blocs synthétiques en parallèle, prefill/decode tok/s, latence, JSON valides, coût du thinking, fichiers/heure estimés) ; `docia quick <fichier|dossier>` (analyse immédiate sans CSV) | `bench.py`, `quick.py`, `cli.py` |
+| D — GUI | onglets Source / Prompt (éditeur, compteur de tokens, tester sur un fichier) / Analyse / Résultats & vérification (fiche fichier, statut de revue) / Statistiques / LLM & bench | `gui/` (découpé par onglet) |
+
+Règles : une seule source de vérité (vues SQL) pour CLI, GUI et rapport ; aucune trace Python à l'écran ; tout changement de prompt est visible (l'empreinte fait partie de la clé d'analyse). Thinking activé par défaut (qualité).
