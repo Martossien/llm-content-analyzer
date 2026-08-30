@@ -111,9 +111,12 @@ async def test_max_tokens_calcule(fake_server: FakeOpenAIServer, tmp_path: Path)
     spec = make_block(tmp_path)
     cfg = cfg_for(fake_server.base_url_vllm, max_tokens_floor=500, max_tokens_per_file=400)
     async with LLMClient(cfg, SYSTEM_PROMPT) as client:
-        assert client.max_tokens_for(spec) == 500 + 400 * 3
+        assert client.max_tokens_for(spec) == (500 + 400 * 3) + (
+            cfg.thinking_budget_tokens if cfg.enable_thinking else 0
+        )
         await client.analyze_block(spec)
-    assert fake_server.last_request()["max_tokens"] == 1700
+    budget = cfg.thinking_budget_tokens if cfg.enable_thinking else 0
+    assert fake_server.last_request()["max_tokens"] == 1700 + budget
 
 
 async def test_max_tokens_plafonne(tmp_path: Path) -> None:
