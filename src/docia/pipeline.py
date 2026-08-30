@@ -36,6 +36,7 @@ class RunReport:
     files_done: int = 0
     files_error: int = 0
     blocks_built: int = 0
+    blocks_resumed: int = 0
     blocks_done: int = 0
     blocks_error: int = 0
     prompt_tokens: int = 0
@@ -86,6 +87,7 @@ async def _run(
         say(f"reprise : {requeued} fichier(s) remis à analyser")
     leftover = db.pending_blocks(prompt_hash=phash, model=cfg.llm.model)
     if leftover:
+        report.blocks_resumed = len(leftover)
         say(f"reprise : {len(leftover)} bloc(s) à renvoyer")
 
     # 2. Sélection + construction des blocs, par lots.

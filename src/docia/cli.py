@@ -118,7 +118,8 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
         report = run_pipeline(db, cfg, limit=args.limit, dry_run=args.dry_run, progress=print)
     print(
         f"run {report.run_id} : {report.files_selected} sélectionnés, {report.files_done} analysés, "
-        f"{report.files_error} en erreur — blocs {report.blocks_done}/{report.blocks_built} "
+        f"{report.files_error} en erreur — blocs {report.blocks_done}/"
+        f"{report.blocks_built + report.blocks_resumed} "
         f"(erreurs {report.blocks_error}) — tokens {report.prompt_tokens} prompt / {report.completion_tokens} sortie"
     )
     for e in report.errors[:10]:
