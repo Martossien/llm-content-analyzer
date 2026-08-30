@@ -56,7 +56,7 @@ jobs:
         env:
           TESSERACT_HOME: C:\Program Files\Tesseract-OCR
         run: pyinstaller --noconfirm Docia.spec
-      - name: Smoke test de l'exe (CLI + doctor : OCR et pdfium embarqués)
+      - name: "Smoke test de l'exe (CLI + doctor — OCR et pdfium embarqués)"
         run: |
           dist\Docia.exe --version
           dist\Docia.exe init --config smoke.toml
