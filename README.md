@@ -8,6 +8,8 @@ blocs de texte produits par [DocFuse](https://github.com/Martossien/DocFuse).
 > [`docs/DESIGN_V3.md`](docs/DESIGN_V3.md). Contexte du projet :
 > `~/Doc-IA/docs/ANALYSE_2026-08-30.md`.
 
+**Guide de l'utilisateur (illustré)** : [`docs/GUIDE_UTILISATEUR.md`](docs/GUIDE_UTILISATEUR.md).
+
 ## Principe
 
 ```
