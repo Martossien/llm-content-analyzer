@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Spec PyInstaller pour Doc-IA analyzer (`Docia.exe`, Windows x64, --onefile).
+r"""Spec PyInstaller pour Doc-IA analyzer (`Docia.exe`, Windows x64, --onefile).
 
 Reprend les recettes éprouvées de DocFuse.spec (D-054/D-055 : ratisser les DLL
 de Python pour les extensions natives ; hiddenimports des extracteurs chargés
@@ -76,6 +76,7 @@ _LAZY_LIBS = (
     "pypdf",
     "pdfminer",
     "pypdfium2",
+    "pypdfium2_raw",  # la DLL pdfium est ICI, pas dans pypdfium2 — sans elle, aucun raster → aucun OCR
     "docx",
     "pptx",
     "openpyxl",

@@ -12,6 +12,7 @@ import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from docia.config import Config
 
@@ -38,6 +39,10 @@ def register(
     s.add_argument("--domain", default="")
     s.add_argument("--no-plan", action="store_true", help="importer sans préparer")
     s.add_argument("--json", action="store_true", help="bilan en JSON")
+    d = sub.add_parser(
+        "doctor", help="état du poste : DocFuse, OCR (Tesseract), pdfium, scanner SMBeagle, serveur"
+    )
+    d.add_argument("--json", action="store_true", help="résultat en JSON")
     p = sub.add_parser("bench", help="mesure la vitesse du serveur LLM (blocs synthétiques)")
     p.add_argument("--blocks", type=int, default=6, help="nombre de blocs envoyés (défaut 6)")
     p.add_argument(
@@ -172,3 +177,88 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
             f"{plan_report.excluded} exclus"
         )
     return 0
+
+
+def doctor_report(cfg: Config) -> dict[str, Any]:
+    """Diagnostic du poste (pur : aucun affichage). Chaque entrée dit ce qui marche
+    et pourquoi ça ne marche pas — c'est ce que l'administrateur lit quand un PDF
+    scanné sort vide ou qu'un exe « plante au lancement »."""
+    import platform
+
+    from docia import __version__
+    from docia.scan import find_smbeagle
+
+    report: dict[str, Any] = {
+        "docia": __version__,
+        "python": platform.python_version(),
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "platform": platform.platform(),
+    }
+    try:
+        import docfuse
+
+        report["docfuse"] = getattr(docfuse, "__version__", "?")
+    except Exception as exc:  # noqa: BLE001
+        report["docfuse"] = f"ABSENT : {exc}"
+    try:
+        import pypdfium2
+
+        info = getattr(pypdfium2, "PDFIUM_INFO", None)
+        report["pdfium"] = str(
+            getattr(info, "build", None) or getattr(pypdfium2, "__version__", "ok")
+        )
+        try:
+            import io
+
+            from PIL import Image
+
+            buf = io.BytesIO()
+            Image.new("RGB", (40, 40), "white").save(buf, "PDF")
+            doc = pypdfium2.PdfDocument(buf.getvalue())
+            size = doc[0].render(scale=1).to_pil().size
+            report["pdfium_raster"] = "ok" if size == (40, 40) else f"taille inattendue {size}"
+        except Exception as exc:  # noqa: BLE001
+            report["pdfium_raster"] = f"ÉCHEC : {exc}"
+    except Exception as exc:  # noqa: BLE001
+        report["pdfium"] = f"ABSENT : {exc} — aucun raster, donc aucun OCR"
+    try:
+        from docfuse.core.ocr import tesseract as tess
+        from docfuse.core.ocr.registry import list_ocr_engines
+
+        report["ocr_engines"] = [e.id for e in list_ocr_engines()]
+        binary = tess._resolve_binary()
+        report["tesseract"] = binary or "introuvable (ni embarqué, ni dans le PATH)"
+        if binary:
+            import subprocess
+
+            env = tess._subprocess_env(binary)
+            out = subprocess.run(  # noqa: S603
+                [binary, "--list-langs"], capture_output=True, text=True, timeout=30, env=env
+            )
+            langs = [line.strip() for line in (out.stdout + out.stderr).splitlines()]
+            report["tesseract_langs"] = [lang for lang in langs if lang and " " not in lang]
+    except Exception as exc:  # noqa: BLE001
+        report["ocr"] = f"ÉCHEC : {exc}"
+    scanner = find_smbeagle(cfg.scan.smbeagle_path)
+    report["smbeagle"] = (
+        str(scanner) if scanner else "introuvable (à côté de l'exe ou scan.smbeagle_path)"
+    )
+    report["llm"] = f"{cfg.llm.transport} {cfg.llm.base_url} modèle {cfg.llm.model}"
+    return report
+
+
+def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
+    """`docia doctor` : état du poste ; code 1 si l'OCR ou pdfium manquent."""
+    report = doctor_report(cfg)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for key, value in report.items():
+            print(f"{key:16} {value}")
+    ok = "tesseract" in report.get("ocr_engines", []) and report.get("pdfium_raster") == "ok"
+    if not ok:
+        print(
+            "doctor : OCR indisponible (Tesseract et/ou pdfium) — les PDF scannés sortiront vides",
+            file=sys.stderr,
+        )
+    return 0 if ok else 1

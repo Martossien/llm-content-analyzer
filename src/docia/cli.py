@@ -595,11 +595,12 @@ def main(argv: list[str] | None = None) -> int:
         "reanalyze": cmd_reanalyze,
         "campaigns": cmd_campaigns,
     }
-    from docia.cli_tools import cmd_bench, cmd_quick, cmd_scan
+    from docia.cli_tools import cmd_bench, cmd_doctor, cmd_quick, cmd_scan
 
     handlers["bench"] = cmd_bench
     handlers["quick"] = cmd_quick
     handlers["scan"] = cmd_scan
+    handlers["doctor"] = cmd_doctor
     return handlers[args.command](args, cfg)
 
 

@@ -56,11 +56,12 @@ jobs:
         env:
           TESSERACT_HOME: C:\Program Files\Tesseract-OCR
         run: pyinstaller --noconfirm Docia.spec
-      - name: Smoke test de l'exe (CLI)
+      - name: Smoke test de l'exe (CLI + doctor : OCR et pdfium embarqués)
         run: |
           dist\Docia.exe --version
           dist\Docia.exe init --config smoke.toml
           dist\Docia.exe --config smoke.toml status
+          dist\Docia.exe --config smoke.toml doctor
       - name: Smoke test de l'exe (extracteurs DocFuse embarqués)
         # Les extracteurs importent leurs bibliothèques paresseusement : seul un vrai
         # .docx/.pdf/.xlsx/.pptx traversé par l'exe prouve que tout est embarqué.
@@ -78,7 +79,8 @@ jobs:
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Tesseract' }) -join ';'
           dist\Docia.exe --config smoke.toml quick --dry-run --keep-db smoke-scan\ocr.sqlite smoke-scan\courrier_scanne.pdf
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $hits = Get-ChildItem -Recurse smoke-scan\ocr.sqlite.blocks -Filter *.md | Select-String -Pattern "4711"
+          Get-ChildItem -Recurse smoke-scan\ocr.blocks -Filter *.md | ForEach-Object { Write-Host "---- $($_.FullName)"; Get-Content -Encoding utf8 $_.FullName }
+          $hits = Get-ChildItem -Recurse smoke-scan\ocr.blocks -Filter *.md | Select-String -Encoding utf8 -Pattern "4711"
           if (-not $hits) { Write-Error "OCR embarqué : le texte du PDF scanné n'a pas été lu"; exit 1 }
           Write-Host "OCR OK :" $hits[0].Line
       - name: Smoke test de l'exe (interface graphique)
