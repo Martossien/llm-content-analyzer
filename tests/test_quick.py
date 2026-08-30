@@ -151,3 +151,32 @@ def test_quick_handler_returns_zero_and_prints_table(
 
     args = parser.parse_args(["quick", str(tmp_path / "nulle_part")])
     assert handlers["quick"](args, _config(tmp_path, fake_server.base_url_vllm)) == 1
+
+
+def test_quick_dry_run_builds_blocks_without_llm(tmp_path: Path) -> None:
+    """`--dry-run` : extraction + blocs, aucun appel LLM (serveur inexistant)."""
+    from docia.cli import main as cli_main
+    from docia.config import Config
+    from docia.quick import quick_analyze
+
+    src = tmp_path / "docs"
+    src.mkdir()
+    for i in range(3):
+        (src / f"note{i}.txt").write_text("contrat de prestation " * 40, encoding="utf-8")
+    cfg = Config()
+    cfg.llm.base_url = "http://127.0.0.1:1/v1"
+    cfg.filter.excluded_dir_markers = []
+    cfg.filter.min_size_bytes = 1
+    report = quick_analyze(cfg, [src], dry_run=True)
+    assert report.ok, report.message
+    assert report.dry_run
+    assert report.blocks_built >= 1
+    assert report.extraction_errors == 0
+    assert report.as_lines()[0].startswith("extraction seule")
+    cfg_path = tmp_path / "docia.toml"
+    cfg_path.write_text(
+        'db_path = "x.sqlite"\n[llm]\nbase_url = "http://127.0.0.1:1/v1"\n'
+        "[filter]\nexcluded_dir_markers = []\nmin_size_bytes = 1\n",
+        encoding="utf-8",
+    )
+    assert cli_main(["--config", str(cfg_path), "quick", "--dry-run", str(src)]) == 0

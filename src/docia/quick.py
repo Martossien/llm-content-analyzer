@@ -175,6 +175,9 @@ class QuickReport:
     kept_db: bool = False
     files: list[QuickFileResult] = field(default_factory=list)
     llm_errors: list[str] = field(default_factory=list)
+    dry_run: bool = False
+    blocks_built: int = 0
+    extraction_errors: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -183,6 +186,12 @@ class QuickReport:
         """Tableau texte lisible (≤ 120 colonnes)."""
         if not self.ok:
             return [f"ÉCHEC : {self.message}"]
+        if self.dry_run:
+            return [
+                f"extraction seule (sans LLM) : {self.requested} fichier(s) demandés, "
+                f"{self.blocks_built} bloc(s) construits, {self.extraction_errors} en erreur, "
+                f"{self.excluded} exclus — {self.duration_s:.1f} s"
+            ]
         header = _row(("fichier", "sécu", "RGPD", "finance", "juridique", "conserv.", "résumé"))
         lines = [header, "-" * min(SUMMARY_WIDTH, len(header))]
         for item in self.files:
@@ -234,8 +243,12 @@ def quick_analyze(
     db_path: Path | None = None,
     progress: ProgressCallback | None = None,
     cancel: threading.Event | None = None,
+    dry_run: bool = False,
 ) -> QuickReport:
     """Analyse des fichiers ou dossiers locaux sans CSV ni base préalable.
+
+    `dry_run` : extraction DocFuse et construction des blocs seulement, sans LLM —
+    sert à contrôler qu'un exécutable empaqueté embarque bien tous les extracteurs.
 
     Args:
         cfg: Configuration (LLM, blocs, filtre) ; `cfg.db_path` est ignoré.
@@ -305,8 +318,11 @@ def quick_analyze(
             )
             plan = plan_files(db, local.filter)
             say(f"à analyser : {plan.pending} — exclus : {plan.excluded}")
-            run = run_pipeline(db, local, progress=progress, cancel=cancel)
+            run = run_pipeline(db, local, progress=progress, cancel=cancel, dry_run=dry_run)
             report.llm_errors = list(run.errors)
+            report.dry_run = dry_run
+            report.blocks_built = run.blocks_built
+            report.extraction_errors = run.files_error
             wanted = {path_key(row.path) for row in rows}
             report.files = [
                 _result(record)
@@ -323,6 +339,10 @@ def quick_analyze(
     report.excluded = sum(1 for f in report.files if f.status == "excluded")
     report.errors = sum(1 for f in report.files if f.status == "error")
     report.duration_s = time.perf_counter() - started
+    if report.dry_run:
+        if report.blocks_built == 0 and report.requested > 0:
+            return failed("aucun bloc construit : extraction impossible")
+        return report
     if report.llm_errors and report.analyzed == 0:
         return failed(report.llm_errors[0])
     return report

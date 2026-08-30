@@ -53,6 +53,11 @@ def register(
     p.add_argument("--json", action="store_true", help="rapport JSON au lieu du résumé")
 
     p = sub.add_parser("quick", help="analyse immédiate de fichiers ou dossiers, sans CSV")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="extraction et blocs seulement, sans LLM (contrôle d'un exécutable empaqueté)",
+    )
     p.add_argument("paths", type=Path, nargs="+", metavar="PATH")
     p.add_argument(
         "--keep-db", type=Path, default=None, help="base à conserver (historique et reprise)"
@@ -93,6 +98,7 @@ def cmd_quick(args: argparse.Namespace, cfg: Config) -> int:
         args.paths,
         db_path=args.keep_db,
         progress=None if args.json else print,
+        dry_run=bool(args.dry_run),
     )
     if args.json:
         print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
@@ -102,6 +108,8 @@ def cmd_quick(args: argparse.Namespace, cfg: Config) -> int:
     if not report.ok:
         print(report.message, file=sys.stderr)
         return 1
+    if report.dry_run:
+        return 2 if report.extraction_errors else 0
     return 2 if report.errors or report.llm_errors else 0
 
 
