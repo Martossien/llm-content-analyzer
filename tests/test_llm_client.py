@@ -120,7 +120,10 @@ async def test_max_tokens_plafonne(tmp_path: Path) -> None:
     spec = make_block(tmp_path)
     cfg = cfg_for("http://127.0.0.1:1/v1", max_tokens_cap=900)
     client = LLMClient(cfg, SYSTEM_PROMPT)
-    assert client.max_tokens_for(spec) == 900
+    # Le plafond porte sur le JSON ; le budget de raisonnement (activé par
+    # défaut) s'ajoute par-dessus.
+    expected = 900 + (cfg.thinking_budget_tokens if cfg.enable_thinking else 0)
+    assert client.max_tokens_for(spec) == expected
 
 
 async def test_retry_sur_500_puis_succes(fake_server: FakeOpenAIServer, tmp_path: Path) -> None:

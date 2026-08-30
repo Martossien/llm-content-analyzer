@@ -735,9 +735,9 @@ class Database:
         ).fetchone()
         if src is None:
             return False
-        cols = [  # noqa: SIM118 — sqlite3.Row : itérer donne les VALEURS, pas les clés
-            k for k in src.keys() if k not in ("id", "file_id", "content_version", "created_at")
-        ]
+        # sqlite3.Row : itérer la ligne donne les VALEURS, pas les clés → `.keys()` obligatoire.
+        skip = ("id", "file_id", "content_version", "created_at")
+        cols = [k for k in src.keys() if k not in skip]  # noqa: SIM118
         with self.transaction() as conn:
             conn.execute(
                 "DELETE FROM analyses WHERE file_id=? AND content_version=? AND prompt_hash=? AND model=?",
