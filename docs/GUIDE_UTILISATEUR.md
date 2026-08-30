@@ -46,7 +46,9 @@ Puis, carte **1 · Source**, deux possibilités :
 
 ### Étape 2 · Serveur IA
 
-**Tester la connexion** : ✔ vert = on peut lancer. Sinon, prévenir l'administrateur.
+Le serveur IA est une machine dédiée (GPU) sur le réseau de l'organisme — son adresse est réglée
+une fois par l'administrateur. **Tester la connexion** : ✔ vert = on peut lancer. Sinon, prévenir
+l'administrateur (serveur éteint, port filtré, mauvaise adresse).
 
 ### Étape 3 · Analyse
 
@@ -148,8 +150,15 @@ pratique pour vérifier un document avant de le déposer.
     requête (6 000 : coupé net au-delà, la réponse JSON garde toujours sa place) et l'*Effort*
     (medium mesuré = même qualité que xhigh, 2–3× plus rapide) ; *Température* ; *Fichiers par lot
     DocFuse* = rythme d'extraction sur le poste (local, le serveur n'y est pour rien).
-  - **Descriptifs du serveur** (doivent correspondre au lancement, sinon erreurs) : adresse, nom du
-    modèle, clé, et *Contexte du modèle*. Ce dernier est **auto-vérifié** : au début de chaque
+    *Requêtes en vol* = nombre de blocs envoyés **en même temps** au serveur (8 : le GPU est
+    nourri en continu — c'est normal et voulu, le serveur sait traiter plusieurs requêtes à la
+    fois ; monter au-delà n'accélère pas, ça allonge la file) ; *Timeout* = patience par requête.
+  - **Descriptifs du serveur** (doivent correspondre au lancement, sinon erreurs) : *URL de base* —
+    l'adresse de la machine qui héberge la LLM, en général **une autre machine** que le poste :
+    `http://nom-ou-IP-du-serveur:8000/v1` (vLLM) ou `http://serveur:8080/api` (open-webui) ;
+    `127.0.0.1` ne vaut que si la LLM tourne sur le poste lui-même. C'est le **seul flux réseau**
+    de Doc-IA, et il ne transporte que du texte. Ensuite : nom du modèle, clé, et *Contexte du
+    modèle*. Ce dernier est **auto-vérifié** : au début de chaque
     analyse, docia lit la valeur réellement servie et s'y borne en avertissant si la config diverge
     (`docia doctor` l'affiche aussi).
 - Ligne de commande : `Docia.exe doctor`, `scan`, `run`, `report`, `export`, `backup`,
