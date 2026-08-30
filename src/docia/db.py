@@ -1,0 +1,669 @@
+"""Base SQLite : schéma versionné, accès aux fichiers, blocs et analyses.
+
+Une seule connexion par `Database` (mode WAL, `check_same_thread=False` car
+le pipeline est asynchrone mais mono-thread). Toutes les écritures passent par
+des méthodes explicites ; aucun `ALTER` implicite hors `_MIGRATIONS`.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+
+from docia.models import (
+    BlockFile,
+    BlockSpec,
+    BlockStatus,
+    FileAnalysis,
+    FileRow,
+    FileStatus,
+    LLMUsage,
+    SmbeagleRow,
+    path_key,
+)
+
+SCHEMA_VERSION = 1
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+_SCHEMA_V1 = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    csv_path TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    rows_total INTEGER NOT NULL DEFAULT 0,
+    rows_new INTEGER NOT NULL DEFAULT 0,
+    rows_updated INTEGER NOT NULL DEFAULT 0,
+    rows_unchanged INTEGER NOT NULL DEFAULT 0,
+    rows_invalid INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path_key TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    extension TEXT NOT NULL DEFAULT '',
+    host TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    unc_directory TEXT NOT NULL DEFAULT '',
+    base TEXT NOT NULL DEFAULT '',
+    directory_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    creation_time TEXT NOT NULL DEFAULT '',
+    last_write_time TEXT NOT NULL DEFAULT '',
+    access_time TEXT NOT NULL DEFAULT '',
+    file_attributes TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '',
+    fast_hash TEXT NOT NULL DEFAULT '',
+    file_signature TEXT NOT NULL DEFAULT '',
+    readable INTEGER NOT NULL DEFAULT 1,
+    writeable INTEGER NOT NULL DEFAULT 0,
+    deletable INTEGER NOT NULL DEFAULT 0,
+    first_seen_scan_id INTEGER NOT NULL,
+    last_seen_scan_id INTEGER NOT NULL,
+    content_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    exclusion_reason TEXT,
+    priority_score INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+CREATE INDEX IF NOT EXISTS idx_files_fast_hash ON files(fast_hash);
+CREATE INDEX IF NOT EXISTS idx_files_extension ON files(extension);
+CREATE INDEX IF NOT EXISTS idx_files_priority ON files(priority_score DESC, path);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    model TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    config_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    path TEXT NOT NULL,
+    tokens_estimated INTEGER NOT NULL DEFAULT 0,
+    tokens_with_margin INTEGER NOT NULL DEFAULT 0,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    oversized INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'built',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    prompt_hash TEXT NOT NULL,
+    model TEXT NOT NULL,
+    usage_prompt_tokens INTEGER,
+    usage_completion_tokens INTEGER,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_blocks_status ON blocks(status);
+
+CREATE TABLE IF NOT EXISTS block_files (
+    block_id INTEGER NOT NULL REFERENCES blocks(id),
+    file_id INTEGER NOT NULL REFERENCES files(id),
+    file_ref TEXT NOT NULL,
+    content_version INTEGER NOT NULL,
+    oversized INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT,
+    PRIMARY KEY (block_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_block_files_file ON block_files(file_id);
+
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id),
+    block_id INTEGER REFERENCES blocks(id),
+    content_version INTEGER NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    model TEXT NOT NULL,
+    resume TEXT NOT NULL DEFAULT '',
+    security_classification TEXT NOT NULL,
+    security_confidence INTEGER NOT NULL,
+    security_justification TEXT NOT NULL DEFAULT '',
+    rgpd_risk_level TEXT NOT NULL,
+    rgpd_data_types TEXT NOT NULL DEFAULT '[]',
+    rgpd_confidence INTEGER NOT NULL,
+    finance_document_type TEXT NOT NULL,
+    finance_amounts TEXT NOT NULL DEFAULT '[]',
+    finance_confidence INTEGER NOT NULL,
+    legal_contract_type TEXT NOT NULL,
+    legal_parties TEXT NOT NULL DEFAULT '[]',
+    legal_confidence INTEGER NOT NULL,
+    raw_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (file_id, content_version, prompt_hash, model)
+);
+CREATE INDEX IF NOT EXISTS idx_analyses_file ON analyses(file_id);
+CREATE INDEX IF NOT EXISTS idx_analyses_security ON analyses(security_classification);
+CREATE INDEX IF NOT EXISTS idx_analyses_rgpd ON analyses(rgpd_risk_level);
+"""
+
+_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1)]
+
+
+class Database:
+    """Accès à la base. Utiliser comme gestionnaire de contexte ou appeler `close()`."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._migrate()
+
+    # ------------------------------------------------------------------ infra
+    def __enter__(self) -> Database:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        try:
+            self._conn.execute("BEGIN")
+            yield self._conn
+            self._conn.execute("COMMIT")
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    @property
+    def schema_version(self) -> int:
+        row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+
+    def _migrate(self) -> None:
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        current = self.schema_version
+        for version, sql in _MIGRATIONS:
+            if version > current:
+                with self.transaction() as conn:
+                    conn.executescript(sql)
+                    conn.execute(
+                        "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(version),),
+                    )
+                current = version
+
+    # ------------------------------------------------------------------ scans
+    def start_scan(self, csv_path: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO scans(csv_path, imported_at) VALUES(?, ?)", (csv_path, _now())
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def finish_scan(
+        self, scan_id: int, *, total: int, new: int, updated: int, unchanged: int, invalid: int
+    ) -> None:
+        self._conn.execute(
+            "UPDATE scans SET rows_total=?, rows_new=?, rows_updated=?, rows_unchanged=?, rows_invalid=? WHERE id=?",
+            (total, new, updated, unchanged, invalid, scan_id),
+        )
+        self._conn.commit()
+
+    def upsert_files(self, rows: Iterable[SmbeagleRow], scan_id: int) -> tuple[int, int, int]:
+        """Insère ou met à jour des lignes SMBeagle.
+
+        Un fichier connu dont `fast_hash`, `size` ou `last_write_time` change
+        prend `content_version + 1` et repasse `pending` (sauf s'il est
+        `excluded`, l'exclusion étant une règle, pas un état de contenu).
+
+        Returns:
+            (nouveaux, modifiés, inchangés).
+        """
+        new = updated = unchanged = 0
+        now = _now()
+        with self.transaction() as conn:
+            for row in rows:
+                key = path_key(row.path)
+                existing = conn.execute(
+                    "SELECT id, fast_hash, size_bytes, last_write_time, status, content_version FROM files WHERE path_key=?",
+                    (key,),
+                ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """INSERT INTO files(path_key, path, name, extension, host, hostname, username,
+                           unc_directory, base, directory_type, size_bytes, creation_time, last_write_time,
+                           access_time, file_attributes, owner, fast_hash, file_signature, readable, writeable,
+                           deletable, first_seen_scan_id, last_seen_scan_id, content_version, status, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'pending',?)""",
+                        (
+                            key,
+                            row.path,
+                            row.name,
+                            row.extension,
+                            row.host,
+                            row.hostname,
+                            row.username,
+                            row.unc_directory,
+                            row.base,
+                            row.directory_type,
+                            row.file_size,
+                            row.creation_time,
+                            row.last_write_time,
+                            row.access_time,
+                            row.file_attributes,
+                            row.owner,
+                            row.fast_hash,
+                            row.file_signature,
+                            int(row.readable),
+                            int(row.writeable),
+                            int(row.deletable),
+                            scan_id,
+                            scan_id,
+                            now,
+                        ),
+                    )
+                    new += 1
+                    continue
+                changed = (
+                    existing["fast_hash"] != row.fast_hash
+                    or int(existing["size_bytes"]) != row.file_size
+                    or existing["last_write_time"] != row.last_write_time
+                )
+                if changed:
+                    new_status = (
+                        existing["status"]
+                        if existing["status"] == FileStatus.EXCLUDED
+                        else FileStatus.PENDING
+                    )
+                    conn.execute(
+                        """UPDATE files SET size_bytes=?, creation_time=?, last_write_time=?, access_time=?,
+                           file_attributes=?, owner=?, fast_hash=?, file_signature=?, readable=?, writeable=?,
+                           deletable=?, last_seen_scan_id=?, content_version=content_version+1, status=?,
+                           exclusion_reason=CASE WHEN ?='excluded' THEN exclusion_reason ELSE NULL END, updated_at=?
+                           WHERE id=?""",
+                        (
+                            row.file_size,
+                            row.creation_time,
+                            row.last_write_time,
+                            row.access_time,
+                            row.file_attributes,
+                            row.owner,
+                            row.fast_hash,
+                            row.file_signature,
+                            int(row.readable),
+                            int(row.writeable),
+                            int(row.deletable),
+                            scan_id,
+                            str(new_status),
+                            str(new_status),
+                            now,
+                            existing["id"],
+                        ),
+                    )
+                    updated += 1
+                else:
+                    conn.execute(
+                        "UPDATE files SET last_seen_scan_id=?, access_time=?, updated_at=? WHERE id=?",
+                        (scan_id, row.access_time, now, existing["id"]),
+                    )
+                    unchanged += 1
+        return new, updated, unchanged
+
+    # ------------------------------------------------------------------ files
+    @staticmethod
+    def _file_row(r: sqlite3.Row) -> FileRow:
+        return FileRow(
+            id=int(r["id"]),
+            path=r["path"],
+            name=r["name"],
+            extension=r["extension"],
+            size_bytes=int(r["size_bytes"]),
+            fast_hash=r["fast_hash"],
+            last_write_time=r["last_write_time"],
+            content_version=int(r["content_version"]),
+            status=FileStatus(r["status"]),
+            exclusion_reason=r["exclusion_reason"],
+            priority_score=int(r["priority_score"]),
+            owner=r["owner"],
+            host=r["host"],
+            unc_directory=r["unc_directory"],
+        )
+
+    def get_file(self, file_id: int) -> FileRow | None:
+        r = self._conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+        return self._file_row(r) if r else None
+
+    def iter_files(self, status: FileStatus | None = None) -> Iterator[FileRow]:
+        sql = "SELECT * FROM files"
+        params: tuple[object, ...] = ()
+        if status is not None:
+            sql += " WHERE status=?"
+            params = (str(status),)
+        sql += " ORDER BY priority_score DESC, path"
+        for r in self._conn.execute(sql, params):
+            yield self._file_row(r)
+
+    def select_pending(self, limit: int, *, prompt_hash: str, model: str) -> list[FileRow]:
+        """Fichiers à analyser : `pending`, sans analyse pour leur version de contenu
+        courante avec ce prompt et ce modèle. Ordre : priorité, puis chemin."""
+        rows = self._conn.execute(
+            """SELECT f.* FROM files f
+               WHERE f.status='pending'
+                 AND NOT EXISTS (SELECT 1 FROM analyses a WHERE a.file_id=f.id
+                                 AND a.content_version=f.content_version
+                                 AND a.prompt_hash=? AND a.model=?)
+               ORDER BY f.priority_score DESC, f.path LIMIT ?""",
+            (prompt_hash, model, limit),
+        ).fetchall()
+        return [self._file_row(r) for r in rows]
+
+    def set_file_status(self, file_id: int, status: FileStatus, reason: str | None = None) -> None:
+        self._conn.execute(
+            "UPDATE files SET status=?, exclusion_reason=?, updated_at=? WHERE id=?",
+            (str(status), reason, _now(), file_id),
+        )
+        self._conn.commit()
+
+    def set_files_status(
+        self, file_ids: Sequence[int], status: FileStatus, reason: str | None = None
+    ) -> None:
+        now = _now()
+        with self.transaction() as conn:
+            conn.executemany(
+                "UPDATE files SET status=?, exclusion_reason=?, updated_at=? WHERE id=?",
+                [(str(status), reason, now, fid) for fid in file_ids],
+            )
+
+    def apply_plan(
+        self, decisions: Iterable[tuple[int, FileStatus, str | None, int]]
+    ) -> tuple[int, int]:
+        """Applique les décisions du filtre : (file_id, statut, raison, score).
+        Ne touche pas aux fichiers `done`/`error` sauf pour le score.
+
+        Returns:
+            (fichiers pending, fichiers exclus).
+        """
+        pending = excluded = 0
+        now = _now()
+        with self.transaction() as conn:
+            for file_id, status, reason, score in decisions:
+                if status == FileStatus.EXCLUDED:
+                    conn.execute(
+                        "UPDATE files SET status='excluded', exclusion_reason=?, priority_score=?, updated_at=? WHERE id=? AND status IN ('pending','excluded','queued')",
+                        (reason, score, now, file_id),
+                    )
+                    excluded += 1
+                else:
+                    conn.execute(
+                        "UPDATE files SET status=CASE WHEN status IN ('excluded','queued') THEN 'pending' ELSE status END, exclusion_reason=CASE WHEN status='excluded' THEN NULL ELSE exclusion_reason END, priority_score=?, updated_at=? WHERE id=?",
+                        (score, now, file_id),
+                    )
+                    pending += 1
+        return pending, excluded
+
+    def reset_errors(self) -> int:
+        cur = self._conn.execute(
+            "UPDATE files SET status='pending', exclusion_reason=NULL, updated_at=? WHERE status='error'",
+            (_now(),),
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
+
+    def requeue_stale(self) -> int:
+        """Fichiers `queued` sans bloc en vol (interruption) → `pending`."""
+        cur = self._conn.execute(
+            """UPDATE files SET status='pending', updated_at=? WHERE status='queued' AND id NOT IN (
+                 SELECT bf.file_id FROM block_files bf JOIN blocks b ON b.id=bf.block_id WHERE b.status IN ('built','sent'))""",
+            (_now(),),
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
+
+    # ------------------------------------------------------------------ runs
+    def start_run(self, *, model: str, prompt_hash: str, config_json: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO runs(started_at, model, prompt_hash, config_json) VALUES(?,?,?,?)",
+            (_now(), model, prompt_hash, config_json),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def finish_run(self, run_id: int, status: str = "done") -> None:
+        self._conn.execute(
+            "UPDATE runs SET finished_at=?, status=? WHERE id=?", (_now(), status, run_id)
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------ blocks
+    def create_block(self, run_id: int, spec: BlockSpec, *, prompt_hash: str, model: str) -> int:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO blocks(run_id, path, tokens_estimated, tokens_with_margin, file_count, oversized,
+                   status, prompt_hash, model, created_at) VALUES(?,?,?,?,?,?,'built',?,?,?)""",
+                (
+                    run_id,
+                    str(spec.path),
+                    spec.tokens_estimated,
+                    spec.tokens_with_margin,
+                    len(spec.files),
+                    int(spec.oversized),
+                    prompt_hash,
+                    model,
+                    _now(),
+                ),
+            )
+            block_id = int(cur.lastrowid or 0)
+            conn.executemany(
+                "INSERT INTO block_files(block_id, file_id, file_ref, content_version, oversized) VALUES(?,?,?,?,?)",
+                [
+                    (block_id, bf.file_id, bf.file_ref, bf.content_version, int(bf.oversized))
+                    for bf in spec.files
+                ],
+            )
+            conn.executemany(
+                "UPDATE files SET status='queued', updated_at=? WHERE id=?",
+                [(_now(), bf.file_id) for bf in spec.files],
+            )
+        spec.block_id = block_id
+        return block_id
+
+    def mark_block_sent(self, block_id: int) -> None:
+        self._conn.execute(
+            "UPDATE blocks SET status='sent', attempts=attempts+1, sent_at=? WHERE id=?",
+            (_now(), block_id),
+        )
+        self._conn.commit()
+
+    def mark_block_done(self, block_id: int, usage: LLMUsage | None) -> None:
+        self._conn.execute(
+            """UPDATE blocks SET status='done', completed_at=?, usage_prompt_tokens=?, usage_completion_tokens=?,
+               latency_ms=?, error=NULL WHERE id=?""",
+            (
+                _now(),
+                usage.prompt_tokens if usage else None,
+                usage.completion_tokens if usage else None,
+                usage.latency_ms if usage else None,
+                block_id,
+            ),
+        )
+        self._conn.commit()
+
+    def mark_block_error(self, block_id: int, error: str) -> None:
+        self._conn.execute(
+            "UPDATE blocks SET status='error', completed_at=?, error=? WHERE id=?",
+            (_now(), error[:2000], block_id),
+        )
+        self._conn.commit()
+
+    def block_files(self, block_id: int) -> list[BlockFile]:
+        rows = self._conn.execute(
+            "SELECT file_id, file_ref, content_version, oversized FROM block_files WHERE block_id=? ORDER BY rowid",
+            (block_id,),
+        ).fetchall()
+        return [
+            BlockFile(
+                int(r["file_id"]), r["file_ref"], int(r["content_version"]), bool(r["oversized"])
+            )
+            for r in rows
+        ]
+
+    def file_attempts(self, file_id: int) -> int:
+        """Nombre de blocs dans lesquels ce fichier a déjà été envoyé (tentatives)."""
+        row = self._conn.execute(
+            """SELECT COUNT(*) FROM block_files bf JOIN blocks b ON b.id=bf.block_id
+               WHERE bf.file_id=? AND b.status IN ('sent','done','error')""",
+            (file_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def set_block_file_outcome(self, block_id: int, file_id: int, outcome: str) -> None:
+        self._conn.execute(
+            "UPDATE block_files SET outcome=? WHERE block_id=? AND file_id=?",
+            (outcome, block_id, file_id),
+        )
+        self._conn.commit()
+
+    def pending_blocks(self, *, prompt_hash: str, model: str) -> list[BlockSpec]:
+        """Blocs `built`/`sent` d'un run précédent, à (re)envoyer — reprise."""
+        rows = self._conn.execute(
+            "SELECT * FROM blocks WHERE status IN ('built','sent') AND prompt_hash=? AND model=? ORDER BY id",
+            (prompt_hash, model),
+        ).fetchall()
+        specs: list[BlockSpec] = []
+        for r in rows:
+            specs.append(
+                BlockSpec(
+                    path=Path(r["path"]),
+                    files=self.block_files(int(r["id"])),
+                    tokens_estimated=int(r["tokens_estimated"]),
+                    tokens_with_margin=int(r["tokens_with_margin"]),
+                    oversized=bool(r["oversized"]),
+                    block_id=int(r["id"]),
+                )
+            )
+        return specs
+
+    # ------------------------------------------------------------------ analyses
+    def store_analysis(
+        self,
+        file_id: int,
+        block_id: int | None,
+        content_version: int,
+        *,
+        prompt_hash: str,
+        model: str,
+        analysis: FileAnalysis,
+    ) -> None:
+        """Insère (ou remplace) l'analyse d'un fichier et le passe `done`, en une transaction."""
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO analyses(file_id, block_id, content_version, prompt_hash, model, resume,
+                   security_classification, security_confidence, security_justification,
+                   rgpd_risk_level, rgpd_data_types, rgpd_confidence,
+                   finance_document_type, finance_amounts, finance_confidence,
+                   legal_contract_type, legal_parties, legal_confidence, raw_json, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(file_id, content_version, prompt_hash, model) DO UPDATE SET
+                   block_id=excluded.block_id, resume=excluded.resume,
+                   security_classification=excluded.security_classification, security_confidence=excluded.security_confidence,
+                   security_justification=excluded.security_justification, rgpd_risk_level=excluded.rgpd_risk_level,
+                   rgpd_data_types=excluded.rgpd_data_types, rgpd_confidence=excluded.rgpd_confidence,
+                   finance_document_type=excluded.finance_document_type, finance_amounts=excluded.finance_amounts,
+                   finance_confidence=excluded.finance_confidence, legal_contract_type=excluded.legal_contract_type,
+                   legal_parties=excluded.legal_parties, legal_confidence=excluded.legal_confidence,
+                   raw_json=excluded.raw_json, created_at=excluded.created_at""",
+                (
+                    file_id,
+                    block_id,
+                    content_version,
+                    prompt_hash,
+                    model,
+                    analysis.resume,
+                    analysis.security.label,
+                    analysis.security.confidence,
+                    str(analysis.security.details.get("justification", "")),
+                    analysis.rgpd.label,
+                    json.dumps(analysis.rgpd.details.get("data_types", []), ensure_ascii=False),
+                    analysis.rgpd.confidence,
+                    analysis.finance.label,
+                    json.dumps(analysis.finance.details.get("amounts", []), ensure_ascii=False),
+                    analysis.finance.confidence,
+                    analysis.legal.label,
+                    json.dumps(analysis.legal.details.get("parties", []), ensure_ascii=False),
+                    analysis.legal.confidence,
+                    json.dumps(analysis.raw, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+            conn.execute(
+                "UPDATE files SET status='done', exclusion_reason=NULL, updated_at=? WHERE id=?",
+                (_now(), file_id),
+            )
+
+    def latest_analyses(self) -> Iterator[sqlite3.Row]:
+        """Dernière analyse de chaque fichier (jointe au fichier), pour l'export."""
+        return iter(
+            self._conn.execute(
+                """SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f.host, f.status, f.exclusion_reason,
+                          f.content_version, a.model, a.prompt_hash, a.resume,
+                          a.security_classification, a.security_confidence, a.security_justification,
+                          a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
+                          a.finance_document_type, a.finance_amounts, a.finance_confidence,
+                          a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at
+                   FROM files f LEFT JOIN analyses a ON a.id = (
+                        SELECT id FROM analyses WHERE file_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1)
+                   ORDER BY f.path"""
+            )
+        )
+
+    # ------------------------------------------------------------------ stats
+    def counts(self) -> dict[str, int]:
+        counts = {s.value: 0 for s in FileStatus}
+        for r in self._conn.execute("SELECT status, COUNT(*) AS n FROM files GROUP BY status"):
+            counts[r["status"]] = int(r["n"])
+        counts["files"] = sum(counts[s.value] for s in FileStatus)
+        counts["analyses"] = int(self._conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0])
+        for status in BlockStatus:
+            counts[f"blocks_{status.value}"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM blocks WHERE status=?", (status.value,)
+                ).fetchone()[0]
+            )
+        return counts
+
+    def classification_summary(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for column, key in (
+            ("security_classification", "security"),
+            ("rgpd_risk_level", "rgpd"),
+            ("finance_document_type", "finance"),
+            ("legal_contract_type", "legal"),
+        ):
+            out[key] = {
+                r[0]: int(r[1])
+                for r in self._conn.execute(
+                    f"SELECT {column}, COUNT(*) FROM analyses GROUP BY {column}"
+                )  # noqa: S608 — colonnes internes
+            }
+        return out
