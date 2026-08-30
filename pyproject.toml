@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "docia"
-version = "3.0.0a1"
+version = "3.0.0"
 description = "Doc-IA analyzer v3 : classification RGPD / finance / sécurité / juridique de partages de fichiers par LLM, à partir d'un scan SMBeagle et de blocs DocFuse"
 readme = "README.md"
 license = { text = "Apache-2.0" }
