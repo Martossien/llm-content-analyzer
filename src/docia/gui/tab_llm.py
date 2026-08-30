@@ -86,6 +86,25 @@ class LLMTab:
             "Budget de raisonnement (tokens, imposé)",
             ctk.CTkEntry(grid, textvariable=self.budget_var, width=90),
         )
+        self.smbeagle_var = ctk.StringVar(value=c.scan.smbeagle_path)
+        self.preserve_var = ctk.BooleanVar(value=c.scan.preserve_access_time)
+        cell(
+            7,
+            0,
+            "Scanner SMBeagle (chemin)",
+            ctk.CTkEntry(
+                grid,
+                textvariable=self.smbeagle_var,
+                width=360,
+                placeholder_text="vide = à côté de Docia.exe, puis PATH",
+            ),
+        )
+        cell(
+            7,
+            1,
+            "Dates d'accès",
+            ctk.CTkCheckBox(grid, text="préservées pendant le scan", variable=self.preserve_var),
+        )
         self.effort_var = ctk.StringVar(value=c.llm.reasoning_effort or "xhigh")
         cell(
             6,
@@ -155,6 +174,8 @@ class LLMTab:
             self.budget_var.get(), cfg.llm.thinking_budget_tokens, minimum=0
         )
         cfg.llm.reasoning_effort = self.effort_var.get()
+        cfg.scan.smbeagle_path = self.smbeagle_var.get().strip()
+        cfg.scan.preserve_access_time = bool(self.preserve_var.get())
         cfg.blocks.block_tokens = parse_int(
             self.block_tokens_var.get(), cfg.blocks.block_tokens, minimum=1000
         )

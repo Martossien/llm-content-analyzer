@@ -61,6 +61,12 @@ _LATEST_INNER = _LATEST.replace("LEFT JOIN", "JOIN", 1)
 # --------------------------------------------------------------------- helpers
 
 
+FIRST_ACCESS = "COALESCE(NULLIF(access_time_first, ''), access_time)"
+"""Date d'accès retenue pour l'ancienneté : la première observée (schéma v5), pour
+que le hachage/l'extraction de l'audit ne rajeunisse pas les fichiers inchangés."""
+FIRST_ACCESS_F = "COALESCE(NULLIF(f.access_time_first, ''), f.access_time)"
+
+
 def _date_key(column: str) -> str:
     """Expression SQL rendant `yyyyMMdd` (ou `''`) pour une date SMBeagle ou ISO."""
     return (
@@ -415,7 +421,7 @@ def stale_files(
 ) -> list[StaleBucket]:
     """Pour chaque seuil : fichiers non accédés et non modifiés depuis N années."""
     reference = _today(today)
-    access = _date_key("access_time")
+    access = _date_key(FIRST_ACCESS)
     write = _date_key("last_write_time")
     buckets: list[StaleBucket] = []
     for n in sorted(years):
@@ -760,10 +766,10 @@ def cleanup_candidates(
     et non accédés depuis `years` années."""
     reference = _today(today)
     cutoff = shift_years(reference, -years)
-    access = _date_key("f.access_time")
+    access = _date_key(FIRST_ACCESS_F)
     rows = db.query(
         "SELECT f.id AS id, f.path AS path, f.owner AS owner, f.size_bytes AS size,"
-        " f.access_time AS at, a.security_classification AS sec"
+        f" {FIRST_ACCESS_F} AS at, a.security_classification AS sec"
         f" FROM files f {_LATEST_INNER}"
         " WHERE a.retention_required=0 AND a.security_classification IN ('C0','C1')"
         f" AND ({access}) <> '' AND ({access}) < ?"

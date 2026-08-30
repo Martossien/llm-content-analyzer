@@ -51,6 +51,15 @@ jobs:
           dist\Docia.exe --version
           dist\Docia.exe init --config smoke.toml
           dist\Docia.exe --config smoke.toml status
+      - name: Smoke test de l'exe (extracteurs DocFuse embarqués)
+        # Les extracteurs importent leurs bibliothèques paresseusement : seul un vrai
+        # .docx/.pdf/.xlsx/.pptx traversé par l'exe prouve que tout est embarqué.
+        run: |
+          git clone --depth 1 https://github.com/Martossien/DocFuse.git docfuse-src
+          dist\Docia.exe --config smoke.toml quick --dry-run docfuse-src\tests\fixtures
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test de l'exe (interface graphique)
+        run: dist\Docia.exe --config smoke.toml gui --smoke
       - uses: actions/upload-artifact@v4
         with:
           name: Docia-windows-x64

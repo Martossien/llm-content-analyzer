@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 _APP_NAME = (os.environ.get("DOCIA_APP_NAME") or "Docia").strip() or "Docia"
 _ROOT = Path(SPECPATH)
@@ -38,11 +38,58 @@ _datas += collect_data_files("docfuse")  # i18n/*.json, assets/*.ttf, vocabulair
 _datas += collect_data_files("customtkinter")
 _datas += collect_data_files("tiktoken_ext")
 
+# Bibliothèques importées PARESSEUSEMENT par les extracteurs DocFuse (dans les
+# fonctions, pas en tête de module) : PyInstaller ne les voit pas → l'exe
+# démarre puis plante au premier .docx/.pdf/.xlsx. On les ratisse toutes,
+# données et binaires compris (pypdfium2, lxml, office_oxide sont natifs).
+_LAZY_LIBS = (
+    "pypdf",
+    "pdfminer",
+    "pypdfium2",
+    "docx",
+    "pptx",
+    "openpyxl",
+    "lxml",
+    "bs4",
+    "striprtf",
+    "ftfy",
+    "oxmsg",
+    "office_oxide",
+    "charset_normalizer",
+    "odf",
+    "olefile",
+    "xlrd",
+)
+_lazy_hidden: list[str] = []
+for _lib in _LAZY_LIBS:
+    try:
+        _d, _b, _h = collect_all(_lib)
+    except Exception:  # noqa: BLE001 — bibliothèque absente de cet environnement : ignorée
+        continue
+    _datas += _d
+    _extra_binaries += _b
+    _lazy_hidden += _h
+
 _hidden = (
     collect_submodules("docfuse.extractors")
     + collect_submodules("docfuse.core")
     + collect_submodules("tiktoken_ext")
-    + ["tkinter", "customtkinter", "charset_normalizer", "tiktoken", "sqlite3", "httpx", "anyio", "h11"]
+    + _lazy_hidden
+    + [
+        "tkinter",
+        "tkinter.ttk",
+        "tkinter.filedialog",
+        "tkinter.messagebox",
+        "customtkinter",
+        "charset_normalizer",
+        "tiktoken",
+        "sqlite3",
+        "httpx",
+        "anyio",
+        "h11",
+        "email.parser",
+        "email.policy",
+    ]
 )
 
 block_cipher = None

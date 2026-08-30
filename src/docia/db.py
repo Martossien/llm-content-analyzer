@@ -28,7 +28,7 @@ from docia.models import (
     path_key,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 BACKUP_DIR_SUFFIX = ".backups"
 """Suffixe du dossier de sauvegardes, à côté de la base (`docia.sqlite.backups`)."""
@@ -228,11 +228,26 @@ CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
 """
 """v4 : index de restitution (`views.py`) — doublons, ancienneté, propriétaire, partage."""
 
+_SCHEMA_V5 = """
+ALTER TABLE files ADD COLUMN access_time_first TEXT NOT NULL DEFAULT '';
+UPDATE files SET access_time_first = access_time;
+ALTER TABLE scans ADD COLUMN kind TEXT NOT NULL DEFAULT 'import';
+ALTER TABLE scans ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '';
+ALTER TABLE scans ADD COLUMN scanner_elapsed_s REAL NOT NULL DEFAULT 0;
+"""
+"""v5 : `access_time_first` = date d'accès observée au premier scan (ou au dernier
+changement de contenu). L'audit lui-même lit les fichiers (hachage, signature,
+extraction) et peut mettre à jour la date d'accès NTFS : les statistiques
+« non accédé depuis N ans » s'appuient sur cette première observation, jamais
+sur une date rafraîchie par un rescan d'un fichier inchangé. `scans.kind` =
+`scan` (SMBeagle piloté par docia, manifeste conservé) ou `import` (CSV fourni)."""
+
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
+    (5, _SCHEMA_V5),
 ]
 
 REVIEW_STATUSES = ("to_review", "validated", "corrected")
@@ -339,12 +354,25 @@ class Database:
                 current = version
 
     # ------------------------------------------------------------------ scans
-    def start_scan(self, csv_path: str) -> int:
+    def start_scan(self, csv_path: str, *, kind: str = "import") -> int:
         cur = self._conn.execute(
-            "INSERT INTO scans(csv_path, imported_at) VALUES(?, ?)", (csv_path, _now())
+            "INSERT INTO scans(csv_path, imported_at, kind) VALUES(?, ?, ?)",
+            (csv_path, _now(), kind),
         )
         self._conn.commit()
         return int(cur.lastrowid or 0)
+
+    def annotate_scan(self, scan_id: int, *, manifest_json: str, scanner_elapsed_s: float) -> None:
+        """Attache le manifeste du scanner (options, cibles, compteurs) au scan importé."""
+        self._conn.execute(
+            "UPDATE scans SET kind='scan', manifest_json=?, scanner_elapsed_s=? WHERE id=?",
+            (manifest_json, scanner_elapsed_s, scan_id),
+        )
+        self._conn.commit()
+
+    def last_scan(self) -> sqlite3.Row | None:
+        row = self._conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
+        return row if isinstance(row, sqlite3.Row) else None
 
     def finish_scan(
         self, scan_id: int, *, total: int, new: int, updated: int, unchanged: int, invalid: int
@@ -378,9 +406,10 @@ class Database:
                     conn.execute(
                         """INSERT INTO files(path_key, path, name, extension, host, hostname, username,
                            unc_directory, base, directory_type, size_bytes, creation_time, last_write_time,
-                           access_time, file_attributes, owner, fast_hash, file_signature, readable, writeable,
-                           deletable, first_seen_scan_id, last_seen_scan_id, content_version, status, updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'pending',?)""",
+                           access_time, access_time_first, file_attributes, owner, fast_hash, file_signature,
+                           readable, writeable, deletable, first_seen_scan_id, last_seen_scan_id,
+                           content_version, status, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'pending',?)""",
                         (
                             key,
                             row.path,
@@ -395,6 +424,7 @@ class Database:
                             row.file_size,
                             row.creation_time,
                             row.last_write_time,
+                            row.access_time,
                             row.access_time,
                             row.file_attributes,
                             row.owner,
@@ -423,6 +453,7 @@ class Database:
                     )
                     conn.execute(
                         """UPDATE files SET size_bytes=?, creation_time=?, last_write_time=?, access_time=?,
+                           access_time_first=?,
                            file_attributes=?, owner=?, fast_hash=?, file_signature=?, readable=?, writeable=?,
                            deletable=?, last_seen_scan_id=?, content_version=content_version+1, status=?,
                            exclusion_reason=CASE WHEN ?='excluded' THEN exclusion_reason ELSE NULL END, updated_at=?
@@ -431,6 +462,7 @@ class Database:
                             row.file_size,
                             row.creation_time,
                             row.last_write_time,
+                            row.access_time,
                             row.access_time,
                             row.file_attributes,
                             row.owner,

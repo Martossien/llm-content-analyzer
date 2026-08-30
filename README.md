@@ -40,7 +40,8 @@ Python ≥ 3.11. Dépendances : `docfuse` ≥ 0.2.0, `httpx`.
 
 ```bash
 docia init                          # écrit docia.toml (config commentée)
-docia ingest scan.csv               # import du CSV SMBeagle (19 colonnes, guillemets sélectifs)
+docia scan --local-path D:\\partage   # étape 0 : lance SMBeagle_enriched (à côté de Docia.exe), importe et prépare
+docia ingest scan.csv               # ou : import d'un CSV SMBeagle déjà produit (19 colonnes)
 docia plan                          # exclusions + score de priorité
 docia run --limit 500               # blocs DocFuse → LLM → analyses (reprend où il s'était arrêté)
 docia status                        # compteurs par statut, blocs, classifications
@@ -56,7 +57,7 @@ docia backup [--out DIR]            # sauvegarde horodatée de la base (<base>.b
 docia restore SAUVEGARDE.sqlite     # restaure par-dessus la base (l'actuelle est d'abord sauvegardée)
 docia reanalyze --scope errors|all|filter [--where security=C3]  # relancer : erreurs, tout, ou une sélection
 docia campaigns                     # campagnes récentes et leur avancement
-docia gui                           # interface : Accueil (4 étapes, relance) / Résultats & vérification / Statistiques / Rapports ; mode admin : Prompt, Serveur & performances
+docia gui                           # interface : Accueil (scanner ou CSV, 4 étapes, relance) / Résultats & vérification / Statistiques / Rapports ; mode admin : Prompt, Serveur & performances
 ```
 
 Cinq domaines par fichier : sécurité (C0–C3), RGPD, finance, juridique, **conservation**
@@ -70,6 +71,19 @@ web de pilotage à distance (v4) passent tous par cette couche.
 
 Serveur LLM : voir `~/Doc-IA/bench_vllm/serve_qwen38.sh` (vLLM + Qwen3.8-27B) ou open-webui 0.11
 (`transport = "openwebui"`, `base_url = "http://serveur:8080/api"`, clé `sk-`).
+
+## Scanner SMBeagle_enriched (étape 0)
+
+`SMBeagle.exe` ([smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched)) est un programme
+séparé : docia le pilote en sous-processus (`docia scan`, onglet Accueil → « Scanner maintenant »).
+Placer l'exécutable **à côté de `Docia.exe`** (ou `scan.smbeagle_path`). Options envoyées :
+`--sizefile --access-time --fileattributes --ownerfile --fasthash --file-signature`
+`--preserve-access-time --progress-json --manifest`. Le CSV et le manifeste sont rangés dans
+`<base>.scans/`, le scan importé garde le manifeste (`scans.kind='scan'`).
+
+**Rescan** : seuls les fichiers nouveaux ou modifiés (empreinte, taille, date) repartent en analyse ;
+la date de dernier accès retenue pour « non accédé depuis N ans » est la **première observée**
+(`access_time_first`), pour que le hachage et l'extraction de l'audit ne rajeunissent pas les fichiers.
 
 ## Développement
 

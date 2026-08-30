@@ -77,7 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p = sub.add_parser("retry", help="remet les fichiers en erreur à « à analyser »")
-    sub.add_parser("gui", help="ouvre l'interface graphique (extra docia[gui])")
+    p = sub.add_parser("gui", help="ouvre l'interface graphique (extra docia[gui])")
+    p.add_argument(
+        "--smoke",
+        action="store_true",
+        help="construit la fenêtre puis la ferme (contrôle d'un exécutable empaqueté)",
+    )
 
     p = sub.add_parser("backup", help="sauvegarde horodatée de la base (rotation)")
     p.add_argument("--out", type=Path, default=None, help="dossier (défaut : <base>.backups)")
@@ -560,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        launch(args.config)
+        launch(args.config, smoke=bool(getattr(args, "smoke", False)))
         return 0
     cfg = _load(args)
     handlers = {
@@ -578,10 +583,11 @@ def main(argv: list[str] | None = None) -> int:
         "reanalyze": cmd_reanalyze,
         "campaigns": cmd_campaigns,
     }
-    from docia.cli_tools import cmd_bench, cmd_quick
+    from docia.cli_tools import cmd_bench, cmd_quick, cmd_scan
 
     handlers["bench"] = cmd_bench
     handlers["quick"] = cmd_quick
+    handlers["scan"] = cmd_scan
     return handlers[args.command](args, cfg)
 
 

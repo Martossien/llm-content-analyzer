@@ -38,7 +38,7 @@ def config_to_toml(cfg: Config) -> str:
     lines = [f"# docia.toml — écrit par l'interface docia {__version__}"]
     for key in ("db_path", "prompt_path"):
         lines.append(f"{key} = {value(data[key])}")
-    for section in ("llm", "blocks", "filter"):
+    for section in ("llm", "blocks", "filter", "scan"):
         lines.append("")
         lines.append(f"[{section}]")
         for key, v in data[section].items():

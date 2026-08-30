@@ -368,6 +368,12 @@ class DociaApp:
         self.root.mainloop()
 
 
-def launch(config_path: Path | None = None) -> None:
-    """Point d'entrée GUI (`python -m docia`, `docia gui`)."""
-    DociaApp(config_path).run()
+def launch(config_path: Path | None = None, *, smoke: bool = False) -> None:
+    """Point d'entrée GUI (`python -m docia`, `docia gui`). `smoke` : construit toute la
+    fenêtre (onglets admin compris) puis la ferme — contrôle d'un exécutable empaqueté."""
+    app = DociaApp(config_path)
+    if smoke:
+        app.admin_var.set(True)
+        app._toggle_admin()
+        app.root.after(1500, app.root.destroy)
+    app.run()

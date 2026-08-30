@@ -132,11 +132,30 @@ class FilterConfig:
 
 
 @dataclass
+class ScanConfig:
+    """Étape 0 : scanner SMBeagle_enriched piloté par docia (`docia scan`, onglet Accueil)."""
+
+    smbeagle_path: str = ""
+    """Chemin de `SMBeagle.exe` ; vide = à côté de l'exécutable docia, puis PATH."""
+    preserve_access_time: bool = True
+    """Restaure la date d'accès après lecture (hachage/signature) — sinon l'audit
+    « rajeunit » tous les fichiers pour la statistique « non accédé depuis N ans »."""
+    skip_acls: bool = False
+    """Sans énumération des ACL (plus rapide ; colonnes lecture/écriture vides)."""
+    exclude_hidden_shares: bool = True
+    domain: str = ""
+    username: str = ""
+    """Compte SMB explicite (hors Windows ou compte de service) ; le mot de passe
+    n'est jamais écrit dans docia.toml : variable `DOCIA_SMB_PASSWORD` ou saisie."""
+
+
+@dataclass
 class Config:
     db_path: str = "docia.sqlite"
     llm: LLMConfig = field(default_factory=LLMConfig)
     blocks: BlocksConfig = field(default_factory=BlocksConfig)
     filter: FilterConfig = field(default_factory=FilterConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
     prompt_path: str = ""
     """Vide = prompt embarqué `docia/prompts/docia_v3.md`."""
 
@@ -220,6 +239,7 @@ def load_config(path: Path | None) -> Config:
         ("llm", config.llm),
         ("blocks", config.blocks),
         ("filter", config.filter),
+        ("scan", config.scan),
     ):
         section = data.pop(section_name, None)
         if section is not None:
@@ -260,4 +280,12 @@ keep_blocks = true
 [filter]
 min_size_bytes = 100
 max_size_bytes = 104857600
+
+[scan]
+smbeagle_path = ""                 # vide = SMBeagle.exe à côté de Docia.exe, puis PATH
+preserve_access_time = true        # ne pas « rajeunir » les fichiers lus par l'audit (statistique non accédés)
+skip_acls = false                  # true = plus rapide, sans colonnes lecture/écriture
+exclude_hidden_shares = true       # ignore les partages administratifs (C$, ADMIN$…)
+domain = ""                        # compte SMB explicite (facultatif ; mot de passe : variable DOCIA_SMB_PASSWORD)
+username = ""
 """

@@ -78,10 +78,61 @@ class HomeTab:
 
     def _build_step_source(self, parent: Any) -> None:
         ctk = self.ctk
-        card = Card(ctk, parent, "1 · Source", subtitle="scan SMBeagle (CSV)")
+        card = Card(ctk, parent, "1 · Source", subtitle="scanner un partage, ou importer un CSV")
         card.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        row = ctk.CTkFrame(card.body, fg_color="transparent")
-        row.pack(fill="x")
+        self.source_mode = ctk.StringVar(value="scan")
+        modes = ctk.CTkFrame(card.body, fg_color="transparent")
+        modes.pack(fill="x")
+        ctk.CTkRadioButton(
+            modes,
+            text="Scanner maintenant",
+            variable=self.source_mode,
+            value="scan",
+            command=self._source_mode_changed,
+        ).pack(side="left")
+        ctk.CTkRadioButton(
+            modes,
+            text="Importer un CSV SMBeagle existant",
+            variable=self.source_mode,
+            value="csv",
+            command=self._source_mode_changed,
+        ).pack(side="left", padx=(16, 0))
+
+        # -- mode scan
+        self.scan_frame = ctk.CTkFrame(card.body, fg_color="transparent")
+        row = ctk.CTkFrame(self.scan_frame, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 0))
+        self.target_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            row,
+            textvariable=self.target_var,
+            placeholder_text="\\\\serveur\\partage, D:\\dossier ou nom du serveur SMB",
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row, text="Dossier…", width=90, command=self._pick_target).pack(
+            side="left", padx=(6, 0)
+        )
+        row2 = ctk.CTkFrame(self.scan_frame, fg_color="transparent")
+        row2.pack(fill="x", pady=(6, 0))
+        self.scan_button = ctk.CTkButton(
+            row2, text="Scanner, importer et préparer", width=220, command=self._scan
+        )
+        self.scan_button.pack(side="left")
+        self.scan_stop_button = ctk.CTkButton(
+            row2,
+            text="■  Arrêter",
+            width=100,
+            fg_color=ACCENT_STOP,
+            state="disabled",
+            command=self._stop,
+        )
+        self.scan_stop_button.pack(side="left", padx=(6, 0))
+        self.scanner_label = ctk.CTkLabel(row2, text="", font=self._small())
+        self.scanner_label.pack(side="left", padx=10)
+
+        # -- mode csv
+        self.csv_frame = ctk.CTkFrame(card.body, fg_color="transparent")
+        row = ctk.CTkFrame(self.csv_frame, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 0))
         self.csv_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             row, textvariable=self.csv_var, placeholder_text="chemin du CSV SMBeagle"
@@ -89,8 +140,8 @@ class HomeTab:
         ctk.CTkButton(row, text="Choisir…", width=90, command=self._pick_csv).pack(
             side="left", padx=(6, 0)
         )
-        row2 = ctk.CTkFrame(card.body, fg_color="transparent")
-        row2.pack(fill="x", pady=(8, 0))
+        row2 = ctk.CTkFrame(self.csv_frame, fg_color="transparent")
+        row2.pack(fill="x", pady=(6, 0))
         self.import_button = ctk.CTkButton(
             row2, text="Importer et préparer", width=180, command=self._import_and_plan
         )
@@ -99,10 +150,20 @@ class HomeTab:
             row2, text="Préparer seulement", width=150, command=self._plan, fg_color="#6b7280"
         )
         self.plan_button.pack(side="left", padx=(6, 0))
+
         self.source_status = ctk.CTkLabel(
             card.body, text="", anchor="w", justify="left", font=self._small()
         )
         self.source_status.pack(fill="x", pady=(8, 0))
+        self._source_mode_changed()
+
+    def _source_mode_changed(self) -> None:
+        if self.source_mode.get() == "scan":
+            self.csv_frame.pack_forget()
+            self.scan_frame.pack(fill="x", before=self.source_status)
+        else:
+            self.scan_frame.pack_forget()
+            self.csv_frame.pack(fill="x", before=self.source_status)
 
     def _build_step_server(self, parent: Any) -> None:
         ctk = self.ctk
@@ -230,6 +291,65 @@ class HomeTab:
         return go
 
     # ---------------------------------------------------------------- actions
+    def _pick_target(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askdirectory(title="Dossier ou partage monté à scanner")
+        if path:
+            self.target_var.set(path)
+
+    def _scan(self) -> None:
+        from docia.scan import ScanProfile
+
+        target = self.target_var.get().strip()
+        if not target:
+            self.app.log("indique un dossier, un partage (\\\\serveur\\partage) ou un serveur")
+            return
+        looks_like_path = (
+            ("\\" in target) or ("/" in target) or (len(target) > 1 and target[1] == ":")
+        )
+        profile = (
+            ScanProfile(local_paths=[target]) if looks_like_path else ScanProfile(hosts=[target])
+        )
+        if not self.app.db_path().exists():
+            self.app.log("crée ou ouvre d'abord une campagne (bandeau : Nouvelle…)")
+            return
+        app, cfg = self.app, self.app.collect_config()
+
+        def on_event(ev: Any) -> None:
+            app.ui(lambda: self._show_scan_event(ev))
+
+        def work() -> None:
+            with app.open_db() as db:
+                from docia import service
+
+                result, report, plan_report = service.scan_campaign(
+                    db, cfg, profile, on_event=on_event, on_line=app.log, cancel=app.cancel
+                )
+            app.log(
+                f"scan terminé : {format_int(result.files)} fichiers en {format_duration(result.elapsed_s)} — "
+                f"{report.new} nouveaux, {report.updated} modifiés, {report.unchanged} inchangés — "
+                f"{plan_report.pending} à analyser, {plan_report.excluded} exclus"
+            )
+            app.remember_campaign(csv_path=str(result.csv_path))
+
+        app.run_in_thread(work, "scan")
+
+    def _show_scan_event(self, ev: Any) -> None:
+        stage = {
+            "discovery": "découverte",
+            "shares": "partages",
+            "files": "fichiers",
+            "writing": "écriture",
+            "done": "terminé",
+            "error": "erreur",
+        }.get(str(ev.stage), str(ev.stage))
+        self.source_status.configure(
+            text=f"scan · {stage} · {format_int(ev.hosts)} serveur(s), {format_int(ev.shares)} partage(s), "
+            f"{format_int(ev.files)} fichiers · {format_duration(ev.elapsed_s)}"
+            + (f" — {ev.message}" if ev.message else "")
+        )
+
     def _pick_csv(self) -> None:
         from tkinter import filedialog
 
@@ -372,6 +492,7 @@ class HomeTab:
     def _busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
         for b in (
+            self.scan_button,
             self.import_button,
             self.plan_button,
             self.test_button,
@@ -381,6 +502,7 @@ class HomeTab:
         ):
             b.configure(state=state)
         self.stop_button.configure(state="normal" if busy else "disabled")
+        self.scan_stop_button.configure(state="normal" if busy else "disabled")
 
     def refresh(self) -> None:
         cfg = self.app.config
@@ -388,11 +510,20 @@ class HomeTab:
             text=f"{cfg.llm.transport} · {cfg.llm.base_url}\nmodèle {cfg.llm.model}"
             f" · raisonnement {'activé' if cfg.llm.enable_thinking else 'désactivé'}"
         )
+        from docia.scan import find_smbeagle
+
+        scanner = find_smbeagle(cfg.scan.smbeagle_path)
+        self.scanner_label.configure(
+            text=f"scanner : {scanner.name}"
+            if scanner
+            else "scanner SMBeagle introuvable (réglages admin)",
+            text_color="#374151" if scanner else ACCENT_STOP,
+        )
         if not self.app.db_path().exists():
             for tile in self._tiles.values():
                 tile.set("—")
             self.source_status.configure(
-                text="Aucune campagne : choisis un CSV puis « Importer et préparer »."
+                text="Aucune campagne : « Nouvelle… » dans le bandeau, puis scanner ou importer un CSV."
             )
             self.run_status.configure(text="")
             self.run_eta.configure(text="")

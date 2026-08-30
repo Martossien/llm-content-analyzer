@@ -210,3 +210,31 @@ le pipeline réserve en dessous `2 000 + 2 × (plancher + quota/fichier + budget
 pour que le segment le plus gros laisse la place de la réponse même doublée ; le client borne
 `max_tokens` à la place restante (`clamp_to_context`). Avant : segment ≤ 244 000 + sortie 27 000
 = 271 000 > 262 144 → vLLM aurait refusé la requête (400).
+
+
+## 14. Étape 0 — scanner piloté par docia (30/08, décision utilisateur)
+
+Pas de GUI séparée pour smbeagle : **docia pilote `SMBeagle.exe` en sous-processus** (`scan.py`,
+sans Tk ni argparse ; `service.scan_campaign` = scanner → import → plan ; CLI `docia scan` ; Accueil
+« 1 · Source » à deux modes : scanner maintenant / importer un CSV). Le scanner est trouvé via
+`scan.smbeagle_path`, puis à côté de l'exécutable docia, puis le PATH. Contrat avec
+smbeagle_enriched (implémenté de son côté) : `--progress-json` (lignes `{"event":"progress",
+"stage","hosts","shares","files","elapsed_s"}` puis `done`/`error`), `--manifest chemin.json`
+(options, cibles, compteurs, colonnes), codes de retour 0/1/2/3, `--preserve-access-time`.
+Sans progression JSON, docia relaie les lignes texte et compte les lignes du CSV.
+
+**Rescan** (« attention si on relance une analyse ») : `upsert_files` ne remet en analyse que les
+fichiers dont empreinte/taille/date de modification changent (`content_version + 1`) ; les
+vérifications humaines restent ; schéma **v5** ajoute `files.access_time_first` (première date
+d'accès observée, réinitialisée seulement quand le contenu change) et `scans.kind/manifest_json/
+scanner_elapsed_s`. Les vues « ancienneté » et « candidats au nettoyage » utilisent
+`COALESCE(access_time_first, access_time)` : l'audit (hachage, signature, extraction) ne rajeunit
+pas les fichiers inchangés.
+
+**Exe Windows complet** (« attention à ne pas oublier les paquets ») : les extracteurs DocFuse
+importent leurs bibliothèques **paresseusement** (pypdf, pdfminer, pypdfium2, python-docx, python-pptx,
+openpyxl, lxml, bs4, striprtf, ftfy, oxmsg, office_oxide…) — invisibles pour PyInstaller → l'exe
+démarrait puis plantait au premier .docx/.pdf. `Docia.spec` les ratisse (`collect_all`, données et
+binaires natifs compris) et la CI Windows exécute l'exe sur les fixtures DocFuse (`quick --dry-run`)
+et ouvre/ferme la fenêtre (`gui --smoke`, onglets admin compris) : un paquet manquant casse la CI,
+pas le poste de l'utilisateur.

@@ -27,11 +27,17 @@ from docia.ingest.smbeagle_csv import ImportReport, import_csv
 from docia.llm.schema import prompt_hash
 from docia.models import FileStatus
 from docia.pipeline import RunReport, resolve_system_prompt, run_pipeline
+from docia.scan import ScanError, ScanEvent, ScanProfile, ScanResult, run_scan
 from docia.views import RunStat, runs_summary
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "scan_campaign",
+    "scans_dir_for",
+    "ScanProfile",
+    "ScanEvent",
+    "ScanResult",
     "BACKUP_SUFFIX",
     "DEFAULT_KEEP_BACKUPS",
     "HOME_ENV",
@@ -228,6 +234,59 @@ def import_scan(db: Database, csv_path: Path, *, strict: bool = False) -> Import
     )
     remember_campaign(db.path, path)
     return report
+
+
+def scan_campaign(
+    db: Database,
+    cfg: Config,
+    profile: ScanProfile,
+    *,
+    csv_out: Path | None = None,
+    on_event: Callable[[ScanEvent], None] | None = None,
+    on_line: Callable[[str], None] | None = None,
+    cancel: threading.Event | None = None,
+    password: str = "",
+    do_plan: bool = True,
+) -> tuple[ScanResult, ImportReport, PlanReport]:
+    """Étape 0 complète : scanner SMBeagle → import du CSV → préparation (plan).
+
+    Le CSV est écrit à côté de la base (`<base>.scans/scan_AAAAMMJJ-HHMMSS.csv`) avec son
+    manifeste ; le scan importé porte `kind='scan'` et le manifeste. Un scan arrêté
+    par `cancel` est quand même importé (CSV partiel : ce qui a été vu est utile).
+    Le mot de passe SMB ne vient jamais de la config : argument ou `DOCIA_SMB_PASSWORD`.
+    """
+    profile.preserve_access_time = cfg.scan.preserve_access_time
+    profile.skip_acls = cfg.scan.skip_acls
+    profile.exclude_hidden_shares = cfg.scan.exclude_hidden_shares
+    if cfg.scan.username and not profile.username:
+        profile.domain, profile.username = cfg.scan.domain, cfg.scan.username
+    if profile.username and not profile.password:
+        profile.password = password or os.environ.get("DOCIA_SMB_PASSWORD", "")
+    target = csv_out or scans_dir_for(db.path) / f"scan_{_stamp()}.csv"
+    try:
+        result = run_scan(
+            profile,
+            target,
+            configured_exe=cfg.scan.smbeagle_path,
+            on_event=on_event,
+            on_line=on_line,
+            cancel=cancel,
+        )
+    except ScanError as exc:
+        raise ServiceError(str(exc)) from exc
+    report = import_scan(db, result.csv_path, strict=False)
+    db.annotate_scan(
+        report.scan_id,
+        manifest_json=json.dumps(result.manifest, ensure_ascii=False) if result.manifest else "",
+        scanner_elapsed_s=result.elapsed_s,
+    )
+    plan_report = plan(db, cfg) if do_plan else PlanReport(pending=0, excluded=0)
+    return result, report, plan_report
+
+
+def scans_dir_for(db_path: Path) -> Path:
+    """Dossier des CSV produits par le scanner, à côté de la base (`<base>.scans/`)."""
+    return Path(str(db_path) + ".scans")
 
 
 def plan(db: Database, cfg: Config) -> PlanReport:

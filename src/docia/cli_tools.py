@@ -1,4 +1,4 @@
-"""Sous-commandes « outils » de la CLI : `docia bench` et `docia quick`.
+"""Sous-commandes « outils » de la CLI : `docia bench`, `docia quick` et `docia scan`.
 
 Le module s'enregistre dans le parseur principal (`cli.py`) via `register()`,
 qui rend les gestionnaires associés — même contrat que les autres commandes :
@@ -21,7 +21,23 @@ Handler = Callable[[argparse.Namespace, Config], int]
 def register(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> dict[str, Handler]:
-    """Ajoute `bench` et `quick` au parseur et rend leurs gestionnaires."""
+    """Ajoute `bench`, `quick` et `scan` au parseur et rend leurs gestionnaires."""
+    s = sub.add_parser(
+        "scan", help="étape 0 : lance SMBeagle_enriched sur un périmètre, importe et prépare"
+    )
+    s.add_argument(
+        "--local-path", action="append", default=[], help="dossier local ou UNC monté (répétable)"
+    )
+    s.add_argument("--host", action="append", default=[], help="serveur SMB (répétable)")
+    s.add_argument("--share", action="append", default=[], help="partage à retenir (répétable)")
+    s.add_argument("--exclude-share", action="append", default=[], help="partage à ignorer")
+    s.add_argument("--csv", type=Path, default=None, help="CSV de sortie (défaut : <base>.scans/)")
+    s.add_argument(
+        "--username", default="", help="compte SMB explicite (mot de passe : DOCIA_SMB_PASSWORD)"
+    )
+    s.add_argument("--domain", default="")
+    s.add_argument("--no-plan", action="store_true", help="importer sans préparer")
+    s.add_argument("--json", action="store_true", help="bilan en JSON")
     p = sub.add_parser("bench", help="mesure la vitesse du serveur LLM (blocs synthétiques)")
     p.add_argument("--blocks", type=int, default=6, help="nombre de blocs envoyés (défaut 6)")
     p.add_argument(
@@ -87,3 +103,64 @@ def cmd_quick(args: argparse.Namespace, cfg: Config) -> int:
         print(report.message, file=sys.stderr)
         return 1
     return 2 if report.errors or report.llm_errors else 0
+
+
+def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
+    """`docia scan` : scanner → import → préparation, progression sur stderr."""
+    from docia import service
+    from docia.db import Database
+    from docia.scan import ScanProfile
+
+    profile = ScanProfile(
+        local_paths=list(args.local_path),
+        hosts=list(args.host),
+        shares=list(args.share),
+        exclude_shares=list(args.exclude_share),
+        domain=args.domain,
+        username=args.username,
+    )
+    errors = profile.validate()
+    if errors:
+        print("scan : " + " ; ".join(errors), file=sys.stderr)
+        return 2
+
+    def on_event(ev: object) -> None:
+        stage = getattr(ev, "stage", "")
+        files = getattr(ev, "files", 0)
+        print(f"scan [{stage}] {files} fichiers", file=sys.stderr)
+
+    try:
+        with Database(cfg.db_path) as db:
+            result, report, plan_report = service.scan_campaign(
+                db,
+                cfg,
+                profile,
+                csv_out=args.csv,
+                on_event=on_event,
+                on_line=None if args.json else lambda line: print(line, file=sys.stderr),
+                do_plan=not args.no_plan,
+            )
+    except service.ServiceError as exc:
+        print(f"scan : {exc}", file=sys.stderr)
+        return 1
+    summary = {
+        "csv": str(result.csv_path),
+        "files": result.files,
+        "elapsed_s": round(result.elapsed_s, 1),
+        "new": report.new,
+        "updated": report.updated,
+        "unchanged": report.unchanged,
+        "invalid": report.invalid,
+        "pending": plan_report.pending,
+        "excluded": plan_report.excluded,
+    }
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"scan : {result.files} fichiers en {result.elapsed_s:.0f} s → {result.csv_path}\n"
+            f"import : {report.new} nouveaux, {report.updated} modifiés, {report.unchanged} inchangés, "
+            f"{report.invalid} invalides — préparation : {plan_report.pending} à analyser, "
+            f"{plan_report.excluded} exclus"
+        )
+    return 0
