@@ -33,22 +33,27 @@ class LLMConfig:
     """Budget de sortie par fichier (5 domaines + justifications ≈ 500–600 tokens)."""
     max_tokens_floor: int = 800
     max_tokens_cap: int = 32000
-    max_context_tokens: int = 250_000
+    max_context_tokens: int = 262_144
     """Plafond du modèle servi (tokens avec marge, prompt compris) — aligner sur
-    `--max-model-len` (servir le contexte natif du modèle, 262144 pour Qwen3.8). Un fichier seul au-delà n'est ni
+    `--max-model-len` du serveur (contexte natif du modèle, 262144 pour Qwen3.8) ; le pipeline garde en dessous la place du prompt système et de la réponse (raisonnement compris). Un fichier seul au-delà n'est ni
     tronqué ni mis en erreur : il est découpé en segments complets analysés
     séparément puis agrégés (sévérité = max des segments)."""
     enable_thinking: bool = True
     """Raisonnement activé par défaut (décision du 30/08 : c'est le point fort du
     modèle, et le même serveur sert d'autres usages) : envoie
-    `chat_template_kwargs.enable_thinking` et réserve `thinking_budget_tokens`
-    en plus dans `max_tokens`. Le JSON reste exigé dans la réponse finale ; un
-    bloc `<think>…</think>` resté dans le contenu est ignoré."""
-    thinking_budget_tokens: int = 12_000
-    reasoning_effort: str = "low"
+    `chat_template_kwargs.enable_thinking`, réserve `thinking_budget_tokens` en plus
+    dans `max_tokens` **et impose ce budget** (`thinking_token_budget`, vLLM avec
+    `--reasoning-parser`) : au-delà, vLLM force `</think>` et le JSON garde sa place."""
+    thinking_budget_tokens: int = 6_000
+    """Budget de raisonnement imposé par requête. Banc du 30/08 (Qwen3.8-27B, 8 blocs
+    de 2 K à 84 K tokens) : effort `medium` raisonne 500–4 400 tokens ; `xhigh` 1 500–18 000
+    et, sans budget, rend parfois une réponse **vide** après `</think>` ; avec 6 000
+    imposés, 18/18 JSON valides."""
+    reasoning_effort: str = "medium"
     """Effort de raisonnement demandé au modèle (Qwen3.8 : `low` / `medium` / `xhigh`,
-    vide = défaut du modèle). `low` garde l'essentiel du bénéfice pour une
-    classification sans les milliers de tokens d'un raisonnement long."""
+    vide = défaut du modèle, `xhigh`). `medium` : mêmes classifications que `xhigh`
+    sur le banc, 2–3× plus rapide, corrige des sur-classifications de `low`
+    (bulletins de paie C3 → C2). `xhigh` n'est sûr qu'avec le budget imposé."""
 
     def resolved_api_key(self) -> str:
         return self.api_key or os.environ.get("DOCIA_API_KEY", "") or "dummy"
@@ -163,7 +168,7 @@ class Config:
             errors.append("blocks.batch_files doit être >= 1")
         if self.llm.thinking_budget_tokens < 0:
             errors.append("llm.thinking_budget_tokens doit être >= 0")
-        if self.llm.reasoning_effort not in ("", "low", "medium", "high", "xhigh"):
+        if self.llm.reasoning_effort not in ("", "low", "medium", "xhigh"):
             errors.append(f"llm.reasoning_effort inconnu : {self.llm.reasoning_effort}")
         if self.llm.max_context_tokens < self.blocks.block_tokens:
             errors.append(
@@ -239,10 +244,10 @@ model = "qwen38"
 max_in_flight = 8
 timeout_s = 900
 max_retries = 3
-max_context_tokens = 250000        # ≈ --max-model-len du serveur (262144 = natif Qwen3.8) ; au-delà, fichier découpé en segments agrégés
+max_context_tokens = 262144        # = --max-model-len du serveur (262144 = natif Qwen3.8) ; la sortie est réservée en dessous ; fichier plus grand → segments agrégés
 enable_thinking = true             # raisonnement activé (qualité) ; false pour du volume pur
-thinking_budget_tokens = 12000     # réservé en plus de max_tokens pour le raisonnement
-reasoning_effort = "low"           # low | medium | xhigh | "" (défaut du modèle) — Qwen3.8
+thinking_budget_tokens = 6000      # budget de raisonnement imposé par requête (vLLM thinking_token_budget) et réservé dans max_tokens
+reasoning_effort = "medium"        # low | medium | xhigh — Qwen3.8 (xhigh : seulement avec budget imposé, 2–3× plus lent)
 
 [blocks]
 block_tokens = 32000               # 16–64K recommandé

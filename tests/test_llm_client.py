@@ -279,6 +279,8 @@ def test_reasoning_content_captured() -> None:
     assert result.finish_reason == "stop"
     body["choices"][0]["message"].pop("reasoning_content")
     assert client._to_result(httpx.Response(200, json=body), latency_ms=5).reasoning_chars == 0
+    body["choices"][0]["message"]["reasoning"] = "abc"  # nom vLLM ≥ 0.11
+    assert client._to_result(httpx.Response(200, json=body), latency_ms=5).reasoning_chars == 3
 
 
 async def test_truncated_answer_is_retried_with_doubled_budget(
@@ -325,3 +327,55 @@ def test_reasoning_effort_in_template_kwargs(tmp_path: Path) -> None:
         spec
     )
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_max_tokens_clamped_to_served_context(tmp_path: Path) -> None:
+    """Un segment qui frôle le plafond servi ne demande jamais plus que la place restante."""
+    from docia.config import LLMConfig
+    from docia.llm.client import _MIN_OUTPUT_TOKENS, _SYSTEM_PROMPT_TOKENS, LLMClient
+    from docia.models import BlockFile, BlockSpec
+
+    block = tmp_path / "b.md"
+    block.write_text("## SOURCE: a.txt\n\ntexte\n", encoding="utf-8")
+    cfg = LLMConfig(max_context_tokens=262_144, enable_thinking=True, thinking_budget_tokens=6_000)
+    client = LLMClient(cfg, "system")
+    big = BlockSpec(
+        path=block,
+        files=[BlockFile(1, "a.txt", 1)],
+        tokens_estimated=255_000,
+        tokens_with_margin=258_000,
+    )
+    payload = client.build_payload(big)
+    assert payload["max_tokens"] == 262_144 - 258_000 - _SYSTEM_PROMPT_TOKENS
+    doubled = client.build_payload(big, max_tokens=payload["max_tokens"] * 2)
+    assert doubled["max_tokens"] == payload["max_tokens"]
+    tiny = BlockSpec(
+        path=block,
+        files=[BlockFile(1, "a.txt", 1)],
+        tokens_estimated=261_900,
+        tokens_with_margin=262_000,
+    )
+    assert client.build_payload(tiny)["max_tokens"] == _MIN_OUTPUT_TOKENS
+    small = BlockSpec(
+        path=block, files=[BlockFile(1, "a.txt", 1)], tokens_estimated=100, tokens_with_margin=120
+    )
+    assert (
+        client.build_payload(small)["max_tokens"]
+        == cfg.max_tokens_floor + cfg.max_tokens_per_file + 6_000
+    )
+
+
+def test_output_reserve_covers_doubled_retry() -> None:
+    """La réserve du pipeline couvre prompt système + réponse doublée (raisonnement compris)."""
+    from docia.config import LLMConfig
+    from docia.pipeline import SYSTEM_PROMPT_RESERVE_TOKENS, output_reserve_tokens
+
+    llm = LLMConfig(
+        max_tokens_floor=800,
+        max_tokens_per_file=700,
+        enable_thinking=True,
+        thinking_budget_tokens=6_000,
+    )
+    assert output_reserve_tokens(llm) == SYSTEM_PROMPT_RESERVE_TOKENS + 2 * (800 + 700 + 6_000)
+    llm.enable_thinking = False
+    assert output_reserve_tokens(llm) == SYSTEM_PROMPT_RESERVE_TOKENS + 2 * (800 + 700)

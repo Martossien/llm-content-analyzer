@@ -21,6 +21,9 @@ from docia.models import BlockSpec, LLMResult, LLMUsage
 
 logger = logging.getLogger(__name__)
 
+_SYSTEM_PROMPT_TOKENS = 1_500
+_MIN_OUTPUT_TOKENS = 512
+
 CONNECT_TIMEOUT_S = 10.0
 """Un serveur injoignable doit se voir vite ; la génération, elle, peut être longue."""
 
@@ -117,12 +120,21 @@ class LLMClient:
         budget = min(self.cfg.max_tokens_cap, wanted)
         if self.cfg.enable_thinking:
             budget += self.cfg.thinking_budget_tokens
-        return budget
+        return self.clamp_to_context(budget, spec)
+
+    def clamp_to_context(self, max_tokens: int, spec: BlockSpec) -> int:
+        """Jamais plus que la place restante sous `max_context_tokens` (= `--max-model-len`
+        servi) après le bloc et le prompt système ; sinon vLLM refuse la requête."""
+        room = self.cfg.max_context_tokens - spec.tokens_with_margin - _SYSTEM_PROMPT_TOKENS
+        return max(_MIN_OUTPUT_TOKENS, min(max_tokens, room))
 
     def build_payload(self, spec: BlockSpec, *, max_tokens: int | None = None) -> dict[str, Any]:
         """Corps JSON de la requête, selon le transport configuré."""
-        if max_tokens is None:
-            max_tokens = self.max_tokens_for(spec)
+        max_tokens = (
+            self.max_tokens_for(spec)
+            if max_tokens is None
+            else self.clamp_to_context(max_tokens, spec)
+        )
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "temperature": self.cfg.temperature,
@@ -273,7 +285,12 @@ class LLMClient:
         usage_raw = data.get("usage")
         usage_dict: dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
         finish = first.get("finish_reason")
-        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+        # vLLM : `reasoning_content` (≤ 0.10) puis `reasoning` (≥ 0.11, nom OpenAI)
+        reasoning = (
+            (message.get("reasoning") or message.get("reasoning_content"))
+            if isinstance(message, dict)
+            else None
+        )
         return LLMResult(
             content=content,
             reasoning_chars=len(reasoning) if isinstance(reasoning, str) else 0,

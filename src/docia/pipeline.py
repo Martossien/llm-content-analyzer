@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from docia.blocks.builder import build_blocks
-from docia.config import Config
+from docia.config import Config, LLMConfig
 from docia.db import Database
 from docia.llm.aggregate import aggregate_segments
 from docia.llm.client import LLMClient, LLMError
@@ -28,9 +28,23 @@ from docia.models import BlockSpec, FileStatus
 logger = logging.getLogger(__name__)
 
 MAX_FILE_ATTEMPTS = 2
-PROMPT_RESERVE_TOKENS = 6_000
-"""Tokens gardés libres sous `llm.max_context_tokens` pour le prompt système, le
-gabarit et la réponse JSON quand un fichier tronqué occupe presque tout le contexte."""
+SYSTEM_PROMPT_RESERVE_TOKENS = 2_000
+"""Tokens gardés libres pour le prompt système et le gabarit de conversation."""
+
+
+def output_reserve_tokens(llm: LLMConfig) -> int:
+    """Tokens à garder libres sous `llm.max_context_tokens` pour qu'un segment qui
+    occupe presque tout le contexte laisse la place au prompt système et à la
+    réponse — raisonnement compris, et même après le renvoi avec budget doublé
+    (`LLMClient.analyze_block`). Sans cela vLLM refuse la requête (400)."""
+    single = llm.max_tokens_floor + llm.max_tokens_per_file
+    if llm.enable_thinking:
+        single += llm.thinking_budget_tokens
+    return SYSTEM_PROMPT_RESERVE_TOKENS + 2 * min(
+        single, llm.max_tokens_cap + llm.thinking_budget_tokens
+    )
+
+
 """Un fichier absent de la réponse ou dans un bloc en erreur est retenté une
 fois (dans un autre bloc), puis passe en `error` — jamais de boucle infinie."""
 
@@ -127,7 +141,9 @@ async def _run(
     work_dir = cfg.work_dir() / f"run_{run_id:04d}"
     if cfg.blocks.max_file_tokens <= 0:
         # Réserve pour le prompt système et la réponse JSON du fichier tronqué.
-        cfg.blocks.max_file_tokens = max(2_000, cfg.llm.max_context_tokens - PROMPT_RESERVE_TOKENS)
+        cfg.blocks.max_file_tokens = max(
+            2_000, cfg.llm.max_context_tokens - output_reserve_tokens(cfg.llm)
+        )
 
     # 1. Reprise : blocs d'un run précédent restés sans résultat, fichiers `queued` orphelins.
     requeued = db.requeue_stale()

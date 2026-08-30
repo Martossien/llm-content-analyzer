@@ -177,3 +177,36 @@ plus tard » en web v4), sans logique métier dans `gui/` :
 Modules : `theme.py` (palette de sévérité commune au rapport HTML, libellés FR, formats),
 `widgets.py` (KpiTile, Badge, Card, BarChart, Table, ReadOnlyText), `helpers.py` (fonctions pures
 testées : avancement, ETA, débit, titre de campagne), `service_shim.py`. Thème clair, police 13.
+
+## 13. Budget de raisonnement (banc du 30/08, soir — « il ne faut pas regarder le souci de budget de thinking ? »)
+
+**Constat.** docia *réservait* 12 000 tokens de raisonnement dans `max_tokens` sans rien imposer :
+le modèle pouvait tout dépenser en `<think>` et tronquer le JSON (contourné par un renvoi à budget
+doublé). Le gabarit Qwen3.8 met `reasoning_effort` à **`xhigh` par défaut** ; vLLM (build local du
+06/08, `--reasoning-parser qwen3`) accepte `thinking_token_budget` par requête et force `</think>`
+au-delà (sonde : budget 40 → 40 tokens de raisonnement, réponse quand même rendue).
+
+**Mesures** (`scratchpad/think/`, 8 blocs réels de 1,9 K à 84 K tokens de prompt, 1 à 8 fichiers,
+`max_tokens` 40 000 = non contraint) :
+
+| réglage | raisonnement (tokens) | JSON valides | temps (bloc 17 K, 8 fichiers) | classes |
+|---|---|---|---|---|
+| low | 300 – 1 900 | 8/8 | 107 s | sur-classe (bulletins de paie **C3**) |
+| medium | 500 – 4 400 | 8/8 | 237 s* / 106 s | C2/high, stable |
+| xhigh (sans budget) | 1 500 – **18 000** | **6/8** — 2 réponses **vides** après `</think>` (`finish=stop`, 1 token) | 345 s | C2/high |
+| xhigh + budget 6 000 | 5 999 (saturé 5×/6) | 6/6 | 190 s | idem medium ± 1 classe |
+| medium + budget 2 000 | ≤ 1 999 | 6/6 | 106 s | identiques à medium 6 000 |
+
+\* mesure bruitée (4 requêtes en vol dont un prefill de 84 K).
+
+**Décisions.** `reasoning_effort = "medium"` ; `thinking_budget_tokens = 6 000`, envoyé comme
+`thinking_token_budget` (transport vLLM) **et** réservé dans `max_tokens` ; `xhigh` reste
+disponible (onglet Serveur) mais n'est sûr qu'avec le budget imposé, pour 2–3× le temps et sans
+gain de classification observé. Le renvoi à budget doublé sur `finish_reason=length` est conservé
+comme filet. `docia bench` mesure désormais le raisonnement (`reasoning_content`).
+
+**Corollaire corrigé.** `llm.max_context_tokens` = longueur servie (`--max-model-len`, 262 144) ;
+le pipeline réserve en dessous `2 000 + 2 × (plancher + quota/fichier + budget de raisonnement)`
+pour que le segment le plus gros laisse la place de la réponse même doublée ; le client borne
+`max_tokens` à la place restante (`clamp_to_context`). Avant : segment ≤ 244 000 + sortie 27 000
+= 271 000 > 262 144 → vLLM aurait refusé la requête (400).
