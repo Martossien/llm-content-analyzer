@@ -8,6 +8,7 @@ Codes retour : 0 OK, 1 erreur (config, base, LLM injoignable), 2 erreurs partiel
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import logging
@@ -545,7 +546,18 @@ def cmd_retry(_args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _utf8_console() -> None:
+    """Console Windows en cp1252 par défaut : les accents des messages sortent en `�`.
+    On passe stdout/stderr en UTF-8 (sans jamais planter si le flux ne le permet pas)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):  # flux fermé ou redirigé
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
