@@ -32,6 +32,10 @@ class LLMConfig:
     max_tokens_per_file: int = 400
     max_tokens_floor: int = 500
     max_tokens_cap: int = 16000
+    max_context_tokens: int = 60_000
+    """Plafond du modèle servi (tokens avec marge, prompt compris). Un fichier seul
+    au-delà (bloc « hors plafond ») n'est pas envoyé : il passe en erreur avec sa
+    taille, plutôt qu'un refus 400 du serveur. Aligner sur `--max-model-len`."""
 
     def resolved_api_key(self) -> str:
         return self.api_key or os.environ.get("DOCIA_API_KEY", "") or "dummy"
@@ -209,6 +213,7 @@ model = "qwen38"
 max_in_flight = 8
 timeout_s = 900
 max_retries = 3
+max_context_tokens = 60000         # plafond du modèle servi (--max-model-len) ; au-delà, fichier en erreur
 
 [blocks]
 block_tokens = 32000               # 16–64K recommandé

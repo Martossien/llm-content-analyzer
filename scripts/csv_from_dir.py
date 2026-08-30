@@ -58,8 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     user, host = getpass.getuser(), socket.gethostname()
     lines = [HEADER]
     count = 0
+    skipped = 0
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        st = path.stat()
+        try:
+            st = path.stat()
+            digest = fast_hash(path)
+        except OSError as exc:  # fichier illisible (montage cassé, verrou, E/S) → ignoré, compté
+            print(f"ignoré ({exc.__class__.__name__}) : {path}", file=sys.stderr)
+            skipped += 1
+            continue
         lines.append(
             ",".join(
                 [
@@ -80,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                     fmt(st.st_atime),
                     quote("Archive"),
                     quote(user),
-                    quote(fast_hash(path)),
+                    quote(digest),
                     quote("unknown"),
                 ]
             )
@@ -89,7 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.max_files and count >= args.max_files:
             break
     args.out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"{count} fichier(s) → {args.out}")
+    print(
+        f"{count} fichier(s) → {args.out}"
+        + (f" ({skipped} illisible(s) ignoré(s))" if skipped else "")
+    )
     return 0
 
 

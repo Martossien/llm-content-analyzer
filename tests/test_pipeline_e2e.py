@@ -72,6 +72,8 @@ def _config(tmp_path: Path, base_url: str, transport: str = "vllm", **blocks: ob
     cfg.llm.max_retries = 1
     cfg.blocks.block_tokens = int(blocks.get("block_tokens", 100_000))
     cfg.blocks.batch_files = int(blocks.get("batch_files", 200))
+    # Sous Windows, tmp_path est dans %LOCALAPPDATA%\Temp → marqueur `\AppData\` exclu par défaut.
+    cfg.filter.excluded_dir_markers = []
     return cfg
 
 
@@ -202,6 +204,10 @@ def test_cli_end_to_end(
         'base_url = "http://127.0.0.1:8000/v1"', f'base_url = "{fake_server.base_url_vllm}"'
     )
     toml = toml.replace("timeout_s = 900", "timeout_s = 30")
+    toml += "\n[filter]\nexcluded_dir_markers = []\n" if "[filter]" not in toml else ""
+    toml = toml.replace(
+        "max_size_bytes = 104857600", "max_size_bytes = 104857600\nexcluded_dir_markers = []"
+    )
     (tmp_path / "docia.toml").write_text(toml, encoding="utf-8")
     assert main(["ingest", str(csv_path)]) == 0
     assert main(["plan"]) == 0
@@ -218,3 +224,27 @@ def test_cli_end_to_end(
     assert text.count("\n") >= 7  # en-tête + 6 lignes
     assert "security_classification" in text
     assert main(["retry"]) == 0
+
+
+def test_block_over_model_context_is_not_sent(
+    tmp_path: Path, corpus: tuple[Path, Path], fake_server
+) -> None:  # type: ignore[no-untyped-def]
+    src, csv_path = corpus
+    (src / "enorme.txt").write_text("Texte volumineux. " * 20_000, encoding="utf-8")
+    csv_path.write_text(
+        csv_path.read_text(encoding="utf-8") + _csv_line(src / "enorme.txt", "hashBIG") + "\n",
+        encoding="utf-8",
+    )
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 20_000
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg)
+        assert report.blocks_skipped == 1
+        assert (report.files_done, report.files_error) == (6, 1)
+        errored = list(db.iter_files(FileStatus.ERROR))
+        assert errored[0].name == "enorme.txt"
+        assert "hors plafond du modèle" in (errored[0].exclusion_reason or "")
+    calls = [r for r in fake_server.requests if "enorme.txt" in json.dumps(r)]
+    assert calls == []

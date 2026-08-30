@@ -38,6 +38,7 @@ class RunReport:
     files_error: int = 0
     blocks_built: int = 0
     blocks_resumed: int = 0
+    blocks_skipped: int = 0
     blocks_done: int = 0
     blocks_error: int = 0
     prompt_tokens: int = 0
@@ -117,6 +118,18 @@ async def _run(
             db.set_file_status(failed.file_id, FileStatus.ERROR, failed.reason)
             report.files_error += 1
         for spec in built.blocks:
+            if spec.tokens_with_margin > cfg.llm.max_context_tokens:
+                # Un fichier seul plus grand que le contexte du modèle : inutile
+                # d'essayer (400 garanti). Signalé avec sa taille, jamais perdu.
+                reason = (
+                    f"hors plafond du modèle : {spec.tokens_with_margin} tokens "
+                    f"> {cfg.llm.max_context_tokens} (llm.max_context_tokens)"
+                )
+                for bf in spec.files:
+                    db.set_file_status(bf.file_id, FileStatus.ERROR, reason)
+                    report.files_error += 1
+                report.blocks_skipped += 1
+                continue
             db.create_block(run_id, spec, prompt_hash=phash, model=cfg.llm.model)
             specs.append(spec)
         report.blocks_built += len(built.blocks)
