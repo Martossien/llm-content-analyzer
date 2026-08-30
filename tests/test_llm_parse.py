@@ -190,4 +190,5 @@ def test_retention_is_validated() -> None:
     missing = make_entry("b.txt")
     del missing["retention"]
     parsed2 = parse_block_response(json.dumps({"files": [missing]}), files)
-    assert parsed2.invalid and "retention" in parsed2.invalid[0][1]
+    assert parsed2.invalid
+    assert "retention" in parsed2.invalid[0][1]
