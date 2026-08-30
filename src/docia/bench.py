@@ -179,6 +179,7 @@ class BenchBlockResult:
     latency_ms: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    reasoning_chars: int = 0
     files: int = 0
     analyses: int = 0
     missing: int = 0
@@ -213,11 +214,17 @@ class BenchReport:
     files_missing: int = 0
     files_per_hour: float = 0.0
     thinking_enabled: bool = False
+    thinking_budget: int = 0
+    """Budget de raisonnement imposé par requête (`llm.thinking_budget_tokens`)."""
     thinking_completion_tokens: int = 0
     """Tokens de sortie du bloc témoin, raisonnement activé (0 si non mesuré)."""
     plain_completion_tokens: int = 0
     """Tokens de sortie du même bloc, `enable_thinking=False` (0 si non mesuré)."""
     thinking_overhead_pct: float = 0.0
+    reasoning_tokens_est: int = 0
+    """Tokens de raisonnement estimés (longueur de `reasoning_content` / 3,5), tous blocs."""
+    reasoning_tokens_max: int = 0
+    """Même estimation pour le bloc qui a le plus raisonné — à comparer au budget imposé."""
     blocks: list[BenchBlockResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -255,6 +262,12 @@ class BenchReport:
             lines.append("thinking : activé, surcoût non mesuré (bloc témoin en échec)")
         else:
             lines.append("thinking : désactivé dans la configuration")
+        if self.reasoning_tokens_est:
+            lines.append(
+                f"raisonnement ≈ {self.reasoning_tokens_est} tokens au total, "
+                f"{self.reasoning_tokens_max} au maximum pour un bloc "
+                f"(budget imposé : {self.thinking_budget})"
+            )
         per_hour = f"{self.files_per_hour:,.0f}".replace(",", " ")
         lines.append(f"débit estimé : ≈ {per_hour} fichiers/heure à ce réglage")
         lines.extend(f"  erreur : {error}" for error in self.errors[:5])
@@ -336,6 +349,7 @@ async def _bench(
         block_tokens=block_tokens,
         in_flight=llm.max_in_flight,
         thinking_enabled=llm.enable_thinking,
+        thinking_budget=llm.thinking_budget_tokens,
         files_expected=blocks * files_per_block,
     )
     work_dir = Path(tempfile.mkdtemp(prefix="docia_bench_"))
@@ -379,6 +393,7 @@ async def _one_block(client: LLMClient, spec: BlockSpec) -> BenchBlockResult:
     outcome.latency_ms = result.usage.latency_ms or int((time.perf_counter() - started) * 1000)
     outcome.prompt_tokens = result.usage.prompt_tokens
     outcome.completion_tokens = result.usage.completion_tokens
+    outcome.reasoning_chars = result.reasoning_chars
     try:
         parsed = parse_block_response(result.content, spec.files)
     except ParseError as exc:
@@ -401,6 +416,8 @@ def _aggregate(report: BenchReport, results: list[BenchBlockResult], say: Progre
     report.prefill_tok_s = report.prompt_tokens / report.wall_s
     report.decode_tok_s = report.completion_tokens / report.wall_s
     report.json_valid = sum(1 for r in results if r.json_valid)
+    report.reasoning_tokens_est = int(sum(r.reasoning_chars for r in results) / 3.5)
+    report.reasoning_tokens_max = int(max((r.reasoning_chars for r in results), default=0) / 3.5)
     report.files_analyzed = sum(r.analyses for r in results)
     report.files_missing = report.files_expected - report.files_analyzed
     report.files_per_hour = report.files_analyzed / report.wall_s * 3600.0

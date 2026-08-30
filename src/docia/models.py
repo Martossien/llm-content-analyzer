@@ -180,3 +180,6 @@ class LLMResult:
     content: str
     usage: LLMUsage
     finish_reason: str | None = None
+    reasoning_chars: int = 0
+    """Longueur du raisonnement renvoyé à part (`reasoning_content`, vLLM avec
+    `--reasoning-parser`) ; 0 si absent. ≈ tokens × 3,5 pour du texte anglais."""

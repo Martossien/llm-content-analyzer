@@ -247,6 +247,38 @@ def test_thinking_adds_template_kwargs_and_budget(tmp_path: Path) -> None:
     assert "chat_template_kwargs" not in LLMClient(
         LLMConfig(enable_thinking=False), "s"
     ).build_payload(spec)
+    # vLLM : le budget est imposé par requête (`thinking_token_budget`), pas seulement réservé
+    assert payload["thinking_token_budget"] == 1234
+    off = LLMClient(LLMConfig(enable_thinking=False), "s").build_payload(spec)
+    assert "thinking_token_budget" not in off
+    owui = LLMClient(
+        LLMConfig(transport="openwebui", enable_thinking=True, thinking_budget_tokens=1234), "s"
+    ).build_payload(spec)
+    assert "thinking_token_budget" not in owui
+
+
+def test_reasoning_content_captured() -> None:
+    """vLLM avec `--reasoning-parser` renvoie le raisonnement à part : sa longueur est mesurée."""
+    import httpx
+
+    from docia.config import LLMConfig
+    from docia.llm.client import LLMClient
+
+    client = LLMClient(LLMConfig(), "s")
+    body = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": "{}", "reasoning_content": "je réfléchis " * 10},
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 50},
+    }
+    result = client._to_result(httpx.Response(200, json=body), latency_ms=5)
+    assert result.reasoning_chars == len("je réfléchis " * 10)
+    assert result.finish_reason == "stop"
+    body["choices"][0]["message"].pop("reasoning_content")
+    assert client._to_result(httpx.Response(200, json=body), latency_ms=5).reasoning_chars == 0
 
 
 async def test_truncated_answer_is_retried_with_doubled_budget(

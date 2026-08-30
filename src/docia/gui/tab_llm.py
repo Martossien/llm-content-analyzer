@@ -11,6 +11,7 @@ from docia.gui.widgets import ReadOnlyText
 
 TRANSPORTS = ("vllm", "openwebui")
 TOKENIZERS = ("approx", "mistral", "openai")
+EFFORTS = ("low", "medium", "xhigh")
 
 
 class LLMTab:
@@ -82,8 +83,15 @@ class LLMTab:
         cell(
             4,
             1,
-            "Budget de raisonnement",
+            "Budget de raisonnement (tokens, imposé)",
             ctk.CTkEntry(grid, textvariable=self.budget_var, width=90),
+        )
+        self.effort_var = ctk.StringVar(value=c.llm.reasoning_effort or "xhigh")
+        cell(
+            6,
+            0,
+            "Effort de raisonnement",
+            ctk.CTkOptionMenu(grid, variable=self.effort_var, values=list(EFFORTS), width=110),
         )
         cell(
             5,
@@ -146,6 +154,7 @@ class LLMTab:
         cfg.llm.thinking_budget_tokens = parse_int(
             self.budget_var.get(), cfg.llm.thinking_budget_tokens, minimum=0
         )
+        cfg.llm.reasoning_effort = self.effort_var.get()
         cfg.blocks.block_tokens = parse_int(
             self.block_tokens_var.get(), cfg.blocks.block_tokens, minimum=1000
         )

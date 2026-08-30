@@ -135,6 +135,14 @@ class LLMClient:
             ),
             "stream": False,
         }
+        if (
+            self.cfg.transport == "vllm"
+            and self.cfg.enable_thinking
+            and self.cfg.thinking_budget_tokens > 0
+        ):
+            # vLLM (≥ 0.11, `--reasoning-parser`) coupe le raisonnement à ce nombre de
+            # tokens et force `</think>` : le JSON garde toujours sa place dans max_tokens.
+            payload["thinking_token_budget"] = self.cfg.thinking_budget_tokens
         if self.cfg.transport == "openwebui":
             payload["messages"] = [
                 {"role": "system", "content": self.system_prompt},
@@ -265,8 +273,10 @@ class LLMClient:
         usage_raw = data.get("usage")
         usage_dict: dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
         finish = first.get("finish_reason")
+        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
         return LLMResult(
             content=content,
+            reasoning_chars=len(reasoning) if isinstance(reasoning, str) else 0,
             usage=LLMUsage(
                 prompt_tokens=_as_int(usage_dict.get("prompt_tokens")),
                 completion_tokens=_as_int(usage_dict.get("completion_tokens")),
