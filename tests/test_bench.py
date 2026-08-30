@@ -86,7 +86,7 @@ def test_bench_measures_thinking_overhead(tmp_path: Path, fake_server) -> None: 
     assert "thinking :" in "\n".join(report.as_lines())
     # Un aller-retour de plus que les blocs mesurés (le bloc témoin sans thinking).
     assert fake_server.post_count == 3
-    assert fake_server.requests[0]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert fake_server.requests[0]["chat_template_kwargs"]["enable_thinking"] is True
     assert "chat_template_kwargs" not in fake_server.requests[-1]
 
 

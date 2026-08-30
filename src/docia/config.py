@@ -29,9 +29,10 @@ class LLMConfig:
     timeout_s: int = 900
     max_retries: int = 3
     temperature: float = 0.0
-    max_tokens_per_file: int = 400
-    max_tokens_floor: int = 500
-    max_tokens_cap: int = 16000
+    max_tokens_per_file: int = 700
+    """Budget de sortie par fichier (5 domaines + justifications ≈ 500–600 tokens)."""
+    max_tokens_floor: int = 800
+    max_tokens_cap: int = 32000
     max_context_tokens: int = 250_000
     """Plafond du modèle servi (tokens avec marge, prompt compris) — aligner sur
     `--max-model-len` (servir le contexte natif du modèle, 262144 pour Qwen3.8). Un fichier seul au-delà n'est ni
@@ -43,7 +44,11 @@ class LLMConfig:
     `chat_template_kwargs.enable_thinking` et réserve `thinking_budget_tokens`
     en plus dans `max_tokens`. Le JSON reste exigé dans la réponse finale ; un
     bloc `<think>…</think>` resté dans le contenu est ignoré."""
-    thinking_budget_tokens: int = 8_000
+    thinking_budget_tokens: int = 12_000
+    reasoning_effort: str = "low"
+    """Effort de raisonnement demandé au modèle (Qwen3.8 : `low` / `medium` / `xhigh`,
+    vide = défaut du modèle). `low` garde l'essentiel du bénéfice pour une
+    classification sans les milliers de tokens d'un raisonnement long."""
 
     def resolved_api_key(self) -> str:
         return self.api_key or os.environ.get("DOCIA_API_KEY", "") or "dummy"
@@ -158,6 +163,8 @@ class Config:
             errors.append("blocks.batch_files doit être >= 1")
         if self.llm.thinking_budget_tokens < 0:
             errors.append("llm.thinking_budget_tokens doit être >= 0")
+        if self.llm.reasoning_effort not in ("", "low", "medium", "high", "xhigh"):
+            errors.append(f"llm.reasoning_effort inconnu : {self.llm.reasoning_effort}")
         if self.llm.max_context_tokens < self.blocks.block_tokens:
             errors.append(
                 "llm.max_context_tokens doit être >= blocks.block_tokens "
@@ -234,7 +241,8 @@ timeout_s = 900
 max_retries = 3
 max_context_tokens = 250000        # ≈ --max-model-len du serveur (262144 = natif Qwen3.8) ; au-delà, fichier découpé en segments agrégés
 enable_thinking = true             # raisonnement activé (qualité) ; false pour du volume pur
-thinking_budget_tokens = 8000      # réservé en plus de max_tokens pour le raisonnement
+thinking_budget_tokens = 12000     # réservé en plus de max_tokens pour le raisonnement
+reasoning_effort = "low"           # low | medium | xhigh | "" (défaut du modèle) — Qwen3.8
 
 [blocks]
 block_tokens = 32000               # 16–64K recommandé

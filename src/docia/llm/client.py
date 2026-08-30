@@ -119,16 +119,17 @@ class LLMClient:
             budget += self.cfg.thinking_budget_tokens
         return budget
 
-    def build_payload(self, spec: BlockSpec) -> dict[str, Any]:
+    def build_payload(self, spec: BlockSpec, *, max_tokens: int | None = None) -> dict[str, Any]:
         """Corps JSON de la requête, selon le transport configuré."""
-        max_tokens = self.max_tokens_for(spec)
+        if max_tokens is None:
+            max_tokens = self.max_tokens_for(spec)
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "temperature": self.cfg.temperature,
             "max_tokens": max_tokens,
             "response_format": response_format(),
             **(
-                {"chat_template_kwargs": {"enable_thinking": True}}
+                {"chat_template_kwargs": self._template_kwargs()}
                 if self.cfg.enable_thinking
                 else {}
             ),
@@ -159,13 +160,41 @@ class LLMClient:
 
     # -- appels ----------------------------------------------------------
 
-    async def analyze_block(self, spec: BlockSpec) -> LLMResult:
-        """Analyse un bloc ; sérialisé par le sémaphore `max_in_flight`."""
-        async with self._semaphore:
-            return await self._analyze(spec)
+    def _template_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"enable_thinking": True}
+        if self.cfg.reasoning_effort:
+            kwargs["reasoning_effort"] = self.cfg.reasoning_effort
+        return kwargs
 
-    async def _analyze(self, spec: BlockSpec) -> LLMResult:
-        payload = self.build_payload(spec)
+    async def analyze_block(self, spec: BlockSpec) -> LLMResult:
+        """Analyse un bloc ; sérialisé par le sémaphore `max_in_flight`.
+
+        Une réponse coupée par `max_tokens` (`finish_reason == "length"`, JSON
+        incomplet) est renvoyée **une fois** avec un budget doublé ; sinon
+        `LLMResponseError` explicite — jamais un JSON illisible mystérieux.
+        """
+        async with self._semaphore:
+            result = await self._analyze(spec)
+            if result.finish_reason != "length":
+                return result
+            first_budget = self.max_tokens_for(spec)
+            doubled = min(first_budget * 2, max(self.cfg.max_tokens_cap * 2, first_budget * 2))
+            logger.warning(
+                "bloc %s : réponse tronquée à %d tokens (finish_reason=length) — renvoi avec %d",
+                spec.path.name,
+                first_budget,
+                doubled,
+            )
+            result = await self._analyze(spec, max_tokens=doubled)
+            if result.finish_reason == "length":
+                raise LLMResponseError(
+                    f"réponse tronquée même avec {doubled} tokens de sortie : augmentez "
+                    "llm.thinking_budget_tokens / max_tokens_cap, ou réduisez blocks.block_tokens"
+                )
+            return result
+
+    async def _analyze(self, spec: BlockSpec, *, max_tokens: int | None = None) -> LLMResult:
+        payload = self.build_payload(spec, max_tokens=max_tokens)
         url = self._url("chat/completions")
         label = spec.path.name
         attempts = self.cfg.max_retries + 1

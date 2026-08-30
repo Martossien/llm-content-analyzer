@@ -239,7 +239,7 @@ def test_thinking_adds_template_kwargs_and_budget(tmp_path: Path) -> None:
     cfg = LLMConfig(enable_thinking=True, thinking_budget_tokens=1234)
     client = LLMClient(cfg, "system")
     payload = client.build_payload(spec)
-    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert payload["chat_template_kwargs"]["enable_thinking"] is True
     assert (
         payload["max_tokens"]
         == min(cfg.max_tokens_cap, cfg.max_tokens_floor + cfg.max_tokens_per_file) + 1234
@@ -247,3 +247,49 @@ def test_thinking_adds_template_kwargs_and_budget(tmp_path: Path) -> None:
     assert "chat_template_kwargs" not in LLMClient(
         LLMConfig(enable_thinking=False), "s"
     ).build_payload(spec)
+
+
+async def test_truncated_answer_is_retried_with_doubled_budget(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """`finish_reason == "length"` → un renvoi avec max_tokens doublé, puis succès."""
+    fake_server.mode = "length_once"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=1)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        result = await client.analyze_block(spec)
+    assert result.finish_reason == "stop"
+    budgets = [r["max_tokens"] for r in fake_server.requests[-2:]]
+    assert budgets[1] == budgets[0] * 2
+
+
+async def test_truncated_twice_raises_explicit_error(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    from docia.llm.client import LLMResponseError
+
+    fake_server.mode = "length_always"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=1)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        with pytest.raises(LLMResponseError, match="tronquée"):
+            await client.analyze_block(spec)
+
+
+def test_reasoning_effort_in_template_kwargs(tmp_path: Path) -> None:
+    from docia.config import LLMConfig
+    from docia.models import BlockFile, BlockSpec
+
+    block = tmp_path / "b.md"
+    block.write_text("## SOURCE: a.txt\n\ntexte\n", encoding="utf-8")
+    spec = BlockSpec(
+        path=block, files=[BlockFile(1, "a.txt", 1)], tokens_estimated=5, tokens_with_margin=6
+    )
+    payload = LLMClient(LLMConfig(enable_thinking=True, reasoning_effort="low"), "s").build_payload(
+        spec
+    )
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True, "reasoning_effort": "low"}
+    payload = LLMClient(LLMConfig(enable_thinking=True, reasoning_effort=""), "s").build_payload(
+        spec
+    )
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}

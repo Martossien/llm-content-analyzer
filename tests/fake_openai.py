@@ -26,6 +26,8 @@ MODES = (
     "drop_last",
     "garbage",
     "http500_then_ok",
+    "length_once",
+    "length_always",
     "http400",
     "slow",
     "extra_ref",
@@ -222,6 +224,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         block = block_text_from_payload(payload)
         content = build_content(extract_sources(block), mode)
+        finish_reason = "stop"
+        if mode == "length_always" or (mode == "length_once" and attempt == 1):
+            content = content[: len(content) // 2]  # JSON coupé net, comme un max_tokens épuisé
+            finish_reason = "length"
         body: dict[str, Any] = {
             "id": "chatcmpl-fake",
             "object": "chat.completion",
@@ -230,7 +236,7 @@ class _Handler(BaseHTTPRequestHandler):
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {
