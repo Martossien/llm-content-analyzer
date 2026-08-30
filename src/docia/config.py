@@ -37,11 +37,13 @@ class LLMConfig:
     `--max-model-len` (servir le contexte natif du modèle, 262144 pour Qwen3.8). Un fichier seul au-delà n'est ni
     tronqué ni mis en erreur : il est découpé en segments complets analysés
     séparément puis agrégés (sévérité = max des segments)."""
-    enable_thinking: bool = False
-    """Modèles à raisonnement : envoie `chat_template_kwargs.enable_thinking` et
-    réserve `thinking_budget_tokens` en plus dans `max_tokens`. Le JSON reste
-    exigé dans la réponse finale ; un bloc `<think>…</think>` est ignoré."""
-    thinking_budget_tokens: int = 4_000
+    enable_thinking: bool = True
+    """Raisonnement activé par défaut (décision du 30/08 : c'est le point fort du
+    modèle, et le même serveur sert d'autres usages) : envoie
+    `chat_template_kwargs.enable_thinking` et réserve `thinking_budget_tokens`
+    en plus dans `max_tokens`. Le JSON reste exigé dans la réponse finale ; un
+    bloc `<think>…</think>` resté dans le contenu est ignoré."""
+    thinking_budget_tokens: int = 8_000
 
     def resolved_api_key(self) -> str:
         return self.api_key or os.environ.get("DOCIA_API_KEY", "") or "dummy"
@@ -231,8 +233,8 @@ max_in_flight = 8
 timeout_s = 900
 max_retries = 3
 max_context_tokens = 250000        # ≈ --max-model-len du serveur (262144 = natif Qwen3.8) ; au-delà, fichier découpé en segments agrégés
-enable_thinking = false            # true pour un modèle à raisonnement (thinking) ; + thinking_budget_tokens
-thinking_budget_tokens = 4000
+enable_thinking = true             # raisonnement activé (qualité) ; false pour du volume pur
+thinking_budget_tokens = 8000      # réservé en plus de max_tokens pour le raisonnement
 
 [blocks]
 block_tokens = 32000               # 16–64K recommandé

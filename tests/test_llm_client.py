@@ -238,4 +238,6 @@ def test_thinking_adds_template_kwargs_and_budget(tmp_path: Path) -> None:
         payload["max_tokens"]
         == min(cfg.max_tokens_cap, cfg.max_tokens_floor + cfg.max_tokens_per_file) + 1234
     )
-    assert "chat_template_kwargs" not in LLMClient(LLMConfig(), "s").build_payload(spec)
+    assert "chat_template_kwargs" not in LLMClient(
+        LLMConfig(enable_thinking=False), "s"
+    ).build_payload(spec)
