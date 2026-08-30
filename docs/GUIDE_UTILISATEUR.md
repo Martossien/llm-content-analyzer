@@ -169,6 +169,9 @@ pratique pour vérifier un document avant de le déposer.
 
 ![Serveur & performances](images/07_serveur.png)
 
+La description **champ par champ** de tous les réglages (interface et `docia.toml`), avec leur
+nature (envoyé par requête / local au poste / descriptif du serveur) : [`docs/REGLAGES.md`](REGLAGES.md).
+
 ## 9. Questions fréquentes
 
 - *Un PDF scanné sort « non évalué »* → `Docia.exe doctor` : l'OCR embarqué doit apparaître
