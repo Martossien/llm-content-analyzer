@@ -32,9 +32,9 @@ class LLMConfig:
     max_tokens_per_file: int = 400
     max_tokens_floor: int = 500
     max_tokens_cap: int = 16000
-    max_context_tokens: int = 120_000
+    max_context_tokens: int = 250_000
     """Plafond du modèle servi (tokens avec marge, prompt compris) — aligner sur
-    `--max-model-len` (≥ 131072 recommandé). Un fichier seul au-delà n'est ni
+    `--max-model-len` (servir le contexte natif du modèle, 262144 pour Qwen3.8). Un fichier seul au-delà n'est ni
     tronqué ni mis en erreur : il est découpé en segments complets analysés
     séparément puis agrégés (sévérité = max des segments)."""
     enable_thinking: bool = False
@@ -230,7 +230,7 @@ model = "qwen38"
 max_in_flight = 8
 timeout_s = 900
 max_retries = 3
-max_context_tokens = 120000        # plafond du modèle servi (--max-model-len ≥ 131072) ; au-delà, fichier découpé en segments agrégés
+max_context_tokens = 250000        # ≈ --max-model-len du serveur (262144 = natif Qwen3.8) ; au-delà, fichier découpé en segments agrégés
 enable_thinking = false            # true pour un modèle à raisonnement (thinking) ; + thinking_budget_tokens
 thinking_budget_tokens = 4000
 

@@ -71,8 +71,8 @@ d'`ALTER` implicite ailleurs.
    `work_dir/run_<id>/block_<n>.md` ; `block_files` reçoit `file_ref = result.files[i].relative_path`.
 4. Fichiers non extraits (`result.ignored`, statut `error`) → `files.status = error` + raison.
 5. **Très gros fichiers — ni tronqués, ni en erreur.** Un fichier seul au-delà de
-   `blocks.max_file_tokens` (dérivé de `llm.max_context_tokens`, défaut 120 000, à aligner sur
-   `--max-model-len` ≥ 131072) est découpé en K **segments complets** aux limites de paragraphes,
+   `blocks.max_file_tokens` (dérivé de `llm.max_context_tokens`, défaut 250 000, aligné sur
+   `--max-model-len` = contexte natif du modèle, 262144 pour Qwen3.8 — on ne se bride pas) est découpé en K **segments complets** aux limites de paragraphes,
    un bloc par segment (`## SOURCE: nom [partie i/K]`). Les K analyses vont dans
    `segment_analyses`, puis `llm/aggregate.py` produit l'analyse du fichier (`analyses.segments = K`)
    par règle **conservatrice** : sécurité et RGPD = maximum des segments, finance/juridique = type
