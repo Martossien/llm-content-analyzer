@@ -157,8 +157,11 @@ pratique pour vérifier un document avant de le déposer.
     l'adresse de la machine qui héberge la LLM, en général **une autre machine** que le poste :
     `http://nom-ou-IP-du-serveur:8000/v1` (vLLM) ou `http://serveur:8080/api` (open-webui) ;
     `127.0.0.1` ne vaut que si la LLM tourne sur le poste lui-même. C'est le **seul flux réseau**
-    de Doc-IA, et il ne transporte que du texte. Ensuite : nom du modèle, clé, et *Contexte du
-    modèle*. Ce dernier est **auto-vérifié** : au début de chaque
+    de Doc-IA, et il ne transporte que du texte. Ensuite : le nom du modèle, la **Clé API** — avec
+    open-webui c'est la clé `sk-…` d'un compte open-webui (Paramètres → Compte → Clés API, à
+    activer par l'admin) ; avec vLLM direct, vide en général (le champ peut aussi venir de la
+    variable `DOCIA_API_KEY`, pour ne rien écrire dans `docia.toml`) — et le *Contexte du modèle*
+    (auto-vérifié). Ce dernier est **auto-vérifié** : au début de chaque
     analyse, docia lit la valeur réellement servie et s'y borne en avertissant si la config diverge
     (`docia doctor` l'affiche aussi).
 - Ligne de commande : `Docia.exe doctor`, `scan`, `run`, `report`, `export`, `backup`,
