@@ -36,6 +36,63 @@ def list_backups(db_path: Path) -> list[Path]:
     return service.list_backups(db_path)
 
 
+def produce_document(
+    app: Any,
+    fmt: str,
+    kind: str,
+    *,
+    on_done: Callable[[Path], None] | None = None,
+) -> None:
+    """Demande l'emplacement, produit le document, puis **ouvre le rapport HTML**.
+
+    Partagé par l'onglet Rapports et par le bouton « Rapport HTML… » des Statistiques :
+    un bouton qui promet un document doit produire ce document, pas seulement changer
+    d'onglet. Le chemin complet est écrit au journal — c'est la réponse à « où est le
+    fichier ? ».
+    """
+    from tkinter import filedialog
+
+    if not app.db_path().exists():
+        app.log("aucune campagne ouverte")
+        return
+    stem = app.db_path().stem
+    if fmt == "powerbi":
+        chosen = filedialog.askdirectory(title="Dossier de sortie Power BI")
+    else:
+        chosen = filedialog.asksaveasfilename(
+            title=f"Enregistrer le document {fmt.upper()}",
+            defaultextension=f".{fmt}",
+            initialfile=f"{stem}-rapport.{fmt}",
+            filetypes=[(fmt.upper(), f"*.{fmt}")],
+        )
+    if not chosen:
+        return
+    out = Path(chosen)
+    db_path = str(app.db_path())
+
+    def work() -> None:
+        from docia.cli import main as cli_main
+
+        try:
+            code = cli_main(["--db", db_path, kind, "--format", fmt, "--out", str(out)])
+        except SystemExit as exc:  # `_load` sort par SystemExit sur une config invalide
+            app.log(f"{fmt} : configuration refusée ({exc.code})")
+            return
+        if code != 0:
+            app.log(f"{fmt} : échec de la production du document")
+            return
+        app.log(f"document {fmt} écrit : {out}")
+        if fmt == "html":
+            import webbrowser
+
+            webbrowser.open(out.as_uri())
+            app.log("le rapport s'ouvre dans le navigateur")
+        if on_done is not None:
+            app.ui(lambda: on_done(out))
+
+    app.run_in_thread(work, f"document {fmt}")
+
+
 class GuiService:
     """Opérations de campagne exposées à la fenêtre, indépendantes de Tk."""
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from dataclasses import fields, is_dataclass
 from datetime import date
 from pathlib import Path
 
@@ -14,6 +16,9 @@ from docia.models import DomainAnalysis, FileAnalysis, FileStatus, SmbeagleRow
 
 TODAY = date(2026, 6, 30)
 """Date de référence injectée dans toutes les vues datées."""
+
+SNAPSHOT = Path(__file__).parent / "fixtures" / "views_snapshot.json"
+"""Empreinte des vues, produite avant l'optimisation (schéma v5) : référence de non-régression."""
 
 
 def _row(
@@ -164,6 +169,65 @@ def db(tmp_path: Path) -> Iterator[Database]:
     database.set_review(files["copie3.pdf"].id, "validated", reviewer="moi")
     yield database
     database.close()
+
+
+# --------------------------------------------------------------- non-régression
+
+
+def _plain(value: object) -> object:
+    """Dataclasses, dates et conteneurs → types directement comparables au JSON."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _plain(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, list | tuple):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    return value
+
+
+def snapshot(database: Database) -> dict[str, object]:
+    """Résultat de toutes les vues sur une base, sous forme comparable."""
+    overview = _plain(views.overview(database, today=TODAY, stale_years=3))
+    assert isinstance(overview, dict)
+    overview["db_path"] = "(chemin temporaire)"  # dépend du dossier de test
+    return {
+        "overview": overview,
+        "by_extension": _plain(views.by_extension(database)),
+        "by_owner": _plain(views.by_owner(database)),
+        "by_share": _plain(views.by_share(database)),
+        "by_directory_1": _plain(views.by_directory(database, depth=1)),
+        "by_directory_2": _plain(views.by_directory(database, depth=2)),
+        "size_buckets": _plain(views.size_buckets(database)),
+        "empty_or_tiny": _plain(views.empty_or_tiny(database)),
+        "status_summary": _plain(views.status_summary(database)),
+        "duplicates": _plain(views.duplicates(database)),
+        "duplicates_min3": _plain(views.duplicates(database, min_copies=3)),
+        "stale_files": _plain(views.stale_files(database, today=TODAY)),
+        "cleanup_3": _plain(views.cleanup_candidates(database, years=3, today=TODAY)),
+        "cleanup_10": _plain(views.cleanup_candidates(database, years=10, today=TODAY)),
+        "top_sensitive": _plain(views.top_sensitive(database, limit=10)),
+        "matrix_share": _plain(views.classification_matrix(database, axis="share")),
+        "matrix_owner": _plain(views.classification_matrix(database, axis="owner")),
+        "matrix_directory": _plain(views.classification_matrix(database, axis="directory")),
+        "matrix_extension": _plain(views.classification_matrix(database, axis="extension")),
+        "retention_plan": _plain(views.retention_plan(database, today=TODAY)),
+        "review_progress": _plain(views.review_progress(database)),
+        "runs_summary": _plain(views.runs_summary(database)),
+        "classification_summary": _plain(database.classification_summary()),
+        "counts": _plain(database.counts()),
+    }
+
+
+def test_views_snapshot_is_unchanged(db: Database) -> None:
+    """Chaque valeur rendue par les vues est comparée à l'empreinte de référence.
+
+    L'empreinte a été produite avec le code d'avant l'optimisation (schéma v5) :
+    elle vérifie que les requêtes réécrites et les clés de date normalisées ne
+    changent aucun chiffre.
+    """
+    assert snapshot(db) == json.loads(SNAPSHOT.read_text(encoding="utf-8"))
 
 
 # ------------------------------------------------------------------ hygiène
@@ -343,6 +407,46 @@ def test_overview_aggregates(db: Database) -> None:
 )
 def test_share_label(base: str, directory: str, expected: str) -> None:
     assert views.share_label(base, directory) == expected
+
+
+DIRECTORIES: tuple[tuple[str, str], ...] = (
+    ("", ""),
+    ("", "\\\\srv"),
+    ("", "\\\\srv\\part"),
+    ("", "\\\\srv\\part\\a"),
+    ("", "\\\\srv\\part\\a\\b"),
+    ("", "\\\\srv\\part\\a\\b\\c"),
+    ("", "\\\\srv\\part\\a\\bb\\c"),
+    ("", "\\\\srv\\part\\a\\b\\c\\d\\e"),
+    ("", "\\\\srv\\part\\a\\b/c\\d"),
+    ("", "//srv/part/a/b/c"),
+    ("", "C:\\data\\a\\b"),
+    ("", "C:\\data\\a\\bb"),
+    ("   ", "\\\\srv\\part\\x\\y\\z"),
+    ("\\\\srv\\part", "\\\\srv\\part\\a\\b\\c"),
+    ("\\\\srv\\part", "\\\\srv\\part\\a\\b\\c\\d"),
+    ("\\\\srv\\part", "\\\\SRV\\PART\\a\\b\\c"),
+    ("\\\\srv\\part\\", "\\\\srv\\part\\a"),
+    ("autre", "\\\\srv\\part\\a\\b\\c"),
+    ("autre", "\\\\srv\\part\\a\\b\\cc"),
+)
+"""Répertoires piégeux : profondeurs, séparateurs, casse, espaces, `base` vide ou non."""
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 5])
+def test_axis_labeller_matches_direct_labels(depth: int) -> None:
+    """La réutilisation de préfixe rend exactement les étiquettes calculées une à une.
+
+    Les lignes sont triées comme le fait l'index couvrant : c'est le cas où
+    l'étiquette précédente est réutilisée.
+    """
+    rows = sorted(DIRECTORIES)
+    for axis, expected in (
+        ("share", [views.share_label(base, path) for base, path in rows]),
+        ("directory", [views.directory_label(base, path, depth) for base, path in rows]),
+    ):
+        label_of = views._axis_labeller(axis, depth)  # noqa: SLF001
+        assert [label_of(row) for row in rows] == expected
 
 
 def test_directory_label_depth() -> None:

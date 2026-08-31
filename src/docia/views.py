@@ -1,21 +1,29 @@
 """Vues d'analyse : la seule source de vérité pour la CLI, la GUI et le rapport.
 
 Fonctions pures : elles prennent un `Database`, ne font que des `SELECT`
-(via `Database.query`) et rendent des dataclasses triées, avec totaux.
+(via `Database.query` / `Database.query_values`) et rendent des dataclasses
+triées, avec totaux.
 
 Les dates SMBeagle sont stockées en TEXT (`dd/MM/yyyy HH:mm:ss`). Les
-comparaisons se font en SQL sur une clé `yyyyMMdd` reconstruite par `substr()`
-(comparaison lexicographique correcte), et les calculs de dates (fin de
-conservation) en Python via `parse_smbeagle_datetime`. Toutes les vues qui
-dépendent de « aujourd'hui » acceptent `today=` pour être testables.
+comparaisons d'ancienneté se font sur les clés `yyyymmdd` normalisées à
+l'écriture (`files.access_key`, `files.write_key`, schéma v6, indexées), et les
+calculs de dates (fin de conservation) en Python via `parse_smbeagle_datetime`.
+Toutes les vues qui dépendent de « aujourd'hui » acceptent `today=` pour être
+testables.
+
+Les vues qui croisent fichiers et analyses partent de la table `analyses`
+(`_FROM_LATEST`) et non des fichiers : seule une minorité des fichiers est
+analysée, et la clé étrangère garantit le même ensemble de lignes.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
-from docia.db import Database
+from docia.db import Database, first_access_sql
 from docia.ingest.smbeagle_csv import parse_smbeagle_datetime
 
 SECURITY_CLASSES: tuple[str, ...] = ("C0", "C1", "C2", "C3", "N/A")
@@ -49,33 +57,38 @@ STALE_YEARS: tuple[int, ...] = (1, 3, 5, 10)
 THOUSANDS_SEPARATOR = "\u00a0"
 """Espace insécable : les nombres ne se coupent pas en fin de ligne."""
 
-_LATEST = (
-    "LEFT JOIN analyses a ON a.id = (SELECT id FROM analyses WHERE file_id=f.id"
+_FROM_LATEST = " FROM analyses a JOIN files f ON f.id = a.file_id"
+"""Clause `FROM` des vues « fichier + dernière analyse », à filtrer par `_IS_LATEST`.
+
+Le parcours part des analyses : `analyses.file_id` référence toujours un fichier
+existant (clé étrangère), l'ensemble des lignes est donc celui de
+`files f JOIN analyses a ON a.id = (dernière analyse de f)`, mais sans balayer
+les fichiers jamais analysés."""
+
+_IS_LATEST = (
+    "a.id = (SELECT id FROM analyses WHERE file_id = a.file_id"
     " ORDER BY created_at DESC, id DESC LIMIT 1)"
 )
-"""Jointure « dernière analyse du fichier » (identique à `Database.latest_analyses`)."""
+"""Ne retient que la dernière analyse d'un fichier (comme `Database.latest_analyses`)."""
 
-_LATEST_INNER = _LATEST.replace("LEFT JOIN", "JOIN", 1)
+_SENSITIVE = "a.security_classification IN ('C2','C3')"
+"""Classes de sécurité comptées comme sensibles."""
+
+_RGPD_AT_RISK = "a.rgpd_risk_level IN ('high','critical')"
+"""Niveaux RGPD comptés comme à risque."""
+
+_CLEANUP_WHERE = (
+    "a.retention_required=0 AND a.security_classification IN ('C0','C1')"
+    " AND f.access_key <> '' AND f.access_key < ?"
+)
+"""Candidat au nettoyage : ni à conserver, ni sensible, ni accédé depuis le seuil."""
 
 
 # --------------------------------------------------------------------- helpers
 
 
-FIRST_ACCESS = "COALESCE(NULLIF(access_time_first, ''), access_time)"
-"""Date d'accès retenue pour l'ancienneté : la première observée (schéma v5), pour
-que le hachage/l'extraction de l'audit ne rajeunisse pas les fichiers inchangés."""
-FIRST_ACCESS_F = "COALESCE(NULLIF(f.access_time_first, ''), f.access_time)"
-
-
-def _date_key(column: str) -> str:
-    """Expression SQL rendant `yyyyMMdd` (ou `''`) pour une date SMBeagle ou ISO."""
-    return (
-        f"CASE WHEN length({column})>=10 AND substr({column},3,1)='/' AND substr({column},6,1)='/'"
-        f" THEN substr({column},7,4)||substr({column},4,2)||substr({column},1,2)"
-        f" WHEN length({column})>=10 AND substr({column},5,1)='-'"
-        f" THEN substr({column},1,4)||substr({column},6,2)||substr({column},9,2)"
-        f" ELSE '' END"
-    )
+FIRST_ACCESS_F = first_access_sql("f.")
+"""Date d'accès affichée pour un candidat au nettoyage (voir `docia.db`)."""
 
 
 def shift_years(day: date, years: int) -> date:
@@ -94,9 +107,14 @@ def _today(today: date | None) -> date:
     return today if today is not None else date.today()
 
 
+def share_from_base(base: str) -> str:
+    """Nom du partage tiré de la seule colonne `base` (`''` si elle est vide)."""
+    return base.strip().rstrip("\\/")
+
+
 def share_label(base: str, unc_directory: str) -> str:
     """Nom du partage : colonne `base` si présente, sinon `\\\\serveur\\partage`."""
-    stripped = base.strip().rstrip("\\/")
+    stripped = share_from_base(base)
     if stripped:
         return stripped
     text = unc_directory.replace("/", "\\").strip().rstrip("\\")
@@ -385,7 +403,7 @@ def duplicates(db: Database, *, min_copies: int = 2, limit: int | None = None) -
     L'espace récupérable d'une famille vaut `taille × (exemplaires − 1)` : un
     exemplaire est conservé. Les fichiers sans empreinte sont ignorés.
     """
-    rows = db.query(
+    rows = db.query_values(
         "SELECT fast_hash, size_bytes, COUNT(*) AS copies,"
         " size_bytes*(COUNT(*)-1) AS reclaimable"
         " FROM files WHERE fast_hash <> '' GROUP BY fast_hash, size_bytes"
@@ -393,56 +411,72 @@ def duplicates(db: Database, *, min_copies: int = 2, limit: int | None = None) -
         (min_copies,),
     )
     total_families = len(rows)
-    total_copies = sum(int(r["copies"]) for r in rows)
-    total_reclaimable = sum(int(r["reclaimable"]) for r in rows)
+    total_copies = sum(int(r[2]) for r in rows)
+    total_reclaimable = sum(int(r[3]) for r in rows)
     kept = rows if limit is None else rows[:limit]
     families: list[DuplicateFamily] = []
-    for row in kept:
-        members = db.query(
+    for fast_hash, size_bytes, copies, reclaimable in kept:
+        members = db.query_values(
             "SELECT id, path FROM files WHERE fast_hash=? AND size_bytes=? ORDER BY path",
-            (row["fast_hash"], row["size_bytes"]),
+            (fast_hash, size_bytes),
         )
         families.append(
             DuplicateFamily(
-                family_id=f"{row['fast_hash']}-{int(row['size_bytes'])}",
-                fast_hash=str(row["fast_hash"]),
-                size_bytes=int(row["size_bytes"]),
-                copies=int(row["copies"]),
-                reclaimable_bytes=int(row["reclaimable"]),
-                paths=[str(m["path"]) for m in members],
-                file_ids=[int(m["id"]) for m in members],
+                family_id=f"{fast_hash}-{int(size_bytes)}",
+                fast_hash=str(fast_hash),
+                size_bytes=int(size_bytes),
+                copies=int(copies),
+                reclaimable_bytes=int(reclaimable),
+                paths=[str(member[1]) for member in members],
+                file_ids=[int(member[0]) for member in members],
             )
         )
     return DuplicateReport(families, total_families, total_copies, total_reclaimable)
 
 
+def _below(histogram: list[tuple[str, int, int]], key: str) -> tuple[int, int]:
+    """(fichiers, octets) des dates strictement antérieures à `key`."""
+    files = size = 0
+    for day, count, total in histogram:
+        if day < key:
+            files += count
+            size += total
+    return files, size
+
+
 def stale_files(
     db: Database, *, years: tuple[int, ...] = STALE_YEARS, today: date | None = None
 ) -> list[StaleBucket]:
-    """Pour chaque seuil : fichiers non accédés et non modifiés depuis N années."""
+    """Pour chaque seuil : fichiers non accédés et non modifiés depuis N années.
+
+    Une seule requête, quel que soit le nombre de seuils : les clés de date
+    indexées sont réduites en histogrammes (une ligne par jour), que chaque seuil
+    se contente ensuite de cumuler.
+    """
     reference = _today(today)
-    access = _date_key(FIRST_ACCESS)
-    write = _date_key("last_write_time")
+    rows = db.query_values(
+        "SELECT 'a' AS src, access_key AS k, COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS b"
+        " FROM files WHERE access_key <> '' GROUP BY k"
+        " UNION ALL"
+        " SELECT 'w', write_key, COUNT(*), COALESCE(SUM(size_bytes),0)"
+        " FROM files WHERE write_key <> '' GROUP BY write_key"
+    )
+    accessed = [(str(r[1]), int(r[2]), int(r[3])) for r in rows if r[0] == "a"]
+    written = [(str(r[1]), int(r[2]), int(r[3])) for r in rows if r[0] == "w"]
     buckets: list[StaleBucket] = []
     for n in sorted(years):
         cutoff = shift_years(reference, -n)
         key = _key(cutoff)
-        row = db.query(
-            f"SELECT SUM(CASE WHEN ({access}) <> '' AND ({access}) < ? THEN 1 ELSE 0 END) AS an,"
-            f" SUM(CASE WHEN ({access}) <> '' AND ({access}) < ? THEN size_bytes ELSE 0 END) AS ab,"
-            f" SUM(CASE WHEN ({write}) <> '' AND ({write}) < ? THEN 1 ELSE 0 END) AS wn,"
-            f" SUM(CASE WHEN ({write}) <> '' AND ({write}) < ? THEN size_bytes ELSE 0 END) AS wb"
-            " FROM files",
-            (key, key, key, key),
-        )[0]
+        access_files, access_bytes = _below(accessed, key)
+        write_files, write_bytes = _below(written, key)
         buckets.append(
             StaleBucket(
                 years=n,
                 cutoff=cutoff,
-                not_accessed_files=int(row["an"] or 0),
-                not_accessed_bytes=int(row["ab"] or 0),
-                not_modified_files=int(row["wn"] or 0),
-                not_modified_bytes=int(row["wb"] or 0),
+                not_accessed_files=access_files,
+                not_accessed_bytes=access_bytes,
+                not_modified_files=write_files,
+                not_modified_bytes=write_bytes,
             )
         )
     return buckets
@@ -487,16 +521,15 @@ def by_owner(db: Database, *, limit: int | None = None) -> list[GroupStat]:
 def by_share(db: Database, *, limit: int | None = None) -> list[GroupStat]:
     """Répartition par partage (`base`, sinon `\\\\serveur\\partage`)."""
     total_files, total_bytes = _totals(db)
-    rows = db.query(
-        "SELECT base, unc_directory, COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS b"
-        " FROM files GROUP BY base, unc_directory"
-    )
+    keys = _axis_group(db, "share")
+    width = len(keys)
+    label_of = _axis_labeller("share", 0)
     files: dict[str, int] = {}
     volume: dict[str, int] = {}
-    for r in rows:
-        label = share_label(str(r["base"]), str(r["unc_directory"]))
-        files[label] = files.get(label, 0) + int(r["n"])
-        volume[label] = volume.get(label, 0) + int(r["b"])
+    for row in _axis_volumes(db, keys):
+        label = label_of(row)
+        files[label] = files.get(label, 0) + int(row[width])
+        volume[label] = volume.get(label, 0) + int(row[width + 1])
     stats = [
         GroupStat(
             label,
@@ -512,23 +545,27 @@ def by_share(db: Database, *, limit: int | None = None) -> list[GroupStat]:
 
 
 def size_buckets(db: Database) -> list[GroupStat]:
-    """Répartition par tranche de taille."""
+    """Répartition par tranche de taille.
+
+    Une requête par tranche : bornée sur `size_bytes`, chacune se lit dans un
+    index couvrant, ce qui reste moins cher qu'un balayage unique évaluant
+    autant de `CASE` que de tranches sur chaque ligne.
+    """
     total_files, total_bytes = _totals(db)
     stats: list[GroupStat] = []
     for label, low, high in SIZE_BUCKETS:
         clause = "size_bytes >= ?" + ("" if high < 0 else " AND size_bytes < ?")
         params: tuple[object, ...] = (low,) if high < 0 else (low, high)
-        row = db.query(
-            f"SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS b FROM files WHERE {clause}",
-            params,
+        count, size = db.query_values(
+            f"SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM files WHERE {clause}", params
         )[0]
         stats.append(
             GroupStat(
                 label,
-                int(row["n"]),
-                int(row["b"]),
-                percent(int(row["n"]), total_files),
-                percent(int(row["b"]), total_bytes),
+                int(count),
+                int(size),
+                percent(int(count), total_files),
+                percent(int(size), total_bytes),
             )
         )
     return stats
@@ -583,28 +620,114 @@ def status_summary(db: Database) -> StatusSummary:
 # ------------------------------------------------------------------ risque
 
 
-def _axis_rows(db: Database) -> list[tuple[str, str, str, str, str, str, int, int]]:
-    """(base, répertoire, propriétaire, extension, sécurité, RGPD, fichiers, octets)."""
-    rows = db.query(
-        "SELECT f.base AS base, f.unc_directory AS dir, f.owner AS owner, f.extension AS ext,"
-        " COALESCE(a.security_classification,'') AS sec, COALESCE(a.rgpd_risk_level,'') AS rgpd,"
-        " COUNT(*) AS n, COALESCE(SUM(f.size_bytes),0) AS b"
-        f" FROM files f {_LATEST}"
-        " GROUP BY base, dir, owner, ext, sec, rgpd"
+AXES: tuple[str, ...] = ("share", "owner", "directory", "extension")
+"""Axes acceptés par `classification_matrix`."""
+
+_SIMPLE_AXES: dict[str, tuple[str, str]] = {
+    "owner": ("f.owner", "(inconnu)"),
+    "extension": ("f.extension", "(sans extension)"),
+}
+"""Axes dont l'étiquette est la colonne SQL elle-même : (colonne, libellé si vide)."""
+
+
+def _share_named_by_base(db: Database) -> bool:
+    """Vrai si toutes les valeurs de `base` nomment déjà leur partage.
+
+    Dans ce cas — celui de tout scan SMBeagle — `share_label` ne regarde jamais
+    `unc_directory` : le regroupement SQL peut l'ignorer et rendre un groupe par
+    partage au lieu d'un groupe par répertoire.
+    """
+    rows = db.query_values("SELECT DISTINCT base FROM files")
+    return all(share_from_base(str(r[0])) for r in rows)
+
+
+_FILLER = "''"
+"""Clé d'axe inutilisée : garde la largeur des lignes sans peser sur le regroupement."""
+
+
+def _axis_group(db: Database, axis: str) -> list[str]:
+    """Expressions SQL identifiant un groupe pour cet axe, dans l'ordre des colonnes."""
+    if axis in _SIMPLE_AXES:
+        return [_SIMPLE_AXES[axis][0]]
+    if axis == "share" and _share_named_by_base(db):
+        return ["f.base", _FILLER]
+    return ["f.base", "f.unc_directory"]
+
+
+def _group_by(keys: list[str], extra: int) -> str:
+    """Clause `GROUP BY` positionnelle : les clés réelles, puis `extra` colonnes."""
+    positions = [i + 1 for i, key in enumerate(keys) if key != _FILLER]
+    positions += [len(keys) + i + 1 for i in range(extra)]
+    return ", ".join(str(position) for position in positions)
+
+
+def _axis_volumes(db: Database, keys: list[str]) -> list[tuple[Any, ...]]:
+    """Clés d'axe, puis nombre de fichiers et octets (tous les fichiers)."""
+    return db.query_values(
+        f"SELECT {', '.join(keys)}, COUNT(*), COALESCE(SUM(f.size_bytes),0)"
+        f" FROM files f GROUP BY {_group_by(keys, 0)}"
     )
-    return [
-        (
-            str(r["base"]),
-            str(r["dir"]),
-            str(r["owner"]),
-            str(r["ext"]),
-            str(r["sec"]),
-            str(r["rgpd"]),
-            int(r["n"]),
-            int(r["b"]),
-        )
-        for r in rows
-    ]
+
+
+def _axis_risk(db: Database, keys: list[str]) -> list[tuple[Any, ...]]:
+    """Clés d'axe, puis sécurité, RGPD et nombre de fichiers (fichiers analysés)."""
+    return db.query_values(
+        f"SELECT {', '.join(keys)}, a.security_classification, a.rgpd_risk_level, COUNT(*)"
+        f"{_FROM_LATEST} WHERE {_IS_LATEST} GROUP BY {_group_by(keys, 2)}"
+    )
+
+
+def _run_prefix(text: str, segments: int) -> str:
+    """Préfixe de `text` couvrant ses `segments` premiers niveaux (`''` s'il en manque).
+
+    Le préfixe s'arrête juste après le `segments`-ième antislash : deux chemins
+    qui le partagent ont exactement les mêmes premiers niveaux.
+    """
+    position = 0
+    for _ in range(segments):
+        position = text.find("\\", position) + 1
+        if position == 0:
+            return ""
+    return text[:position]
+
+
+def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
+    """Rend la fonction qui étiquette une ligne d'axe (clés d'axe en tête de ligne).
+
+    `share_label` ne lit que les deux premiers niveaux d'un répertoire, et
+    `directory_label` `depth` de plus : deux répertoires qui partagent ces
+    niveaux portent la même étiquette. Les lignes arrivant groupées par
+    répertoire, l'étiquette n'est donc recalculée qu'au changement
+    d'arborescence — sur un parc où presque chaque fichier a son répertoire,
+    c'est l'essentiel du coût de la vue.
+    """
+    if axis in _SIMPLE_AXES:
+        empty = _SIMPLE_AXES[axis][1]
+
+        def by_column(row: tuple[Any, ...]) -> str:
+            return str(row[0] or empty)
+
+        return by_column
+
+    segments = 4 if axis == "share" else depth + 4
+    previous_base: Any = None
+    prefix = ""
+    label = ""
+
+    def by_path(row: tuple[Any, ...]) -> str:
+        nonlocal previous_base, prefix, label
+        base, directory = row[0], row[1]  # colonnes TEXT NOT NULL : toujours des chaînes
+        if base != previous_base or not prefix or not directory.startswith(prefix):
+            label = (
+                share_label(base, directory)
+                if axis == "share"
+                else directory_label(base, directory, depth)
+            )
+            prefix = _run_prefix(directory, segments)
+            previous_base = base
+        return label
+
+    return by_path
 
 
 def classification_matrix(
@@ -612,45 +735,53 @@ def classification_matrix(
 ) -> list[AxisRow]:
     """Classification par valeur d'axe : `share`, `owner`, `directory` ou `extension`.
 
+    Deux requêtes ciblées sur l'axe demandé : la volumétrie sur l'index couvrant
+    des fichiers, la répartition sécurité/RGPD sur les seuls fichiers analysés.
+
     Raises:
         ValueError: axe inconnu.
     """
-    if axis not in ("share", "owner", "directory", "extension"):
+    if axis not in AXES:
         raise ValueError(f"axe inconnu : {axis}")
-    files: dict[str, int] = {}
-    volume: dict[str, int] = {}
-    analyzed: dict[str, int] = {}
-    security: dict[str, dict[str, int]] = {}
-    rgpd: dict[str, dict[str, int]] = {}
-    for base, directory, owner, extension, sec, level, count, size in _axis_rows(db):
-        if axis == "share":
-            label = share_label(base, directory)
-        elif axis == "directory":
-            label = directory_label(base, directory, depth)
-        elif axis == "owner":
-            label = owner or "(inconnu)"
+    keys = _axis_group(db, axis)
+    width = len(keys)
+    label_of = _axis_labeller(axis, depth)
+    risk: dict[str, list[tuple[str, str, int]]] = {}
+    for row in _axis_risk(db, keys):
+        classification = row[width]
+        if classification:
+            risk.setdefault(label_of(row), []).append(
+                (classification, row[width + 1], row[width + 2])
+            )
+    label_of = _axis_labeller(axis, depth)
+    totals: dict[str, list[int]] = {}
+    for row in _axis_volumes(db, keys):
+        label = label_of(row)
+        entry = totals.get(label)
+        if entry is None:
+            totals[label] = [row[width], row[width + 1]]
         else:
-            label = extension or "(sans extension)"
-        files[label] = files.get(label, 0) + count
-        volume[label] = volume.get(label, 0) + size
-        sec_map = security.setdefault(label, dict.fromkeys(SECURITY_CLASSES, 0))
-        rgpd_map = rgpd.setdefault(label, dict.fromkeys(RGPD_LEVELS, 0))
-        analyzed.setdefault(label, 0)
-        if sec:
-            analyzed[label] += count
-            sec_map[sec] = sec_map.get(sec, 0) + count
-            rgpd_map[level] = rgpd_map.get(level, 0) + count
-    out = [
-        AxisRow(
-            label=label,
-            files=files[label],
-            bytes=volume[label],
-            analyzed=analyzed[label],
-            security=security[label],
-            rgpd=rgpd[label],
+            entry[0] += row[width]
+            entry[1] += row[width + 1]
+    out: list[AxisRow] = []
+    for label, (count, size) in totals.items():
+        security = dict.fromkeys(SECURITY_CLASSES, 0)
+        rgpd = dict.fromkeys(RGPD_LEVELS, 0)
+        analyzed = 0
+        for classification, level, number in risk.get(label, ()):
+            analyzed += number
+            security[classification] = security.get(classification, 0) + number
+            rgpd[level] = rgpd.get(level, 0) + number
+        out.append(
+            AxisRow(
+                label=label,
+                files=count,
+                bytes=size,
+                analyzed=analyzed,
+                security=security,
+                rgpd=rgpd,
+            )
         )
-        for label in files
-    ]
     out.sort(key=lambda r: (-r.sensitive, -r.analyzed, -r.bytes, r.label))
     return out if limit is None else out[:limit]
 
@@ -670,9 +801,8 @@ def top_sensitive(db: Database, *, limit: int = 50) -> list[SensitiveFile]:
         " a.security_justification AS just, a.rgpd_risk_level AS rgpd,"
         " a.rgpd_confidence AS rgpdc, a.resume AS resume,"
         " COALESCE(r.status,'') AS review"
-        f" FROM files f {_LATEST_INNER} LEFT JOIN reviews r ON r.file_id = f.id"
-        " WHERE a.security_classification IN ('C2','C3')"
-        " OR a.rgpd_risk_level IN ('high','critical')"
+        f"{_FROM_LATEST} LEFT JOIN reviews r ON r.file_id = f.id"
+        f" WHERE {_IS_LATEST} AND ({_SENSITIVE} OR {_RGPD_AT_RISK})"
         " ORDER BY CASE a.security_classification WHEN 'C3' THEN 0 WHEN 'C2' THEN 1"
         " WHEN 'C1' THEN 2 WHEN 'C0' THEN 3 ELSE 4 END,"
         " CASE a.rgpd_risk_level WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2"
@@ -702,38 +832,35 @@ def retention_plan(
 ) -> RetentionPlan:
     """Fichiers à conserver, avec la date de fin = dernière écriture + `years`."""
     reference = _today(today)
-    rows = db.query(
-        "SELECT f.id AS id, f.path AS path, f.owner AS owner, f.size_bytes AS size,"
-        " f.last_write_time AS lwt, a.retention_years AS years, a.retention_basis AS basis,"
-        " a.retention_justification AS just"
-        f" FROM files f {_LATEST_INNER} WHERE a.retention_required=1 ORDER BY f.path"
+    rows = db.query_values(
+        "SELECT f.id, f.path, f.owner, f.size_bytes, f.last_write_time,"
+        " a.retention_years, a.retention_basis, a.retention_justification"
+        f"{_FROM_LATEST} WHERE {_IS_LATEST} AND a.retention_required=1 ORDER BY f.path"
     )
     plan: list[RetentionRow] = []
     by_basis_files: dict[str, int] = {}
     by_basis_bytes: dict[str, int] = {}
     total_bytes = 0
     expired = 0
-    for r in rows:
-        years = int(r["years"] or 0)
-        written = parse_smbeagle_datetime(str(r["lwt"]))
+    for file_id, path, owner, size, written_at, retained, basis, justification in rows:
+        years = int(retained or 0)
+        written = parse_smbeagle_datetime(str(written_at))
         end = shift_years(written.date(), years) if written is not None else None
         is_expired = end is not None and end <= reference
         expired += int(is_expired)
-        size = int(r["size"])
-        total_bytes += size
-        basis = str(r["basis"])
+        total_bytes += int(size)
         by_basis_files[basis] = by_basis_files.get(basis, 0) + 1
-        by_basis_bytes[basis] = by_basis_bytes.get(basis, 0) + size
+        by_basis_bytes[basis] = by_basis_bytes.get(basis, 0) + int(size)
         plan.append(
             RetentionRow(
-                file_id=int(r["id"]),
-                path=str(r["path"]),
-                owner=str(r["owner"]),
-                size_bytes=size,
+                file_id=int(file_id),
+                path=str(path),
+                owner=str(owner),
+                size_bytes=int(size),
                 years=years,
-                basis=basis,
-                justification=str(r["just"]),
-                last_write_time=str(r["lwt"]),
+                basis=str(basis),
+                justification=str(justification),
+                last_write_time=str(written_at),
                 end_date=end,
                 expired=is_expired,
             )
@@ -766,13 +893,10 @@ def cleanup_candidates(
     et non accédés depuis `years` années."""
     reference = _today(today)
     cutoff = shift_years(reference, -years)
-    access = _date_key(FIRST_ACCESS_F)
     rows = db.query(
         "SELECT f.id AS id, f.path AS path, f.owner AS owner, f.size_bytes AS size,"
         f" {FIRST_ACCESS_F} AS at, a.security_classification AS sec"
-        f" FROM files f {_LATEST_INNER}"
-        " WHERE a.retention_required=0 AND a.security_classification IN ('C0','C1')"
-        f" AND ({access}) <> '' AND ({access}) < ?"
+        f"{_FROM_LATEST} WHERE {_IS_LATEST} AND {_CLEANUP_WHERE}"
         " ORDER BY f.size_bytes DESC, f.path",
         (_key(cutoff),),
     )
@@ -796,23 +920,42 @@ def cleanup_candidates(
     )
 
 
+def _review_counts(db: Database) -> dict[str, int]:
+    """Nombre de fichiers par statut de vérification humaine."""
+    return {
+        str(r[0]): int(r[1])
+        for r in db.query_values("SELECT status, COUNT(*) FROM reviews GROUP BY status")
+    }
+
+
+def _analyzed_files(db: Database) -> int:
+    """Nombre de fichiers ayant au moins une analyse."""
+    return int(db.query_values("SELECT COUNT(DISTINCT file_id) FROM analyses")[0][0])
+
+
 def review_progress(db: Database, *, limit: int | None = None) -> ReviewProgress:
     """Avancement des revues et écarts entre classe LLM et classe corrigée."""
-    counts = {
-        r["status"]: int(r["n"])
-        for r in db.query("SELECT status, COUNT(*) AS n FROM reviews GROUP BY status")
-    }
-    analyzed = int(db.query("SELECT COUNT(DISTINCT file_id) AS n FROM analyses")[0]["n"])
+    counts = _review_counts(db)
+    analyzed = _analyzed_files(db)
     reviewed = sum(counts.values())
+    if limit == 0:  # seuls les compteurs sont demandés : pas de recherche d'écarts
+        return ReviewProgress(
+            to_review=counts.get("to_review", 0),
+            validated=counts.get("validated", 0),
+            corrected=counts.get("corrected", 0),
+            not_reviewed=max(analyzed - reviewed, 0),
+            analyzed=analyzed,
+        )
     rows = db.query(
         "SELECT f.id AS id, f.path AS path, a.security_classification AS sec,"
         " a.rgpd_risk_level AS rgpd, COALESCE(r.corrected_security,'') AS csec,"
         " COALESCE(r.corrected_rgpd,'') AS crgpd"
-        f" FROM files f {_LATEST_INNER} JOIN reviews r ON r.file_id = f.id"
-        " WHERE (r.corrected_security IS NOT NULL AND r.corrected_security <> ''"
+        f"{_FROM_LATEST} JOIN reviews r ON r.file_id = f.id"
+        f" WHERE {_IS_LATEST} AND ("
+        "       (r.corrected_security IS NOT NULL AND r.corrected_security <> ''"
         "        AND r.corrected_security <> a.security_classification)"
         "    OR (r.corrected_rgpd IS NOT NULL AND r.corrected_rgpd <> ''"
-        "        AND r.corrected_rgpd <> a.rgpd_risk_level)"
+        "        AND r.corrected_rgpd <> a.rgpd_risk_level))"
         " ORDER BY f.path"
     )
     gaps = [
@@ -883,29 +1026,45 @@ def runs_summary(db: Database) -> list[RunStat]:
 # ------------------------------------------------------------------ synthèse
 
 
+def _count_latest(db: Database, condition: str, params: tuple[object, ...] = ()) -> int:
+    """Nombre de fichiers dont la dernière analyse vérifie `condition`."""
+    return int(
+        db.query_values(
+            f"SELECT COUNT(*){_FROM_LATEST} WHERE {_IS_LATEST} AND {condition}", params
+        )[0][0]
+    )
+
+
 def overview(db: Database, *, today: date | None = None, stale_years: int = 5) -> Overview:
-    """Chiffres clés : volumétrie, hygiène, risque, vérification."""
+    """Chiffres clés : volumétrie, hygiène, risque, vérification.
+
+    Ne demande que des agrégats : aucune des vues détaillées (doublons, plan de
+    conservation, écarts de revue…) n'est reconstruite pour n'en garder qu'un
+    total, et la volumétrie n'est comptée qu'une fois.
+    """
     reference = _today(today)
     total_files, total_bytes = _totals(db)
-    status = status_summary(db)
-    dupes = duplicates(db, limit=0)
-    stale = stale_files(db, years=(stale_years,), today=reference)[0]
-    cleanup = cleanup_candidates(db, years=stale_years, today=reference, limit=0)
-    plan = retention_plan(db, today=reference, limit=0)
-    reviews = review_progress(db, limit=0)
-    sensitive = int(
-        db.query(
-            f"SELECT COUNT(*) AS n FROM files f {_LATEST_INNER}"
-            " WHERE a.security_classification IN ('C2','C3')"
-        )[0]["n"]
-    )
-    rgpd = int(
-        db.query(
-            f"SELECT COUNT(*) AS n FROM files f {_LATEST_INNER}"
-            " WHERE a.rgpd_risk_level IN ('high','critical')"
-        )[0]["n"]
-    )
-    analyzed = int(db.query("SELECT COUNT(DISTINCT file_id) AS n FROM analyses")[0]["n"])
+    status = {
+        str(r[0]): int(r[1])
+        for r in db.query_values("SELECT status, COUNT(*) FROM files GROUP BY status")
+    }
+    families, reclaimable = db.query_values(
+        "SELECT COUNT(*), COALESCE(SUM(reclaimable),0) FROM"
+        " (SELECT size_bytes*(COUNT(*)-1) AS reclaimable FROM files WHERE fast_hash <> ''"
+        "  GROUP BY fast_hash, size_bytes HAVING COUNT(*) >= 2)"
+    )[0]
+    stale_key = _key(shift_years(reference, -stale_years))
+    stale_count, stale_bytes = db.query_values(
+        "SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM files"
+        " WHERE access_key <> '' AND access_key < ?",
+        (stale_key,),
+    )[0]
+    cleanup_count, cleanup_bytes = db.query_values(
+        f"SELECT COUNT(*), COALESCE(SUM(f.size_bytes),0){_FROM_LATEST}"
+        f" WHERE {_IS_LATEST} AND {_CLEANUP_WHERE}",
+        (stale_key,),
+    )[0]
+    reviews = _review_counts(db)
     model_row = db.query(
         "SELECT model, prompt_hash FROM analyses ORDER BY created_at DESC, id DESC LIMIT 1"
     )
@@ -918,19 +1077,19 @@ def overview(db: Database, *, today: date | None = None, stale_years: int = 5) -
         prompt_hash=str(model_row[0]["prompt_hash"]) if model_row else "",
         total_files=total_files,
         total_bytes=total_bytes,
-        analyzed=analyzed,
-        pending=status.counts.get("pending", 0),
-        excluded=status.counts.get("excluded", 0),
-        errors=status.counts.get("error", 0),
-        duplicate_families=dupes.total_families,
-        duplicate_reclaimable_bytes=dupes.total_reclaimable_bytes,
-        stale_files=stale.not_accessed_files,
-        stale_bytes=stale.not_accessed_bytes,
+        analyzed=_analyzed_files(db),
+        pending=status.get("pending", 0),
+        excluded=status.get("excluded", 0),
+        errors=status.get("error", 0),
+        duplicate_families=int(families),
+        duplicate_reclaimable_bytes=int(reclaimable),
+        stale_files=int(stale_count),
+        stale_bytes=int(stale_bytes),
         stale_years=stale_years,
-        sensitive_files=sensitive,
-        rgpd_at_risk=rgpd,
-        retention_files=plan.total_files,
-        cleanup_files=cleanup.total_files,
-        cleanup_bytes=cleanup.total_bytes,
-        reviewed=reviews.reviewed,
+        sensitive_files=_count_latest(db, _SENSITIVE),
+        rgpd_at_risk=_count_latest(db, _RGPD_AT_RISK),
+        retention_files=_count_latest(db, "a.retention_required=1"),
+        cleanup_files=int(cleanup_count),
+        cleanup_bytes=int(cleanup_bytes),
+        reviewed=reviews.get("validated", 0) + reviews.get("corrected", 0),
     )

@@ -28,6 +28,7 @@ class HomeTab:
         self.parent = parent
         self.ctk = app.ctk
         self._tiles: dict[str, KpiTile] = {}
+        self._dirty = True
 
     # ------------------------------------------------------------------ build
     def build(self) -> None:
@@ -311,8 +312,7 @@ class HomeTab:
         profile = (
             ScanProfile(local_paths=[target]) if looks_like_path else ScanProfile(hosts=[target])
         )
-        if not self.app.db_path().exists():
-            self.app.log("crée ou ouvre d'abord une campagne (bandeau : Nouvelle…)")
+        if not self.app.ensure_campaign():
             return
         app, cfg = self.app, self.app.collect_config()
 
@@ -505,6 +505,7 @@ class HomeTab:
         self.scan_stop_button.configure(state="normal" if busy else "disabled")
 
     def refresh(self) -> None:
+        """Partie immédiate (serveur, scanner) ; les chiffres de la campagne suivent."""
         cfg = self.app.config
         self.server_label.configure(
             text=f"{cfg.llm.transport} · {cfg.llm.base_url}\nmodèle {cfg.llm.model}"
@@ -528,12 +529,33 @@ class HomeTab:
             self.run_status.configure(text="")
             self.run_eta.configure(text="")
             self.progress.set(0)
+            self._dirty = False
             return
-        from docia import views
+        self._dirty = True
+        self.refresh_if_needed()
 
-        with self.app.open_db() as db:
-            ov = views.overview(db, stale_years=5)
-            counts = db.counts()
+    def refresh_if_needed(self) -> None:
+        """Chiffres clés de la campagne, calculés hors du thread Tk.
+
+        Sur une grande campagne, `views.overview` demande plusieurs secondes : le calculer
+        dans la fenêtre la gelait à chaque rafraîchissement.
+        """
+        if self._dirty is False or self.app.current_tab() not in ("", "Accueil"):
+            return
+        self._dirty = False
+        self.source_status.configure(text="calcul des chiffres de la campagne…")
+        app = self.app
+
+        def compute() -> tuple[Any, dict[str, int]]:
+            from docia import views
+
+            with app.open_db() as db:
+                return views.overview(db, stale_years=5), db.counts()
+
+        app.run_background(compute, self._apply_overview, name="chiffres de la campagne")
+
+    def _apply_overview(self, result: tuple[Any, dict[str, int]]) -> None:
+        ov, counts = result
         t = self._tiles
         t["files"].set(format_int(ov.total_files))
         t["analyzed"].set(format_int(ov.analyzed))

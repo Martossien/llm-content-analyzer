@@ -148,6 +148,14 @@ class LLMTab:
             btns, text="Mesurer la vitesse de la LLM", command=self._bench, fg_color="#0e7490"
         )
         self.bench_button.pack(side="left")
+        self.doctor_button = ctk.CTkButton(
+            btns,
+            text="Diagnostic du poste",
+            width=160,
+            fg_color="#6b7280",
+            command=self._doctor,
+        )
+        self.doctor_button.pack(side="right")
 
         self.output = ReadOnlyText(ctk, p, height=260)
         self.output.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -157,6 +165,7 @@ class LLMTab:
         state = "disabled" if busy else "normal"
         self.test_button.configure(state=state)
         self.bench_button.configure(state=state)
+        self.doctor_button.configure(state=state)
 
     def apply_to_config(self, cfg: Config) -> None:
         """Recopie les champs de l'onglet dans la config (appelé par `collect_config`)."""
@@ -201,6 +210,27 @@ class LLMTab:
             self.output.set(msg)
 
         app.run_in_thread(work, "test de connexion")
+
+    def _doctor(self) -> None:
+        """État du poste (OCR réellement essayé, pdfium, scanner, serveur), copiable.
+
+        Le même contrôle que `Docia.exe doctor`, sans ligne de commande : c'est ce
+        qu'on demande à l'utilisateur quand un PDF scanné sort vide.
+        """
+        app = self.app
+        cfg = app.collect_config()
+
+        def work() -> None:
+            from docia.cli_tools import doctor_report
+
+            report = doctor_report(cfg)
+            lines = [f"{key:24} {value}" for key, value in report.items()]
+            self.output.set("\n".join(lines))
+            for key in ("ocr_essai", "tesseract", "smbeagle"):
+                if key in report:
+                    app.log(f"{key} : {report[key]}")
+
+        app.run_in_thread(work, "diagnostic du poste")
 
     def _bench(self) -> None:
         app = self.app

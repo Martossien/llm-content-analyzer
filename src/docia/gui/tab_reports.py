@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from docia.gui.service_shim import list_backups
+from docia.gui.service_shim import list_backups, produce_document
 from docia.gui.theme import FONT_FAMILY, FONT_SIZE_SMALL
 from docia.gui.widgets import Card
 
@@ -130,40 +130,13 @@ class ReportsTab:
 
     # ---- documents
     def _produce(self, fmt: str, kind: str) -> None:
-        from tkinter import filedialog
+        produce_document(self.app, fmt, kind, on_done=self._remember)
 
-        if not self.app.db_path().exists():
-            self.app.log("aucune campagne ouverte")
-            return
-        stem = self.app.db_path().stem
-        if fmt == "powerbi":
-            path = filedialog.askdirectory(title="Dossier de sortie Power BI")
-        else:
-            path = filedialog.asksaveasfilename(
-                defaultextension=f".{fmt}",
-                initialfile=f"{stem}-rapport.{fmt}",
-                filetypes=[(fmt.upper(), f"*.{fmt}")],
-            )
-        if not path:
-            return
-        app = self.app
-        db_path = str(app.db_path())
-
-        def work() -> None:
-            from docia.cli import main as cli_main
-
-            code = cli_main(["--db", db_path, kind, "--format", fmt, "--out", path])
-            app.log(f"{fmt} → {path} ({'OK' if code == 0 else 'échec'})")
-            if code == 0:
-                self._last_path = Path(path)
-                app.ui(
-                    lambda: (
-                        self.last_label.configure(text=f"dernier document : {path}"),
-                        self.open_button.configure(state="normal"),
-                    )
-                )
-
-        app.run_in_thread(work, f"document {fmt}")
+    def _remember(self, path: Path) -> None:
+        """Retient le dernier document produit (thread Tk)."""
+        self._last_path = path
+        self.last_label.configure(text=f"dernier document : {path}")
+        self.open_button.configure(state="normal")
 
     def _open_last(self) -> None:
         if self._last_path is None:

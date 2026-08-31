@@ -240,7 +240,14 @@ class BenchReport:
         """Résumé lisible (une phrase par ligne, ≤ 120 colonnes)."""
         head = f"banc LLM : modèle {self.model} sur {self.base_url} (transport {self.transport})"
         if not self.ok:
-            return [head, f"ÉCHEC : {self.message}"]
+            # Sans le détail des erreurs, « aucun bloc exploitable » ne dit pas POURQUOI :
+            # le message du serveur (contexte dépassé, modèle inconnu, clé refusée…) est
+            # la seule chose exploitable pour l'utilisateur comme pour le support.
+            lines = [head, f"ÉCHEC : {self.message}"]
+            lines.extend(f"  erreur : {error}" for error in self.errors[:5])
+            if len(self.errors) > 5:
+                lines.append(f"  … et {len(self.errors) - 5} autre(s) erreur(s) identiques")
+            return lines
         lines = [
             head,
             f"{self.blocks_sent} bloc(s) de ~{self.block_tokens} tokens, "
@@ -430,7 +437,12 @@ def _aggregate(report: BenchReport, results: list[BenchBlockResult], say: Progre
     if report.errors:
         report.ok = report.json_valid > 0
         if not report.ok:
-            report.message = f"aucun bloc exploitable ({len(report.errors)} erreur(s))"
+            first = results[0].error if results and results[0].error else report.errors[0]
+            report.message = (
+                f"aucun bloc exploitable ({len(report.errors)} erreur(s)) — {first}"
+                if first
+                else f"aucun bloc exploitable ({len(report.errors)} erreur(s))"
+            )
     say(
         f"{report.json_valid}/{len(results)} bloc(s) valides en {report.wall_s:.1f} s "
         f"({report.prefill_tok_s:.0f} tok/s prefill, {report.decode_tok_s:.0f} decode)"

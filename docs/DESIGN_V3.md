@@ -231,6 +231,17 @@ scanner_elapsed_s`. Les vues « ancienneté » et « candidats au nettoyage » u
 `COALESCE(access_time_first, access_time)` : l'audit (hachage, signature, extraction) ne rajeunit
 pas les fichiers inchangés.
 
+**Statistiques sur gros parc** (« l'onglet Statistiques semble figé ») : schéma **v6**. Les vues
+d'ancienneté reformataient les dates ligne par ligne (`CASE … substr …`) — aucun index utilisable,
+un balayage complet par seuil. Les dates sont désormais normalisées à l'écriture en clés
+`yyyymmdd` (`files.access_key` = `COALESCE(access_time_first, access_time)`, `files.write_key` =
+`last_write_time`), indexées avec la taille (index couvrants) ; `stale_files` cumule des
+histogrammes issus d'une seule requête. Les vues qui croisent fichiers et analyses partent
+d'`analyses` (une minorité des fichiers est analysée) au lieu de balayer `files`, la matrice de
+classification n'agrège en SQL que l'axe demandé, et `overview` ne demande que des totaux au lieu
+de reconstruire chaque vue détaillée. `ANALYZE` à la fin de chaque scan donne au planificateur les
+cardinalités réelles. Sur 200 000 fichiers / 40 000 analyses : 26,5 s → 2,4 s pour l'onglet complet.
+
 **Exe Windows complet** (« attention à ne pas oublier les paquets ») : les extracteurs DocFuse
 importent leurs bibliothèques **paresseusement** (pypdf, pdfminer, pypdfium2, python-docx, python-pptx,
 openpyxl, lxml, bs4, striprtf, ftfy, oxmsg, office_oxide…) — invisibles pour PyInstaller → l'exe

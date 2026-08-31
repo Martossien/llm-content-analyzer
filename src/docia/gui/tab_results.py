@@ -68,6 +68,7 @@ _REVIEW_FILTERS = {
     "corrigé": "corrected",
 }
 _LIMIT = 1000
+TAB_NAME = "Résultats"
 
 
 class ResultsTab:
@@ -77,6 +78,8 @@ class ResultsTab:
         self.ctk = app.ctk
         self._rows: list[dict[str, str]] = []
         self._selected_id: int | None = None
+        self._dirty = True
+        self._token = 0
 
     def build(self) -> None:
         ctk, p = self.ctk, self.parent
@@ -206,17 +209,28 @@ class ResultsTab:
 
     # ---- table
     def refresh(self) -> None:
+        """Marque la liste à recharger ; le chargement n'a lieu que si l'écran est visible."""
+        self._dirty = True
+        self.refresh_if_needed()
+
+    def refresh_if_needed(self) -> None:
+        """Recharge la liste hors du thread Tk (une grande campagne demande des secondes)."""
+        if not self._dirty or self.app.current_tab() != TAB_NAME:
+            return
+        self._dirty = False
         if not self.app.db_path().exists():
             self.table.set_rows([])
             self.count_label.configure(text="")
             self._clear_card()
             return
-        with self.app.open_db() as db:
-            rows = list(db.latest_analyses())
+        self.count_label.configure(text="chargement…")
+        app = self.app
         sec = _SEC_FILTERS[self.sec_var.get()]
         rgpd = _RGPD_FILTERS[self.rgpd_var.get()]
         rev = _REVIEW_FILTERS[self.review_var.get()]
         search = self.search_var.get().strip().lower()
+        self._token += 1
+        token = self._token
 
         def keep(r: Any) -> bool:
             if sec is not None and (r["security_classification"] or "") != sec:
@@ -228,35 +242,46 @@ class ResultsTab:
             haystack = f"{r['path']} {r['resume'] or ''} {r['owner'] or ''}".lower()
             return not (search and search not in haystack)
 
-        filtered = sorted((r for r in rows if keep(r)), key=_display_order)
-        self._rows = result_rows_v31(filtered, limit=_LIMIT)
-        table_rows, tags = [], []
-        for row in self._rows:
-            table_rows.append(
-                [
-                    row["nom"],
-                    shorten_path(folder_of(row["chemin"]), 48),
-                    STATUS_LABELS.get(row["sécu"], row["sécu"]),
-                    row["rgpd"],
-                    row["finance"],
-                    row["juridique"],
-                    row["conservation"],
-                    REVIEW_LABELS.get(row["revue"], row["revue"]),
-                    row["résumé"],
-                ]
+        def compute() -> tuple[list[dict[str, str]], list[list[str]], list[str], int]:
+            with app.open_db() as db:
+                rows = list(db.latest_analyses())
+            filtered = sorted((r for r in rows if keep(r)), key=_display_order)
+            shown = result_rows_v31(filtered, limit=_LIMIT)
+            table_rows: list[list[str]] = []
+            tags: list[str] = []
+            for row in shown:
+                table_rows.append(
+                    [
+                        row["nom"],
+                        shorten_path(folder_of(row["chemin"]), 48),
+                        STATUS_LABELS.get(row["sécu"], row["sécu"]),
+                        row["rgpd"],
+                        row["finance"],
+                        row["juridique"],
+                        row["conservation"],
+                        REVIEW_LABELS.get(row["revue"], row["revue"]),
+                        row["résumé"],
+                    ]
+                )
+                sec_value = row["sécu"]
+                tags.append(
+                    sec_value
+                    if sec_value in ("C3", "C2", "C1")
+                    else ("error" if sec_value == "error" else "ok")
+                )
+            return shown, table_rows, tags, len(filtered)
+
+        def apply(result: tuple[list[dict[str, str]], list[list[str]], list[str], int]) -> None:
+            if token != self._token:  # une demande plus récente a été faite
+                return
+            self._rows, table_rows, tags, total = result
+            self.table.set_rows(table_rows, tags)
+            shown = min(total, _LIMIT)
+            self.count_label.configure(
+                text=f"{total} fichier(s)" + (f" — {shown} affichés" if shown < total else "")
             )
-            sec_value = row["sécu"]
-            tags.append(
-                sec_value
-                if sec_value in ("C3", "C2", "C1")
-                else ("error" if sec_value == "error" else "ok")
-            )
-        self.table.set_rows(table_rows, tags)
-        shown = min(len(filtered), _LIMIT)
-        self.count_label.configure(
-            text=f"{len(filtered)} fichier(s)"
-            + (f" — {shown} affichés" if shown < len(filtered) else "")
-        )
+
+        app.run_background(compute, apply, name="résultats")
 
     def _clear_card(self) -> None:
         self._selected_id = None
@@ -270,7 +295,7 @@ class ResultsTab:
     def _select(self, index: int) -> None:
         row = self._rows[index]
         with self.app.open_db() as db:
-            rec = next((r for r in db.latest_analyses() if str(r["path"]) == row["chemin"]), None)
+            rec = next(iter(db.latest_analyses(file_id=int(row["id"]))), None)
         if rec is None:
             self._clear_card()
             return

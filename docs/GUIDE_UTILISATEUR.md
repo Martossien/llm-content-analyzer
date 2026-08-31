@@ -36,7 +36,14 @@ reprend au point exact. Un fichier déjà analysé n'est jamais renvoyé tant qu
    (`docia.toml`) — l'utilisateur n'a pas à y revenir.
 
 L'OCR (lecture des PDF scannés, courriers et factures numérisés) est **intégré** à `Docia.exe` :
-aucune installation. `Docia.exe doctor` (ligne de commande) vérifie que tout est en place.
+aucune installation. `Docia.exe doctor` (ligne de commande) vérifie que tout est en place — il
+**fait un vrai essai d'OCR** sur une image fabriquée pour l'occasion et affiche `ocr_essai ok`.
+En cas d'échec, il affiche le message de Tesseract lui-même, ce qui donne la cause exacte
+(fichier de langue absent ou mis en quarantaine par l'antivirus, dossier `tessdata` inaccessible…).
+
+Un fichier **`docia.log`** est tenu à côté de `Docia.exe` : la console ne montre qu'une ligne par
+incident, le détail complet (pile d'appels) va dans ce fichier, qui tourne automatiquement
+(4 Mo × 4). C'est ce fichier qu'il faut joindre pour toute demande d'aide.
 
 ![Accueil — parcours en quatre étapes](images/01_accueil.png)
 
@@ -44,7 +51,10 @@ aucune installation. `Docia.exe doctor` (ligne de commande) vérifie que tout es
 
 ### Étape 1 · Source
 
-Bandeau du haut → **Nouvelle…** : choisir où enregistrer la campagne (ex. `Z:\audits\finance-2026.sqlite`).
+Bandeau du haut → **Nouvelle…** : choisir où enregistrer la campagne (ex.
+`Z:\audits\finance-2026.sqlite`). Le fichier est **créé aussitôt** : son nom s'affiche dans le
+bandeau et le journal confirme « campagne créée : … ». Choisir un fichier de campagne existant
+l'ouvre sans rien effacer.
 
 Puis, carte **1 · Source**, deux possibilités :
 
@@ -123,6 +133,11 @@ Le seuil d'ancienneté (années) se règle en haut. La date retenue est la **pre
 observée : l'audit lui-même (lecture des fichiers, OCR) ne « rajeunit » pas les fichiers, même sur
 un lecteur en lecture seule où le scanner ne peut pas restaurer les dates.
 
+Sur une grande campagne (dizaines de milliers de fichiers), le sous-onglet affiché indique
+brièvement *calcul en cours…* : les chiffres sont calculés en tâche de fond, la fenêtre reste
+utilisable et seul le sous-onglet regardé est calculé. **Rapport HTML…** (en haut à droite)
+produit le rapport reprenant ces mêmes chiffres et l'ouvre dans le navigateur.
+
 ![Statistiques — hygiène](images/05_statistiques.png)
 
 ## 5. Rapports et exports
@@ -159,7 +174,9 @@ pratique pour vérifier un document avant de le déposer.
   seront réanalysés à la demande).
 - **Serveur & performances** : adresse et modèle, raisonnement, contexte, chemin du scanner,
   dates d'accès préservées pendant le scan, **Mesurer la vitesse de la LLM** (fichiers/heure,
-  JSON valides). Les réglages sont de deux natures :
+  JSON valides — en cas d'échec, le message du serveur est affiché) et **Diagnostic du poste**
+  (version, OCR réellement essayé, pdfium, scanner, contexte servi par le serveur : le texte à
+  transmettre en cas de problème). Les réglages sont de deux natures :
   - **Envoyés à chaque requête** (ils pilotent, quel que soit le lancement du serveur) :
     *Tokens par bloc* = combien de contenu docia regroupe par requête (32 000 : moins de requêtes,
     échecs isolés) ; *Budget de raisonnement* = plafond de « réflexion » **imposé** au modèle par
@@ -190,11 +207,28 @@ nature (envoyé par requête / local au poste / descriptif du serveur) : [`docs/
 
 ## 9. Questions fréquentes
 
-- *Un PDF scanné sort « non évalué »* → `Docia.exe doctor` : l'OCR embarqué doit apparaître
-  (`ocr_engines ['tesseract']`). Sinon l'exe est incomplet : reprendre le build de la CI.
+- *Un PDF scanné sort « non évalué »* → mode administrateur → *Serveur & performances* →
+  **Diagnostic du poste** (ou `Docia.exe doctor` en ligne de commande) : la ligne `ocr_essai`
+  doit dire `ok`. Si elle dit `ÉCHEC`, elle contient le message de Tesseract lui-même, qui
+  donne la cause. C'est ce texte qu'il faut transmettre à l'administrateur.
 - *« scanner SMBeagle introuvable »* → placer `SMBeagle.exe` à côté de `Docia.exe` ou renseigner
   le chemin dans *Serveur & performances*.
 - *L'analyse est lente* → c'est le serveur IA qui fixe le débit ; le raisonnement `medium` est
   le meilleur compromis mesuré ; `xhigh` double le temps sans gain.
 - *Un fichier est « en erreur »* → sa raison est dans la fiche ; **Relancer → Aussi les fichiers en
   erreur** après avoir corrigé la cause (fichier verrouillé, chemin disparu…).
+- *La fenêtre semble figée quand j'ouvre les Statistiques* → les écrans coûteux calculent
+  désormais en tâche de fond (*calcul en cours…*) et seuls les chiffres affichés sont calculés.
+  Si l'attente reste longue, c'est la taille de la campagne : le rapport HTML donne les mêmes
+  chiffres sans rester devant l'écran.
+- *Des traces Python défilent dans la console* → il n'y a plus qu'une ligne par fichier
+  problématique ; le détail est dans `docia.log`, à côté de `Docia.exe`. Un mail ou un PDF
+  illisible n'interrompt jamais l'analyse : le fichier est marqué en erreur, les autres passent.
+- *« Mesurer la vitesse de la LLM » répond « aucun bloc exploitable »* → le message du serveur est
+  affiché juste en dessous (contexte dépassé, modèle inconnu, clé refusée…) ; c'est lui qui donne
+  la cause. **Tester la connexion** d'abord.
+- *`SMBeagle.exe` lancé à la main refuse un dossier* → un chemin contenant une espace doit être
+  entre guillemets : `--local-path "D:\mes fichiers"`, et **sans antislash final** (`"D:\dossier\"`
+  ne ferme pas les guillemets sous Windows). Depuis la version 4.2.1, le scanner refuse
+  explicitement (code 2) au lieu de scanner le mauvais dossier. Depuis l'interface, le problème
+  ne se pose pas : le chemin est transmis tel quel.

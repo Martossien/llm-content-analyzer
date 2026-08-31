@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from docia.db import SCHEMA_VERSION, Database
+from docia.db import (
+    _MIGRATIONS,  # noqa: PLC2701 - le test rejoue les migrations réelles jusqu'à la v5
+    SCHEMA_VERSION,
+    Database,
+    backup_dir_for,
+    date_key,
+    date_key_sql,
+)
 from docia.models import (
     BlockFile,
     BlockSpec,
@@ -19,7 +27,12 @@ from docia.models import (
 
 
 def _row(
-    name: str, *, fast_hash: str = "aaaa", size: int = 1000, lwt: str = "01/01/2026 10:00:00"
+    name: str,
+    *,
+    fast_hash: str = "aaaa",
+    size: int = 1000,
+    lwt: str = "01/01/2026 10:00:00",
+    access: str = "02/01/2026 10:00:00",
 ) -> SmbeagleRow:
     return SmbeagleRow(
         name=name,
@@ -36,7 +49,7 @@ def _row(
         directory_type="SMB",
         base="\\\\srv\\part\\",
         file_size=size,
-        access_time="02/01/2026 10:00:00",
+        access_time=access,
         file_attributes="Archive",
         owner="DOM\\x",
         fast_hash=fast_hash,
@@ -232,3 +245,124 @@ def test_prompt_profiles_and_reviews(tmp_path: Path) -> None:
         assert db.review_counts()["corrected"] == 1
         with pytest.raises(ValueError, match="statut de revue inconnu"):
             db.set_review(a.id, "bidon")
+
+
+# ------------------------------------------------------- clés de date (v6)
+
+DATES: tuple[str, ...] = (
+    "",
+    "n/a",
+    "05/03/2018 08:00:00",
+    "31/12/2026 23:59:59",
+    "08/31/2026 10:00:00",
+    "1/2/2026 10:00",
+    "2026-08-31",
+    "2026-08-31T10:00:00",
+    "2026-08-31 10:00:00+02:00",
+    "2026/08/31 10:00:00",
+    "20260831",
+    "  2026-08-31",
+)
+"""Dates de toutes les formes rencontrées : SMBeagle, américaine, ISO, illisibles."""
+
+
+def test_date_key_matches_sql(tmp_path: Path) -> None:
+    """`date_key` (écriture, Python) et `date_key_sql` (migration) rendent la même clé."""
+    with Database(tmp_path / "x.sqlite") as db:
+        for value in DATES:
+            expected = db.query_values(
+                f"SELECT {date_key_sql('v')} FROM (SELECT ? AS v)", (value,)
+            )[0][0]
+            assert date_key(value) == expected, value
+
+
+def _v5_database(path: Path) -> None:
+    """Crée une base au schéma v5 remplie de fichiers aux dates variées."""
+    conn = sqlite3.connect(path)
+    for _version, sql in _MIGRATIONS[:5]:
+        conn.executescript(sql)
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '5')")
+    conn.execute("INSERT INTO scans(csv_path, imported_at) VALUES('a.csv', '2026-01-01')")
+    conn.executemany(
+        """INSERT INTO files(path_key, path, name, last_write_time, access_time,
+           access_time_first, size_bytes, first_seen_scan_id, last_seen_scan_id, updated_at)
+           VALUES(?,?,?,?,?,?,?,1,1,'2026-01-01')""",
+        [
+            # accès rajeuni par l'audit : la clé doit suivre la première observation
+            (
+                "a",
+                "a",
+                "a",
+                "05/03/2018 08:00:00",
+                "30/08/2026 09:00:00",
+                "06/03/2018 08:00:00",
+                10,
+            ),
+            # première observation absente (fichier importé avant la v5)
+            ("b", "b", "b", "2020-07-04T10:00:00", "2021-09-08T11:00:00", "", 20),
+            # dates illisibles
+            ("c", "c", "c", "n/a", "", "", 30),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_migration_v5_to_v6_backfills_date_keys(tmp_path: Path) -> None:
+    """Une base v5 remplie migre seule en v6 : clés rétro-remplies, données intactes."""
+    path = tmp_path / "campagne.sqlite"
+    _v5_database(path)
+    with Database(path) as db:
+        assert db.schema_version == SCHEMA_VERSION
+        keys = {
+            str(r[0]): (str(r[1]), str(r[2]))
+            for r in db.query_values("SELECT name, access_key, write_key FROM files")
+        }
+        assert keys == {
+            "a": ("20180306", "20180305"),
+            "b": ("20210908", "20200704"),
+            "c": ("", ""),
+        }
+        assert db.counts()["files"] == 3
+        assert [int(r[0]) for r in db.query_values("SELECT size_bytes FROM files ORDER BY id")] == [
+            10,
+            20,
+            30,
+        ]
+    backup = backup_dir_for(path) / f"campagne_avant_migration_v{SCHEMA_VERSION}.sqlite"
+    assert backup.exists()
+    with Database(backup) as saved:  # la sauvegarde migre à son tour, sans perte
+        assert saved.counts()["files"] == 3
+
+
+def test_date_keys_follow_upserts(tmp_path: Path) -> None:
+    """Insertion, rescan sans changement et changement de contenu gardent les clés justes."""
+    with Database(tmp_path / "x.sqlite") as db:
+
+        def keys() -> tuple[str, str]:
+            row = db.query_values("SELECT access_key, write_key FROM files")[0]
+            return str(row[0]), str(row[1])
+
+        scan1 = db.start_scan("a.csv")
+        db.upsert_files([_row("a.txt")], scan1)
+        assert keys() == ("20260102", "20260101")
+
+        # rescan : l'audit a rajeuni la date d'accès, la clé suit la première observation
+        scan2 = db.start_scan("a.csv")
+        assert db.upsert_files([_row("a.txt", access="30/08/2026 09:00:00")], scan2) == (0, 0, 1)
+        assert keys() == ("20260102", "20260101")
+
+        # contenu modifié : les deux clés repartent des dates du scan
+        scan3 = db.start_scan("a.csv")
+        assert db.upsert_files(
+            [
+                _row(
+                    "a.txt",
+                    fast_hash="bbbb",
+                    lwt="04/07/2026 10:00:00",
+                    access="05/07/2026 10:00:00",
+                )
+            ],
+            scan3,
+        ) == (0, 1, 0)
+        assert keys() == ("20260705", "20260704")

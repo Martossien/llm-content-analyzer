@@ -18,9 +18,14 @@ lecture des résultats, vérification humaine, FAQ.
    [smbeagle_enriched v4.2.0](https://github.com/Martossien/smbeagle_enriched/releases/tag/v4.2.0)).
 2. Lancer `Docia.exe` (double-clic = interface ; en console, `Docia.exe doctor` vérifie que tout
    est en place : DocFuse, pdfium, **OCR Tesseract embarqué** — rien d'autre à installer, ni .NET
-   ni Tesseract).
+   ni Tesseract). Le diagnostic fait un **vrai essai d'OCR** et affiche, en cas d'échec, le
+   message de Tesseract lui-même ; il est aussi accessible sans console (mode administrateur →
+   *Serveur & performances* → **Diagnostic du poste**).
 3. Mode administrateur (interrupteur en haut à droite) → *Serveur & performances* : adresse du
    serveur LLM, **Tester la connexion**, Enregistrer.
+
+Un fichier **`docia.log`** est tenu à côté de `Docia.exe` (rotation 4 Mo × 4) : la console garde
+une ligne par incident, le détail complet y est écrit. C'est le fichier à joindre en cas de souci.
 
 Le mode de scan standard est le **scan local Windows** : un lecteur réseau mappé (`P:\`) ou un
 dossier (`\\serveur\partage\Finance`), avec le compte de la session (droit de lecture suffisant).

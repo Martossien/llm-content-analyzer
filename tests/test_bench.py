@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from docia.bench import build_bench_blocks, run_bench, synthetic_french
+from docia.bench import BenchReport, build_bench_blocks, run_bench, synthetic_french
 from docia.cli_tools import register
 from docia.config import Config
 
@@ -70,6 +70,23 @@ def test_bench_reports_unreachable_server_without_raising(tmp_path: Path) -> Non
     assert "injoignable" in report.message
     assert report.blocks == []
     assert "ÉCHEC" in "\n".join(report.as_lines())
+
+
+def test_bench_failure_shows_server_errors() -> None:
+    """Un banc en échec doit DIRE pourquoi : « aucun bloc exploitable » sans le message
+    du serveur ne permet ni à l'utilisateur ni au support de diagnostiquer quoi que ce soit.
+    """
+    report = BenchReport(model="m", base_url="http://x/v1", transport="vllm", blocks_sent=6)
+    report.ok = False
+    report.message = "aucun bloc exploitable (6 erreur(s)) — HTTP 400 : contexte dépassé"
+    report.errors = [f"bench_{i:03d}.md : HTTP 400 : contexte dépassé" for i in range(1, 7)]
+
+    lines = report.as_lines()
+    text = "\n".join(lines)
+    assert "ÉCHEC" in text
+    assert "HTTP 400 : contexte dépassé" in text
+    assert sum(1 for line in lines if line.startswith("  erreur :")) == 5
+    assert "et 1 autre(s) erreur(s)" in text
 
 
 def test_bench_measures_thinking_overhead(tmp_path: Path, fake_server) -> None:  # type: ignore[no-untyped-def]

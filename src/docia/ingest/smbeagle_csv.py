@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -255,11 +256,14 @@ def parse_line(line: str, line_number: int, *, strict: bool = False) -> Smbeagle
     )
 
 
+@lru_cache(maxsize=8192)
 def parse_smbeagle_datetime(text: str) -> datetime | None:
     """Date SMBeagle (`dd/MM/yyyy HH:mm:ss`) → `datetime` naïf, `None` si illisible.
 
     Tolère l'ordre américain (`MM/dd/yyyy`, machine en InvariantGlobalization)
-    et l'ISO `yyyy-MM-dd`.
+    et l'ISO `yyyy-MM-dd`. Fonction pure, donc mémoïsée : les vues la rappellent
+    des dizaines de milliers de fois sur un jeu de dates très répétitif, et un
+    format non reconnu du premier coup coûte plusieurs `strptime` en échec.
     """
     value = text.strip()
     if not value:

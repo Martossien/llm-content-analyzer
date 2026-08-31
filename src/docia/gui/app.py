@@ -64,7 +64,9 @@ class DociaApp:
         self.root.geometry("1280x900")
         self.root.minsize(1024, 720)
 
-        self.db_var = ctk.StringVar(value=self.config.db_path)
+        # Chemin de la campagne en Python pur (et non dans une variable Tk) : les calculs
+        # de fond le lisent depuis leur thread, où toucher à Tk est interdit.
+        self._db_path = str(self.config.db_path)
         self.admin_var = ctk.BooleanVar(value=False)
 
         self._build()
@@ -113,7 +115,7 @@ class DociaApp:
         self.busy_label = ctk.CTkLabel(header, text="", text_color="#b45309")
         self.busy_label.pack(side="right", padx=12)
 
-        self.tabs = ctk.CTkTabview(self.root, anchor="w")
+        self.tabs = ctk.CTkTabview(self.root, anchor="w", command=self._tab_changed)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(4, 2))
         self.tab_objects: dict[str, Any] = {}
         self._admin_built = False
@@ -138,6 +140,7 @@ class DociaApp:
         self.log_box.configure(state="disabled")
         self._journal_visible = False
 
+        self._touch_campaign()
         self._refresh_campaign_header()
         self.refresh_all()
 
@@ -187,10 +190,25 @@ class DociaApp:
             self._toggle_admin()
         if name in self.tab_objects:
             self.tabs.set(name)
+            self._tab_changed()
+
+    def current_tab(self) -> str:
+        """Nom de l'onglet visible — les écrans coûteux ne calculent que s'ils sont à l'écran."""
+        try:
+            return str(self.tabs.get())
+        except Exception:  # noqa: BLE001 — pendant la construction, aucun onglet n'est encore posé
+            return ""
+
+    def _tab_changed(self) -> None:
+        """Un onglet vient d'être affiché : il rattrape le rafraîchissement qu'il a sauté."""
+        tab = self.tab_objects.get(self.current_tab())
+        catch_up = getattr(tab, "refresh_if_needed", None)
+        if catch_up is not None:
+            catch_up()
 
     # ------------------------------------------------------------ campagne
     def db_path(self) -> Path:
-        return Path(self.db_var.get().strip() or self.config.db_path)
+        return Path(self._db_path.strip() or self.config.db_path)
 
     def open_db(self) -> Database:
         self.config.db_path = str(self.db_path())
@@ -202,9 +220,51 @@ class DociaApp:
     def set_backup_dir(self, path: Path) -> None:
         self._backup_dir = path
 
+    def create_campaign(self, db_path: str) -> bool:
+        """Crée le fichier de campagne (dossier + schéma) puis l'ouvre.
+
+        Sans cette création, « Nouvelle… » ne faisait que retenir un nom : le fichier
+        n'existait pas, et « Scanner » refusait de démarrer faute de campagne. Un fichier
+        déjà présent est **ouvert tel quel** : une campagne ne s'écrase jamais.
+        """
+        target = Path(db_path)
+        existed = target.exists()
+        try:
+            Database(target).close()
+        except Exception as exc:  # noqa: BLE001 — chemin invalide, disque plein, droits
+            self.log(f"campagne impossible à créer ({target}) : {exc}")
+            return False
+        self.open_campaign(str(target))
+        self.log(
+            f"campagne existante ouverte : {target} (aucune donnée effacée)"
+            if existed
+            else f"campagne créée : {target}"
+        )
+        return True
+
+    def _touch_campaign(self) -> None:
+        """Ouvre la base une fois, ici, dans le thread Tk.
+
+        C'est cette ouverture qui déclenche une éventuelle migration de schéma (et sa
+        sauvegarde préalable). Les écrans calculent ensuite en parallèle : laisser trois
+        threads découvrir en même temps une base à migrer serait un désastre.
+        """
+        if not self.db_path().exists():
+            return
+        try:
+            Database(self.db_path()).close()
+        except Exception as exc:  # noqa: BLE001 — base illisible : on le dit, on continue
+            logger.exception("ouverture de la campagne")
+            self.log(f"campagne illisible ({self.db_path()}) : {exc}")
+
+    def ensure_campaign(self) -> bool:
+        """Garantit que la campagne courante existe sur le disque (créée au besoin)."""
+        return True if self.db_path().exists() else self.create_campaign(str(self.db_path()))
+
     def open_campaign(self, db_path: str) -> None:
-        self.db_var.set(db_path)
+        self._db_path = db_path
         self.config.db_path = db_path
+        self._touch_campaign()
         self.remember_campaign()
         self._refresh_campaign_header()
         self.refresh_all()
@@ -245,8 +305,7 @@ class DociaApp:
             filetypes=[("Campagne Doc-IA", "*.sqlite")],
             initialfile="campagne.sqlite",
         )
-        if path:
-            self.open_campaign(path)
+        if path and self.create_campaign(path):
             self.show_tab("Accueil")
 
     def _open_recent(self, choice: str) -> None:
@@ -295,6 +354,31 @@ class DociaApp:
         self._set_busy(True, name)
         self._worker.start()
         return True
+
+    def run_background(
+        self,
+        compute: Callable[[], Any],
+        apply: Callable[[Any], None],
+        *,
+        name: str = "calcul",
+    ) -> None:
+        """Calcul de lecture (statistiques, compteurs) hors du thread Tk.
+
+        Contrairement à `run_in_thread`, n'occupe pas l'unique emplacement de travail :
+        consulter un écran ne doit jamais empêcher de lancer une analyse. `apply(résultat)`
+        s'exécute ensuite dans le thread Tk, via la file du journal.
+        """
+
+        def worker() -> None:
+            try:
+                result = compute()
+            except Exception as exc:  # noqa: BLE001 — affiché, jamais avalé
+                logger.exception("échec %s", name)
+                self.log(f"{name} : {exc}")
+                return
+            self.ui(lambda: apply(result))
+
+        threading.Thread(target=worker, name=f"docia-{name}", daemon=True).start()
 
     def is_busy(self) -> bool:
         return bool(self._worker and self._worker.is_alive())

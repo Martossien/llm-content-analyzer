@@ -15,6 +15,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from docia.models import (
     BlockFile,
@@ -28,7 +29,7 @@ from docia.models import (
     path_key,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 BACKUP_DIR_SUFFIX = ".backups"
 """Suffixe du dossier de sauvegardes, à côté de la base (`docia.sqlite.backups`)."""
@@ -39,6 +40,48 @@ logger = logging.getLogger(__name__)
 def backup_dir_for(db_path: Path) -> Path:
     """Dossier de sauvegardes d'une base : `<base>.backups` (à côté du fichier)."""
     return db_path.with_name(db_path.name + BACKUP_DIR_SUFFIX)
+
+
+def date_key_sql(column: str) -> str:
+    """Expression SQL rendant `yyyymmdd` (ou `''`) pour une date SMBeagle ou ISO.
+
+    Miroir exact de `date_key` : les deux doivent rendre la même chaîne pour
+    toute valeur (vérifié par `tests/test_db.py`). Sert à remplir `files.access_key`
+    et `files.write_key` (schéma v6) et à les rétro-remplir à la migration.
+    """
+    return (
+        f"CASE WHEN length({column})>=10 AND substr({column},3,1)='/' AND substr({column},6,1)='/'"
+        f" THEN substr({column},7,4)||substr({column},4,2)||substr({column},1,2)"
+        f" WHEN length({column})>=10 AND substr({column},5,1)='-'"
+        f" THEN substr({column},1,4)||substr({column},6,2)||substr({column},9,2)"
+        f" ELSE '' END"
+    )
+
+
+def date_key(value: str) -> str:
+    """`yyyymmdd` d'une date SMBeagle (`dd/MM/yyyy…`) ou ISO, `''` si illisible.
+
+    Clé comparable lexicographiquement : c'est elle qui est stockée dans
+    `files.access_key` / `files.write_key` pour que les vues d'ancienneté
+    s'appuient sur un index au lieu de reformater chaque ligne.
+    """
+    if len(value) >= 10:
+        if value[2] == "/" and value[5] == "/":
+            return value[6:10] + value[3:5] + value[0:2]
+        if value[4] == "-":
+            return value[0:4] + value[5:7] + value[8:10]
+    return ""
+
+
+def first_access_sql(prefix: str = "") -> str:
+    """Date d'accès retenue pour l'ancienneté : la première observée (schéma v5).
+
+    Le hachage et l'extraction de l'audit lisent les fichiers et peuvent
+    rafraîchir la date d'accès NTFS : la statistique « non accédé depuis N ans »
+    s'appuie donc sur `access_time_first`, et ne retombe sur `access_time` que
+    si cette première observation manque.
+    """
+    return f"COALESCE(NULLIF({prefix}access_time_first, ''), {prefix}access_time)"
 
 
 def _now() -> str:
@@ -242,12 +285,44 @@ extraction) et peut mettre à jour la date d'accès NTFS : les statistiques
 sur une date rafraîchie par un rescan d'un fichier inchangé. `scans.kind` =
 `scan` (SMBeagle piloté par docia, manifeste conservé) ou `import` (CSV fourni)."""
 
+_SCHEMA_V6 = f"""
+ALTER TABLE files ADD COLUMN access_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE files ADD COLUMN write_key TEXT NOT NULL DEFAULT '';
+UPDATE files SET access_key = {date_key_sql(first_access_sql())},
+                 write_key = {date_key_sql("last_write_time")};
+
+CREATE INDEX IF NOT EXISTS idx_files_access_key ON files(access_key, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_files_write_key ON files(write_key, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_files_extension_size ON files(extension, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_files_owner_size ON files(owner, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_files_share_size ON files(base, unc_directory, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_files_status_size ON files(status, size_bytes);
+CREATE INDEX IF NOT EXISTS idx_analyses_file_latest ON analyses(file_id, created_at, id);
+
+DROP INDEX IF EXISTS idx_files_extension;
+DROP INDEX IF EXISTS idx_files_owner;
+DROP INDEX IF EXISTS idx_files_base;
+DROP INDEX IF EXISTS idx_files_status;
+
+ANALYZE;
+"""
+"""v6 : `access_key` / `write_key` = dates d'accès et d'écriture normalisées en
+`yyyymmdd` (`''` si absente ou illisible), remplies à l'insertion comme à la mise
+à jour par `upsert_files` et rétro-remplies ici. Les vues d'ancienneté comparaient
+jusqu'ici des `substr()` calculés ligne par ligne : aucun index n'était utilisable
+et chaque seuil relançait un balayage complet. Les index sont couvrants (la taille
+suit la clé) pour que les totaux se lisent sans toucher la table ; les index d'une
+seule colonne qu'ils remplacent (préfixe identique) sont supprimés. `ANALYZE` donne
+au planificateur les cardinalités réelles dès la migration ; il est rejoué à la fin
+de chaque scan (`finish_scan`)."""
+
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
+    (6, _SCHEMA_V6),
 ]
 
 REVIEW_STATUSES = ("to_review", "validated", "corrected")
@@ -290,6 +365,20 @@ class Database:
     def query(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
         """Exécute un `SELECT` et rend les lignes (accès lecture seule pour `views.py`)."""
         return list(self._conn.execute(sql, params))
+
+    def query_values(self, sql: str, params: tuple[object, ...] = ()) -> list[tuple[Any, ...]]:
+        """Comme `query`, mais rend des tuples bruts, sans `sqlite3.Row`.
+
+        Réservé aux agrégations qui parcourent des centaines de milliers de
+        lignes (répartition par répertoire) : un objet de moins par ligne.
+        """
+        cursor = self._conn.cursor()
+        cursor.row_factory = None
+        try:
+            rows: list[tuple[Any, ...]] = cursor.execute(sql, params).fetchall()
+            return rows
+        finally:
+            cursor.close()
 
     def backup_to(self, path: str | Path) -> None:
         """Copie cohérente de la base vers `path` (API `sqlite3.Connection.backup`).
@@ -377,10 +466,17 @@ class Database:
     def finish_scan(
         self, scan_id: int, *, total: int, new: int, updated: int, unchanged: int, invalid: int
     ) -> None:
+        """Clôt un scan et rafraîchit les statistiques d'index.
+
+        `ANALYZE` (moins d'une seconde pour 200 000 fichiers) donne au planificateur
+        les cardinalités réelles : sans elles, plusieurs vues statistiques
+        choisissent un index moins bon que le balayage couvrant attendu.
+        """
         self._conn.execute(
             "UPDATE scans SET rows_total=?, rows_new=?, rows_updated=?, rows_unchanged=?, rows_invalid=? WHERE id=?",
             (total, new, updated, unchanged, invalid, scan_id),
         )
+        self._conn.execute("ANALYZE")
         self._conn.commit()
 
     def upsert_files(self, rows: Iterable[SmbeagleRow], scan_id: int) -> tuple[int, int, int]:
@@ -389,6 +485,10 @@ class Database:
         Un fichier connu dont `fast_hash`, `size` ou `last_write_time` change
         prend `content_version + 1` et repasse `pending` (sauf s'il est
         `excluded`, l'exclusion étant une règle, pas un état de contenu).
+
+        `access_key` / `write_key` (schéma v6) sont recalculées à chaque écriture :
+        elles doivent rester le reflet exact de `COALESCE(NULLIF(access_time_first,
+        ''), access_time)` et de `last_write_time`.
 
         Returns:
             (nouveaux, modifiés, inchangés).
@@ -399,7 +499,8 @@ class Database:
             for row in rows:
                 key = path_key(row.path)
                 existing = conn.execute(
-                    "SELECT id, fast_hash, size_bytes, last_write_time, status, content_version FROM files WHERE path_key=?",
+                    "SELECT id, fast_hash, size_bytes, last_write_time, access_time_first, status,"
+                    " content_version FROM files WHERE path_key=?",
                     (key,),
                 ).fetchone()
                 if existing is None:
@@ -408,8 +509,9 @@ class Database:
                            unc_directory, base, directory_type, size_bytes, creation_time, last_write_time,
                            access_time, access_time_first, file_attributes, owner, fast_hash, file_signature,
                            readable, writeable, deletable, first_seen_scan_id, last_seen_scan_id,
+                           access_key, write_key,
                            content_version, status, updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'pending',?)""",
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'pending',?)""",
                         (
                             key,
                             row.path,
@@ -435,6 +537,8 @@ class Database:
                             int(row.deletable),
                             scan_id,
                             scan_id,
+                            date_key(row.access_time),
+                            date_key(row.last_write_time),
                             now,
                         ),
                     )
@@ -453,7 +557,7 @@ class Database:
                     )
                     conn.execute(
                         """UPDATE files SET size_bytes=?, creation_time=?, last_write_time=?, access_time=?,
-                           access_time_first=?,
+                           access_time_first=?, access_key=?, write_key=?,
                            file_attributes=?, owner=?, fast_hash=?, file_signature=?, readable=?, writeable=?,
                            deletable=?, last_seen_scan_id=?, content_version=content_version+1, status=?,
                            exclusion_reason=CASE WHEN ?='excluded' THEN exclusion_reason ELSE NULL END, updated_at=?
@@ -464,6 +568,8 @@ class Database:
                             row.last_write_time,
                             row.access_time,
                             row.access_time,
+                            date_key(row.access_time),
+                            date_key(row.last_write_time),
                             row.file_attributes,
                             row.owner,
                             row.fast_hash,
@@ -480,9 +586,13 @@ class Database:
                     )
                     updated += 1
                 else:
+                    # `access_time_first` ne bouge pas : la clé d'accès ne retombe sur
+                    # `access_time` que si la première observation manque.
+                    first_access = str(existing["access_time_first"]) or row.access_time
                     conn.execute(
-                        "UPDATE files SET last_seen_scan_id=?, access_time=?, updated_at=? WHERE id=?",
-                        (scan_id, row.access_time, now, existing["id"]),
+                        "UPDATE files SET last_seen_scan_id=?, access_time=?, access_key=?,"
+                        " updated_at=? WHERE id=?",
+                        (scan_id, row.access_time, date_key(first_access), now, existing["id"]),
                     )
                     unchanged += 1
         return new, updated, unchanged
@@ -926,11 +1036,17 @@ class Database:
                 deleted += int(cur.rowcount)
         return deleted
 
-    def latest_analyses(self) -> Iterator[sqlite3.Row]:
-        """Dernière analyse de chaque fichier (jointe au fichier), pour l'export."""
+    def latest_analyses(self, *, file_id: int | None = None) -> Iterator[sqlite3.Row]:
+        """Dernière analyse de chaque fichier (jointe au fichier), pour l'export.
+
+        `file_id` : une seule fiche. L'écran Résultats relisait toute la campagne à
+        chaque clic sur une ligne (plusieurs secondes sur 200 000 fichiers).
+        """
+        where = "WHERE f.id = ? " if file_id is not None else ""
+        params: tuple[object, ...] = (file_id,) if file_id is not None else ()
         return iter(
             self._conn.execute(
-                """SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f.host, f.status, f.exclusion_reason,
+                f"""SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f.host, f.status, f.exclusion_reason,
                           f.content_version, a.model, a.prompt_hash, a.resume,
                           a.security_classification, a.security_confidence, a.security_justification,
                           a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
@@ -944,7 +1060,8 @@ class Database:
                    FROM files f LEFT JOIN analyses a ON a.id = (
                         SELECT id FROM analyses WHERE file_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1)
                    LEFT JOIN reviews r ON r.file_id = f.id
-                   ORDER BY f.path"""
+                   {where}ORDER BY f.path""",
+                params,
             )
         )
 

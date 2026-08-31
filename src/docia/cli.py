@@ -556,16 +556,76 @@ def _utf8_console() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
 
 
+class _ConsoleFormatter(logging.Formatter):
+    """Console : une ligne par événement, **sans la pile d'appels**.
+
+    Une campagne réelle rencontre toujours quelques fichiers illisibles (mails
+    corrompus, PDF protégés…). Déverser une trace Python de vingt lignes par fichier
+    rend la console inutilisable et alarme l'utilisateur pour un incident bénin :
+    la pile complète part dans le fichier journal, la console garde le message.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        saved = (record.exc_info, record.exc_text, record.stack_info)
+        record.exc_info = record.exc_text = record.stack_info = None
+        try:
+            return super().format(record)
+        finally:
+            record.exc_info, record.exc_text, record.stack_info = saved
+
+
+def _log_file(config_path: Path | None) -> Path:
+    """`docia.log` à côté du fichier de configuration (donc à côté de `Docia.exe`)."""
+    base = Path(config_path).resolve().parent if config_path else Path.cwd()
+    return base / "docia.log"
+
+
+_JOURNAL: Path | None = None
+"""Fichier journal en cours (configuré une seule fois par processus)."""
+
+_LOGGING_CONFIGURED = False
+"""Vrai dès que `_setup_logging` a posé ses gestionnaires."""
+
+
+def _setup_logging(args: argparse.Namespace) -> Path | None:
+    """Console lisible + journal détaillé sur disque (traces complètes, rotation).
+
+    Idempotent : la fenêtre rappelle `main()` pour produire ses documents, il ne faut
+    ni doubler les messages ni rouvrir le journal.
+    """
+    global _JOURNAL, _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return _JOURNAL
+    _LOGGING_CONFIGURED = True
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    console = logging.StreamHandler(stream=sys.stderr)
+    console.setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    console.setFormatter(_ConsoleFormatter("%(levelname)s %(name)s : %(message)s"))
+    root.addHandler(console)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    target = _log_file(getattr(args, "config", None))
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        journal = RotatingFileHandler(target, maxBytes=4_000_000, backupCount=3, encoding="utf-8")
+    except OSError as exc:  # dossier en lecture seule, disque plein : la console suffit
+        logging.getLogger(__name__).warning("journal sur disque impossible (%s) : %s", target, exc)
+        return None
+    journal.setLevel(logging.DEBUG)
+    journal.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root.addHandler(journal)
+    _JOURNAL = target
+    return target
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        stream=sys.stderr,
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    journal = _setup_logging(args)
+    if journal is not None:
+        logging.getLogger(__name__).info("journal détaillé : %s", journal)
     if args.command == "init":
         return cmd_init(args)
     if args.command == "gui":

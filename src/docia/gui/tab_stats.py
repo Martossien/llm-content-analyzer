@@ -1,9 +1,16 @@
 """Écran Statistiques : quatre sous-onglets — Hygiène (doublons, ancienneté, répartitions),
 Risque (classification, sensibles, matrice), Conservation (plan), Vérification (avancement).
-Chaque sous-onglet : tuiles chiffrées, graphique en barres, tableau détaillé."""
+Chaque sous-onglet : tuiles chiffrées, graphique en barres, tableau détaillé.
+
+Les chiffres sont calculés **hors du thread Tk** (`app.run_background`) et **uniquement
+pour le sous-onglet affiché** : sur une campagne de 200 000 fichiers, tout recalculer dans
+la fenêtre gelait l'interface une trentaine de secondes à chaque rafraîchissement.
+Les fonctions `compute_*` ne touchent pas à Tk : elles rendent une `SectionData`.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from docia.gui.theme import (
@@ -16,6 +23,8 @@ from docia.gui.theme import (
     severity_color,
 )
 from docia.gui.widgets import BarChart, KpiTile, Table, rows_from_records
+
+TAB_NAME = "Statistiques"
 
 _HYGIENE_VIEWS = (
     "Doublons (espace récupérable)",
@@ -33,6 +42,24 @@ _RISK_VIEWS = (
     "Classification × propriétaire",
     "Classification × répertoire",
 )
+_RETENTION_VIEWS = ("Plan de conservation",)
+_REVIEW_VIEWS = ("Écarts LLM / humain", "Runs")
+
+_WAIT = "calcul en cours…"
+
+
+@dataclass
+class SectionData:
+    """Ce qu'un sous-onglet affiche — calculé hors du thread Tk, appliqué dedans."""
+
+    tiles: dict[str, str] = field(default_factory=dict)
+    chart: list[tuple[str, float, str | None]] = field(default_factory=list)
+    chart_title: str = ""
+    chart_unit: str = ""
+    cols: list[str] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
+    summary: str = ""
+    tags: list[str] | None = None
 
 
 class _Section:
@@ -78,12 +105,26 @@ class _Section:
         self.table.set_rows(rows, tags)
         self.summary.configure(text=summary)
 
+    def apply(self, data: SectionData) -> None:
+        """Affiche une `SectionData` (thread Tk)."""
+        for key, tile in self.tiles.items():
+            tile.set(data.tiles.get(key, "—"))
+        self.chart.draw(data.chart, title=data.chart_title, unit=data.chart_unit)
+        self.set_table(data.cols, data.rows, data.summary, data.tags)
+
+    def waiting(self) -> None:
+        """Indique que le calcul est lancé — la fenêtre reste utilisable."""
+        self.summary.configure(text=_WAIT)
+
 
 class StatsTab:
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
         self.ctk = app.ctk
+        self._dirty = True
+        self._shown_key: tuple[str, str, int] | None = None
+        self._token = 0
 
     def build(self) -> None:
         ctk, p = self.ctk, self.parent
@@ -98,12 +139,13 @@ class StatsTab:
             text="Rapport HTML…",
             width=130,
             fg_color="#6b7280",
-            command=lambda: self.app.show_tab("Rapports"),
+            command=self._html_report,
         ).pack(side="right")
 
-        self.sub = ctk.CTkTabview(p, anchor="w")
+        self.sub = ctk.CTkTabview(p, anchor="w", command=self.refresh_if_needed)
         self.sub.pack(fill="both", expand=True, padx=8, pady=(0, 6))
-        self.hygiene = _Section(
+        self.sections: dict[str, _Section] = {}
+        self.hygiene = self.sections["Hygiène"] = _Section(
             ctk,
             self.sub.add("Hygiène"),
             tiles=[
@@ -114,7 +156,7 @@ class StatsTab:
             views=_HYGIENE_VIEWS,
             on_view=self.refresh,
         )
-        self.risk = _Section(
+        self.risk = self.sections["Risque"] = _Section(
             ctk,
             self.sub.add("Risque"),
             tiles=[
@@ -125,17 +167,17 @@ class StatsTab:
             views=_RISK_VIEWS,
             on_view=self.refresh,
         )
-        self.retention = _Section(
+        self.retention = self.sections["Conservation"] = _Section(
             ctk,
             self.sub.add("Conservation"),
             tiles=[
                 ("keep", "fichiers à conserver", ACCENT),
                 ("expired", "durée échue", severity_color("C1")),
             ],
-            views=("Plan de conservation",),
+            views=_RETENTION_VIEWS,
             on_view=self.refresh,
         )
-        self.review = _Section(
+        self.review = self.sections["Vérification"] = _Section(
             ctk,
             self.sub.add("Vérification"),
             tiles=[
@@ -143,148 +185,188 @@ class StatsTab:
                 ("corrected", "corrigés", severity_color("C2")),
                 ("pct", "% vérifiés", ACCENT),
             ],
-            views=("Écarts LLM / humain", "Runs"),
+            views=_REVIEW_VIEWS,
             on_view=self.refresh,
         )
         self.app.on_refresh(self.refresh)
 
+    # ------------------------------------------------------------------ état
     def _years(self) -> int:
         raw = self.years_var.get().strip()
         return int(raw) if raw.isdigit() and int(raw) > 0 else 5
 
+    def _section_name(self) -> str:
+        name = str(self.sub.get())
+        return name if name in self.sections else "Hygiène"
+
     def refresh(self) -> None:
-        if not self.app.db_path().exists():
-            for s in (self.hygiene, self.risk, self.retention, self.review):
-                s.set_table([], [], "aucune campagne ouverte")
-                for tile in s.tiles.values():
-                    tile.set("—")
-                s.chart.draw([])
+        """Marque l'écran à recalculer ; le calcul n'a lieu que s'il est visible."""
+        self._dirty = True
+        self.refresh_if_needed()
+
+    def refresh_if_needed(self) -> None:
+        """Recalcule le sous-onglet affiché si nécessaire (changement d'onglet, de vue…)."""
+        if self.app.current_tab() != TAB_NAME:
             return
-        from docia import views
+        section = self._section_name()
+        key = (section, self.sections[section].view_var.get(), self._years())
+        if not self._dirty and key == self._shown_key:
+            return
+        self._compute(section, key)
 
-        years = self._years()
-        try:
-            with self.app.open_db() as db:
-                self._refresh_hygiene(views, db, years)
-                self._refresh_risk(views, db)
-                self._refresh_retention(views, db)
-                self._refresh_review(views, db)
-        except Exception as exc:  # noqa: BLE001
-            self.app.log(f"statistiques indisponibles : {exc}")
+    def _compute(self, section: str, key: tuple[str, str, int]) -> None:
+        if not self.app.db_path().exists():
+            for s in self.sections.values():
+                s.apply(SectionData(summary="aucune campagne ouverte"))
+            self._dirty = False
+            self._shown_key = None
+            return
+        self.sections[section].waiting()
+        self._token += 1
+        token = self._token
+        app, view_name, years = self.app, key[1], key[2]
 
-    # ---- hygiène
-    def _refresh_hygiene(self, views: Any, db: Any, years: int) -> None:
-        s = self.hygiene
-        ov = views.overview(db, stale_years=years)
-        s.tiles["dup"].set(format_bytes(ov.duplicate_reclaimable_bytes))
-        s.tiles["stale"].set(format_int(ov.stale_files))
-        s.tiles["cleanup"].set(format_bytes(ov.cleanup_bytes))
-        s.chart.draw(
-            [(g.label, g.bytes / 1e6, None) for g in views.by_extension(db, limit=8)],
-            title="volume par extension",
-            unit="Mo",
+        def compute() -> SectionData:
+            from docia import views
+
+            with app.open_db() as db:
+                return _COMPUTE[section](views, db, view_name, years)
+
+        def apply(data: SectionData) -> None:
+            if token != self._token:  # un calcul plus récent a été demandé
+                return
+            self.sections[section].apply(data)
+            self._dirty = False
+            self._shown_key = key
+
+        app.run_background(compute, apply, name="statistiques")
+
+    def _html_report(self) -> None:
+        """Produit le rapport HTML (mêmes chiffres que cet écran) et l'ouvre."""
+        from docia.gui.service_shim import produce_document
+
+        produce_document(self.app, "html", "report")
+
+
+# --------------------------------------------------------------- calculs (hors Tk)
+
+
+def compute_hygiene(views: Any, db: Any, view_name: str, years: int) -> SectionData:
+    """Doublons, ancienneté, nettoyage et répartitions — aucun appel Tk."""
+    ov = views.overview(db, stale_years=years)
+    data = SectionData(
+        tiles={
+            "dup": format_bytes(ov.duplicate_reclaimable_bytes),
+            "stale": format_int(ov.stale_files),
+            "cleanup": format_bytes(ov.cleanup_bytes),
+        },
+        chart=[(g.label, g.bytes / 1e6, None) for g in views.by_extension(db, limit=8)],
+        chart_title="volume par extension",
+        chart_unit="Mo",
+    )
+    if view_name.startswith("Doublons"):
+        rep = views.duplicates(db, limit=500)
+        data.cols = ["copies", "taille", "récupérable", "chemins"]
+        data.rows = [
+            [
+                str(f.copies),
+                format_bytes(f.size_bytes),
+                format_bytes(f.reclaimable_bytes),
+                " | ".join(f.paths[:4]),
+            ]
+            for f in rep.families
+        ]
+        data.summary = (
+            f"{rep.total_families} familles, {rep.total_copies} exemplaires — "
+            f"récupérable : {format_bytes(rep.total_reclaimable_bytes)}"
         )
-        name = s.view_var.get()
-        if name.startswith("Doublons"):
-            rep = views.duplicates(db, limit=500)
-            rows = [
-                [
-                    str(f.copies),
-                    format_bytes(f.size_bytes),
-                    format_bytes(f.reclaimable_bytes),
-                    " | ".join(f.paths[:4]),
-                ]
-                for f in rep.families
+    elif view_name.startswith("Ancienneté"):
+        data.cols = ["depuis (ans)", "non accédés", "volume", "non modifiés", "volume "]
+        data.rows = [
+            [
+                str(b.years),
+                format_int(b.not_accessed_files),
+                format_bytes(b.not_accessed_bytes),
+                format_int(b.not_modified_files),
+                format_bytes(b.not_modified_bytes),
             ]
-            s.set_table(
-                ["copies", "taille", "récupérable", "chemins"],
-                rows,
-                f"{rep.total_families} familles, {rep.total_copies} exemplaires — récupérable : {format_bytes(rep.total_reclaimable_bytes)}",
-            )
-        elif name.startswith("Ancienneté"):
-            rows = [
-                [
-                    str(b.years),
-                    format_int(b.not_accessed_files),
-                    format_bytes(b.not_accessed_bytes),
-                    format_int(b.not_modified_files),
-                    format_bytes(b.not_modified_bytes),
-                ]
-                for b in views.stale_files(db)
-            ]
-            s.set_table(
-                ["depuis (ans)", "non accédés", "volume", "non modifiés", "volume "],
-                rows,
-                "d'après les dates du scan SMBeagle",
-            )
-        elif name.startswith("Candidats"):
-            rep = views.cleanup_candidates(db, years=years)
-            rows = [
-                [r.access_time, format_bytes(r.size_bytes), r.security, r.owner, r.path]
-                for r in rep.rows
-            ]
-            s.set_table(
-                ["dernier accès", "taille", "sécu", "propriétaire", "chemin"],
-                rows,
-                f"{rep.total_files} fichiers non requis, non sensibles, non accédés depuis {years} ans — {format_bytes(rep.total_bytes)} libérables",
-            )
-        elif name == "Répertoires":
-            s.set_table(*_axis(views.by_directory(db, limit=300), "répertoire"))
-        else:
-            fn = {
-                "Extensions": views.by_extension,
-                "Propriétaires": views.by_owner,
-                "Partages": views.by_share,
-            }.get(name)
-            stats = fn(db, limit=200) if fn else views.size_buckets(db)
-            s.set_table(*_group(stats, name.lower()[:-1] if name.endswith("s") else name.lower()))
-
-    # ---- risque
-    def _refresh_risk(self, views: Any, db: Any) -> None:
-        s = self.risk
-        classes = db.classification_summary()
-        sec = classes.get("security") or {}
-        rg = classes.get("rgpd") or {}
-        s.tiles["c3"].set(format_int(sec.get("C3", 0)))
-        s.tiles["c2"].set(format_int(sec.get("C2", 0)))
-        s.tiles["rgpd"].set(format_int(rg.get("high", 0) + rg.get("critical", 0)))
-        s.chart.draw(
-            [(f"{k}", float(sec.get(k, 0)), k) for k in ("C3", "C2", "C1", "C0", "N/A")],
-            title="fichiers par classe de sécurité",
+            for b in views.stale_files(db)
+        ]
+        data.summary = "d'après les dates du scan SMBeagle"
+    elif view_name.startswith("Candidats"):
+        rep = views.cleanup_candidates(db, years=years)
+        data.cols = ["dernier accès", "taille", "sécu", "propriétaire", "chemin"]
+        data.rows = [
+            [r.access_time, format_bytes(r.size_bytes), r.security, r.owner, r.path]
+            for r in rep.rows
+        ]
+        data.summary = (
+            f"{rep.total_files} fichiers non requis, non sensibles, non accédés depuis "
+            f"{years} ans — {format_bytes(rep.total_bytes)} libérables"
         )
-        name = s.view_var.get()
-        if name == "Fichiers sensibles":
-            rows_s = views.top_sensitive(db, limit=300)
-            rows = [
-                [x.security, x.rgpd, x.owner, x.review_status or "", x.path, x.justification]
-                for x in rows_s
-            ]
-            tags = [x.security if x.security in ("C3", "C2", "C1") else "ok" for x in rows_s]
-            s.set_table(
-                ["sécu", "RGPD", "propriétaire", "revue", "chemin", "justification"],
-                rows,
-                f"{len(rows_s)} fichiers C3 ou RGPD élevé/critique",
-                tags,
-            )
-        else:
-            label = name.split("× ")[1]
-            axis = {"partage": "share", "propriétaire": "owner", "répertoire": "directory"}[label]
-            s.set_table(*_axis(views.classification_matrix(db, axis=axis), label))
+    elif view_name == "Répertoires":
+        data.cols, data.rows, data.summary = _axis(views.by_directory(db, limit=300), "répertoire")
+    else:
+        fn = {
+            "Extensions": views.by_extension,
+            "Propriétaires": views.by_owner,
+            "Partages": views.by_share,
+        }.get(view_name)
+        stats = fn(db, limit=200) if fn else views.size_buckets(db)
+        label = view_name.lower()[:-1] if view_name.endswith("s") else view_name.lower()
+        data.cols, data.rows, data.summary = _group(stats, label)
+    return data
 
-    # ---- conservation
-    def _refresh_retention(self, views: Any, db: Any) -> None:
-        s = self.retention
-        plan = views.retention_plan(db)
-        s.tiles["keep"].set(format_int(plan.total_files))
-        s.tiles["expired"].set(format_int(plan.expired_files))
-        by_basis: dict[str, int] = {}
-        for r in plan.rows:
-            by_basis[r.basis or "?"] = by_basis.get(r.basis or "?", 0) + 1
-        s.chart.draw(
-            sorted(((k, float(v), None) for k, v in by_basis.items()), key=lambda t: -t[1])[:8],
-            title="fichiers par fondement",
+
+def compute_risk(views: Any, db: Any, view_name: str, _years: int) -> SectionData:
+    """Classification de sécurité, fichiers sensibles et matrices — aucun appel Tk."""
+    classes = db.classification_summary()
+    sec = classes.get("security") or {}
+    rg = classes.get("rgpd") or {}
+    data = SectionData(
+        tiles={
+            "c3": format_int(sec.get("C3", 0)),
+            "c2": format_int(sec.get("C2", 0)),
+            "rgpd": format_int(rg.get("high", 0) + rg.get("critical", 0)),
+        },
+        chart=[(k, float(sec.get(k, 0)), k) for k in ("C3", "C2", "C1", "C0", "N/A")],
+        chart_title="fichiers par classe de sécurité",
+    )
+    if view_name == "Fichiers sensibles":
+        rows_s = views.top_sensitive(db, limit=300)
+        data.cols = ["sécu", "RGPD", "propriétaire", "revue", "chemin", "justification"]
+        data.rows = [
+            [x.security, x.rgpd, x.owner, x.review_status or "", x.path, x.justification]
+            for x in rows_s
+        ]
+        data.tags = [x.security if x.security in ("C3", "C2", "C1") else "ok" for x in rows_s]
+        data.summary = f"{len(rows_s)} fichiers C3 ou RGPD élevé/critique"
+    else:
+        label = view_name.split("× ")[1]
+        axis = {"partage": "share", "propriétaire": "owner", "répertoire": "directory"}[label]
+        data.cols, data.rows, data.summary = _axis(
+            views.classification_matrix(db, axis=axis), label
         )
-        rows = [
+    return data
+
+
+def compute_retention(views: Any, db: Any, _view_name: str, _years: int) -> SectionData:
+    """Plan de conservation : fondement, durée, échéance — aucun appel Tk."""
+    plan = views.retention_plan(db)
+    by_basis: dict[str, int] = {}
+    for r in plan.rows:
+        by_basis[r.basis or "?"] = by_basis.get(r.basis or "?", 0) + 1
+    top_basis = sorted(by_basis.items(), key=lambda kv: -kv[1])[:8]
+    chart: list[tuple[str, float, str | None]] = [(k, float(v), None) for k, v in top_basis]
+    return SectionData(
+        tiles={
+            "keep": format_int(plan.total_files),
+            "expired": format_int(plan.expired_files),
+        },
+        chart=chart,
+        chart_title="fichiers par fondement",
+        cols=["fin", "ans", "fondement", "échu", "propriétaire", "chemin", "justification"],
+        rows=[
             [
                 str(r.end_date or ""),
                 str(r.years),
@@ -295,44 +377,51 @@ class StatsTab:
                 r.justification,
             ]
             for r in plan.rows
-        ]
-        tags = ["C1" if r.expired else "ok" for r in plan.rows]
-        s.set_table(
-            ["fin", "ans", "fondement", "échu", "propriétaire", "chemin", "justification"],
-            rows,
-            f"{plan.total_files} fichiers à conserver — {plan.expired_files} échus",
-            tags,
-        )
+        ],
+        summary=f"{plan.total_files} fichiers à conserver — {plan.expired_files} échus",
+        tags=["C1" if r.expired else "ok" for r in plan.rows],
+    )
 
-    # ---- vérification
-    def _refresh_review(self, views: Any, db: Any) -> None:
-        s = self.review
-        pr = views.review_progress(db)
-        s.tiles["reviewed"].set(format_int(pr.reviewed))
-        s.tiles["corrected"].set(format_int(pr.corrected))
-        s.tiles["pct"].set(f"{pr.percent_reviewed:.0f} %")
-        s.chart.draw(
-            [
-                ("validés", float(pr.validated), "done"),
-                ("corrigés", float(pr.corrected), "C2"),
-                ("à vérifier", float(pr.to_review), "C1"),
-                ("non vérifiés", float(pr.not_reviewed), "N/A"),
-            ],
-            title="avancement de la vérification",
+
+def compute_review(views: Any, db: Any, view_name: str, _years: int) -> SectionData:
+    """Avancement de la vérification humaine et écarts avec la LLM — aucun appel Tk."""
+    pr = views.review_progress(db)
+    data = SectionData(
+        tiles={
+            "reviewed": format_int(pr.reviewed),
+            "corrected": format_int(pr.corrected),
+            "pct": f"{pr.percent_reviewed:.0f} %",
+        },
+        chart=[
+            ("validés", float(pr.validated), "done"),
+            ("corrigés", float(pr.corrected), "C2"),
+            ("à vérifier", float(pr.to_review), "C1"),
+            ("non vérifiés", float(pr.not_reviewed), "N/A"),
+        ],
+        chart_title="avancement de la vérification",
+    )
+    if view_name == "Runs":
+        data.cols, data.rows = rows_from_records(views.runs_summary(db))
+        data.summary = "historique des runs (modèle, prompt, tokens, durée)"
+    else:
+        data.cols = ["chemin", "sécu LLM", "sécu corrigée", "RGPD LLM", "RGPD corrigé"]
+        data.rows = [
+            [d.path, d.llm_security, d.corrected_security, d.llm_rgpd, d.corrected_rgpd]
+            for d in pr.discrepancies
+        ]
+        data.summary = (
+            f"{pr.analyzed} analysés — {pr.to_review} à vérifier, {pr.validated} validés, "
+            f"{pr.corrected} corrigés, {pr.not_reviewed} non vérifiés"
         )
-        if s.view_var.get() == "Runs":
-            cols, rows = rows_from_records(views.runs_summary(db))
-            s.set_table(cols, rows, "historique des runs (modèle, prompt, tokens, durée)")
-        else:
-            rows = [
-                [d.path, d.llm_security, d.corrected_security, d.llm_rgpd, d.corrected_rgpd]
-                for d in pr.discrepancies
-            ]
-            s.set_table(
-                ["chemin", "sécu LLM", "sécu corrigée", "RGPD LLM", "RGPD corrigé"],
-                rows,
-                f"{pr.analyzed} analysés — {pr.to_review} à vérifier, {pr.validated} validés, {pr.corrected} corrigés, {pr.not_reviewed} non vérifiés",
-            )
+    return data
+
+
+_COMPUTE = {
+    "Hygiène": compute_hygiene,
+    "Risque": compute_risk,
+    "Conservation": compute_retention,
+    "Vérification": compute_review,
+}
 
 
 def _group(stats: list[Any], label: str) -> tuple[list[str], list[list[str]], str]:

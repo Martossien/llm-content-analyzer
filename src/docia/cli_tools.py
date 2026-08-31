@@ -226,19 +226,24 @@ def doctor_report(cfg: Config) -> dict[str, Any]:
         from docfuse.core.ocr.registry import list_ocr_engines
 
         report["ocr_engines"] = [e.id for e in list_ocr_engines()]
-        binary = tess._resolve_binary()
-        report["tesseract"] = binary or "introuvable (ni embarqué, ni dans le PATH)"
-        if binary:
-            import subprocess
-
-            env = tess._subprocess_env(binary)
-            out = subprocess.run(  # noqa: S603
-                [binary, "--list-langs"], capture_output=True, text=True, timeout=30, env=env
-            )
-            langs = [line.strip() for line in (out.stdout + out.stderr).splitlines()]
-            report["tesseract_langs"] = [lang for lang in langs if lang and " " not in lang]
+        # Essai OCR réel sur une image fabriquée ici : c'est le seul contrôle qui prouve
+        # que Tesseract lit vraiment quelque chose sur CE poste, et le seul qui rapporte
+        # le `stderr` du binaire (« Error opening data file… ») quand il sort en code 1.
+        probe = tess.self_test()
+        report["tesseract"] = probe.get("binary") or "introuvable (ni embarqué, ni dans le PATH)"
+        report["tesseract_version"] = probe.get("version", "")
+        report["tesseract_langs"] = probe.get("available_languages", [])
+        report["tesseract_lang_utilisee"] = probe.get("effective_lang", "")
+        report["tessdata_prefix"] = probe.get("tessdata_prefix") or "(hérité du système)"
+        ocr_ok = bool(probe.get("ocr_ok"))
+        report["ocr_essai"] = (
+            f"ok — « {probe.get('ocr_text', '')} » relu"
+            if ocr_ok
+            else f"ÉCHEC (code {probe.get('returncode')}) : {probe.get('stderr') or 'sans message'}"
+        )
     except Exception as exc:  # noqa: BLE001
         report["ocr"] = f"ÉCHEC : {exc}"
+        ocr_ok = False
     if cfg.llm.transport == "vllm":
         try:
             import httpx
@@ -270,17 +275,23 @@ def doctor_report(cfg: Config) -> dict[str, Any]:
 
 
 def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
-    """`docia doctor` : état du poste ; code 1 si l'OCR ou pdfium manquent."""
+    """`docia doctor` : état du poste ; code 1 si l'OCR ne lit pas réellement une image.
+
+    Le contrôle porte sur un OCR **réellement exécuté** (`ocr_essai`), pas seulement sur
+    la présence du binaire : sur un serveur, Tesseract peut être là et refuser de lire
+    (fichier de langue mis en quarantaine, TESSDATA_PREFIX détourné…).
+    """
     report = doctor_report(cfg)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         for key, value in report.items():
-            print(f"{key:16} {value}")
-    ok = "tesseract" in report.get("ocr_engines", []) and report.get("pdfium_raster") == "ok"
+            print(f"{key:24} {value}")
+    ok = str(report.get("ocr_essai", "")).startswith("ok") and report.get("pdfium_raster") == "ok"
     if not ok:
         print(
-            "doctor : OCR indisponible (Tesseract et/ou pdfium) — les PDF scannés sortiront vides",
+            "doctor : OCR indisponible ou en échec — les PDF scannés sortiront vides "
+            "(voir « ocr_essai » ci-dessus : c'est le message de Tesseract lui-même)",
             file=sys.stderr,
         )
     return 0 if ok else 1
