@@ -27,7 +27,7 @@ n'a rien à changer ; l'administrateur règle une fois l'adresse, le modèle et 
 | `api_key` (Clé API) | vide | descriptif | envoyée en `Authorization: Bearer` (`resolved_api_key`) : clé `sk-…` d'un compte open-webui, ou vide en vLLM sans `--api-key` (repli : variable `DOCIA_API_KEY`, puis `dummy`) |
 | `model` (Modèle) | `qwen38` | descriptif | doit être le `--served-model-name` du serveur |
 | `max_in_flight` (Requêtes en vol) | 8 | requête | blocs envoyés **en même temps** (sémaphore du client) ; 8 nourrit le GPU en continu, au-delà on allonge la file |
-| `timeout_s` (Timeout) | 900 | local | patience par requête (httpx) — les segments de 200 K tokens prennent plusieurs minutes |
+| `timeout_s` (Timeout) | 900 | local | patience de lecture d'un bloc **ordinaire** ; un gros bloc obtient en plus `tokens / 200` s (un segment de 200 K tokens : +1 000 s), pour ne pas couper puis renvoyer ce que le serveur sert lentement |
 | `max_retries` | 3 | local | tentatives sur erreur réseau/5xx, backoff exponentiel (`_analyze`) |
 | `temperature` | 0.0 | requête | 0 = réponses reproductibles, voulu pour de la classification |
 | `max_tokens_floor` / `max_tokens_per_file` | 800 / 700 | requête | budget de **réponse** : plancher + quota par fichier du bloc (5 domaines + justifications) — `max_tokens_for` |

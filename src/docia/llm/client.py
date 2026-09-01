@@ -30,6 +30,16 @@ CONNECT_TIMEOUT_S = 10.0
 BACKOFF_BASE_S = 1.0
 BACKOFF_CAP_S = 30.0
 
+SLOW_PREFILL_TOKENS_PER_S = 200.0
+"""Débit de préremplissage en dessous duquel un serveur est tenu pour **en panne**.
+
+La patience d'une requête (`llm.timeout_s`) vaut pour un bloc ordinaire ; un segment
+de 200 000 tokens envoyé pendant que trois autres préremplissent prend 10 à 15
+minutes sur quatre RTX 3090 (mesuré : 646 s et 852 s), soit plus que les 900 s par
+défaut. Le délai de lecture s'allonge donc du bloc lui-même — `tokens / 200` —
+plutôt que de couper puis **renvoyer** 200 000 tokens que le serveur était en train
+de servir : chaque relance doublait la file et la lenteur qu'elle punissait."""
+
 
 class LLMError(Exception):
     """Base de toutes les erreurs du client LLM."""
@@ -215,6 +225,17 @@ class LLMClient:
             kwargs["reasoning_effort"] = self.cfg.reasoning_effort
         return kwargs
 
+    def read_timeout_for(self, spec: BlockSpec) -> float:
+        """Patience de lecture pour ce bloc : `llm.timeout_s` plus le temps qu'un serveur
+        lent mais vivant met à préremplir le bloc (`SLOW_PREFILL_TOKENS_PER_S`)."""
+        return float(self.cfg.timeout_s) + spec.tokens_with_margin / SLOW_PREFILL_TOKENS_PER_S
+
+    def _timeout_for(self, spec: BlockSpec) -> httpx.Timeout:
+        read = self.read_timeout_for(spec)
+        return httpx.Timeout(
+            connect=CONNECT_TIMEOUT_S, read=read, write=read, pool=float(self.cfg.timeout_s)
+        )
+
     def prompt_room(self, spec: BlockSpec) -> int:
         """Tokens de prompt admissibles pour ce bloc : contexte servi moins la réponse
         (raisonnement compris) moins une marge de gabarit."""
@@ -312,7 +333,9 @@ class LLMClient:
         while attempt + 1 < attempts:
             attempt += 1
             try:
-                response = await self._http.post(url, json=payload, headers=self._headers())
+                response = await self._http.post(
+                    url, json=payload, headers=self._headers(), timeout=self._timeout_for(spec)
+                )
             # `httpx.HTTPError` et non deux sous-classes : une coupure en plein corps de
             # réponse lève `RemoteProtocolError` (vLLM tué par l'OOM-killer, service
             # redémarré, reverse-proxy ou VPN qui lâche). Laisser passer une exception

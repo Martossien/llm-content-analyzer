@@ -574,3 +574,20 @@ async def test_redirection_donne_un_message_parlant(
     assert "redirection non suivie" in str(info.value)
     assert "llm.base_url" in str(info.value)
     assert fake_server.post_count == 1  # définitif : pas de renvoi
+
+
+def test_patience_de_lecture_suit_la_taille_du_bloc(tmp_path: Path) -> None:
+    """Un segment de 200 000 tokens obtient `timeout_s + 1 000 s` : couper à 900 s puis
+    renvoyer 200 000 tokens que le serveur servait doublait la file (mesuré : 646 s et
+    852 s par segment sur quatre RTX 3090 à quatre requêtes en vol)."""
+    cfg = cfg_for("http://127.0.0.1:9/v1", timeout_s=900)
+    client = LLMClient(cfg, SYSTEM_PROMPT)
+    small = make_block(tmp_path, ["a.txt"])
+    assert client.read_timeout_for(small) == pytest.approx(900 + 115 / 200)
+    big = BlockSpec(
+        path=small.path, files=small.files, tokens_estimated=180_000, tokens_with_margin=200_000
+    )
+    assert client.read_timeout_for(big) == pytest.approx(1_900)
+    timeout = client._timeout_for(big)
+    assert timeout.read == pytest.approx(1_900)
+    assert timeout.connect == client_mod.CONNECT_TIMEOUT_S
