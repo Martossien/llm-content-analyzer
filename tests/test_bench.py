@@ -173,3 +173,29 @@ def test_one_block_rattrape_une_erreur_httpx_nue(tmp_path: Path) -> None:
     outcome = asyncio.run(_one_block(_Casse(), spec))  # type: ignore[arg-type]
     assert outcome.ok is False
     assert "RemoteProtocolError" in outcome.error
+
+
+def test_le_banc_s_aligne_sur_le_contexte_reellement_servi(tmp_path: Path, fake_server) -> None:  # type: ignore[no-untyped-def]
+    """Le banc mesurait une chaîne qui ne pouvait pas aboutir, sans le dire.
+
+    `docia run` interroge `/v1/models` et se borne au `--max-model-len` réellement
+    servi ; `docia bench` ne le faisait pas et se fiait à `llm.max_context_tokens`,
+    une valeur de configuration. Sur un serveur monté plus petit — le cas dès qu'on
+    n'a pas la machine de référence — le banc fabriquait des blocs trop gros et
+    réclamait un `max_tokens` que le serveur ne peut pas honorer. Le modèle épuisait
+    son allocation en raisonnement et rendait un contenu vide : « le modèle n'a
+    rendu que du raisonnement », sans que rien ne désigne la cause. Augmenter
+    `llm.thinking_budget_tokens` ne pouvait pas aider — ce budget **s'ajoute** à
+    `max_tokens`, donc l'augmenter éloignait encore de ce que le serveur accepte.
+    """
+    fake_server.max_model_len = 4_000
+    cfg = _config(tmp_path, fake_server.base_url_vllm)
+    cfg.llm.max_context_tokens = 262_144  # la machine de référence, pas celle-ci
+
+    report = run_bench(cfg, blocks=1, block_tokens=100_000)
+
+    assert report.ok
+    assert report.context_tokens == 4_000, "le banc doit retenir le contexte du serveur"
+    assert report.block_tokens <= 2_000, "les blocs sont bâtis à la mesure du serveur"
+    texte = "\n".join(report.as_lines())
+    assert "contexte servi 4000" in texte, "le rapport doit montrer sur quoi il a mesuré"

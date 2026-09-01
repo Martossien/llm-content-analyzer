@@ -41,6 +41,11 @@ CHARS_PER_TOKEN = 3.3
 MIN_DOC_CHARS = 400
 """Un document de banc plus court n'aurait plus rien d'un document administratif."""
 
+_MIN_BENCH_BLOCK_TOKENS = 200
+"""Plancher d'un bloc de banc rétréci à la mesure d'un petit `--max-model-len`.
+
+En deçà, le bloc ne contient plus assez de texte pour que la mesure ait un sens."""
+
 ProgressCallback = Callable[[str], None]
 
 
@@ -201,6 +206,13 @@ class BenchReport:
     blocks_sent: int = 0
     files_per_block: int = 0
     block_tokens: int = 0
+    context_tokens: int = 0
+    """Contexte réellement servi (`--max-model-len`), 0 si le serveur ne le dit pas.
+
+    Le banc se fiait à `llm.max_context_tokens` — une valeur de configuration, pas
+    un fait. Sur un serveur monté plus petit, il mesurait donc une chaîne qui ne
+    pouvait pas aboutir, et l'échec (« le modèle n'a rendu que du raisonnement »)
+    ne désignait pas sa cause."""
     in_flight: int = 0
     wall_s: float = 0.0
     prompt_tokens: int = 0
@@ -253,7 +265,8 @@ class BenchReport:
         lines = [
             head,
             f"{self.blocks_sent} bloc(s) de ~{self.block_tokens} tokens, "
-            f"{self.files_per_block} fichier(s) par bloc, {self.in_flight} en vol",
+            f"{self.files_per_block} fichier(s) par bloc, {self.in_flight} en vol"
+            + (f", contexte servi {self.context_tokens}" if self.context_tokens else ""),
             f"durée totale {self.wall_s:.1f} s — {self.prompt_tokens} tokens d'entrée, "
             f"{self.completion_tokens} tokens de sortie",
             f"{self.prefill_tok_s:.0f} tokens/s prefill, {self.decode_tok_s:.0f} decode",
@@ -363,12 +376,33 @@ async def _bench(
     )
     work_dir = Path(tempfile.mkdtemp(prefix="docia_bench_"))
     try:
-        say(f"fabrication de {blocks} bloc(s) de ~{block_tokens} tokens…")
-        specs = build_bench_blocks(
-            work_dir, blocks=blocks, block_tokens=block_tokens, files_per_block=files_per_block
-        )
         prompt = _system_prompt(cfg)
         async with LLMClient(llm, prompt) as client:
+            # Le contexte réellement servi fait foi, comme dans `pipeline` — le banc
+            # s'en dispensait. Sur un serveur monté avec un `--max-model-len` plus
+            # petit que `llm.max_context_tokens`, il fabriquait des blocs trop gros
+            # et réclamait un `max_tokens` que le serveur ne peut pas honorer :
+            # le modèle épuisait son allocation en raisonnement et rendait un
+            # contenu vide (« le modèle n'a rendu que du raisonnement »), sans que
+            # rien ne désigne la vraie cause. Augmenter `thinking_budget_tokens`
+            # ne pouvait pas aider : ce budget s'ajoute à `max_tokens`, donc
+            # l'augmenter éloignait encore de ce que le serveur accepte.
+            served = await client.server_max_model_len()
+            if served is not None and served != llm.max_context_tokens:
+                say(
+                    f"attention : llm.max_context_tokens={llm.max_context_tokens} mais le "
+                    f"serveur sert {served} (--max-model-len) — la valeur du serveur fait foi"
+                )
+                if served < llm.max_context_tokens:
+                    llm.max_context_tokens = served
+                    report.context_tokens = served
+                    block_tokens = min(block_tokens, max(_MIN_BENCH_BLOCK_TOKENS, served // 2))
+                    report.block_tokens = block_tokens
+
+            say(f"fabrication de {blocks} bloc(s) de ~{block_tokens} tokens…")
+            specs = build_bench_blocks(
+                work_dir, blocks=blocks, block_tokens=block_tokens, files_per_block=files_per_block
+            )
             if not await client.health():
                 report.ok = False
                 report.message = (

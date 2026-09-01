@@ -373,8 +373,16 @@ class LLMClient:
         if isinstance(last_error, LLMEmptyContentError):
             raise LLMResponseError(
                 f"bloc {label} : contenu de réponse vide sur les {attempts} tentative(s) — "
-                "le modèle n'a produit que du raisonnement ; imposez un "
-                "llm.thinking_budget_tokens (vLLM ≥ 0.11) ou désactivez llm.enable_thinking"
+                "le modèle a épuisé son allocation en raisonnement, sans écrire de réponse. "
+                "Trois causes, dans l'ordre où il faut les vérifier : "
+                "(1) le serveur est démarré sans « --reasoning-parser qwen3 », et il ignore "
+                "alors « thinking_token_budget » — augmenter llm.thinking_budget_tokens ne "
+                "change rien, c'est le symptôme le plus parlant ; "
+                "(2) llm.max_context_tokens dépasse le « --max-model-len » réellement servi, "
+                "et il ne reste plus de place pour la réponse (« docia bench » affiche "
+                "maintenant le contexte servi) ; "
+                "(3) le bloc est trop gros pour ce serveur — réduisez blocks.max_block_tokens. "
+                "En dernier recours, désactivez llm.enable_thinking."
             ) from last_error
         raise LLMTransportError(f"bloc {label} : {attempts} tentatives en échec ({last_error})")
 

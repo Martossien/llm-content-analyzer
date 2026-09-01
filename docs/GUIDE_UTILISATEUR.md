@@ -229,6 +229,42 @@ pratique pour vérifier un document avant de le déposer.
     (auto-vérifié). Ce dernier est **auto-vérifié** : au début de chaque
     analyse, docia lit la valeur réellement servie et s'y borne en avertissant si la config diverge
     (`docia doctor` l'affiche aussi).
+
+### Côté serveur : comment vLLM doit être lancé
+
+Doc-IA ne pilote pas le serveur, il s'y adapte — mais **trois options de lancement
+conditionnent son fonctionnement**. Sans elles, l'analyse échoue sur un message qui
+ne dit pas pourquoi.
+
+| Option de `vllm serve` | Pourquoi Doc-IA en dépend |
+|---|---|
+| `--reasoning-parser qwen3` | **La plus importante.** Elle sépare le raisonnement de la réponse et rend l'option `thinking_token_budget` opérante. Sans elle, le serveur **ignore silencieusement** le budget de raisonnement : le modèle réfléchit jusqu'à épuiser son allocation, ne rend aucune réponse, et Doc-IA affiche « le modèle n'a rendu que du raisonnement ». Symptôme qui ne trompe pas : **augmenter le budget ne change rien**. |
+| `--max-model-len N` | Doit correspondre au *Contexte du modèle* de l'onglet Serveur. Doc-IA lit la valeur réellement servie au début de chaque analyse et s'y borne en avertissant ; `docia bench` l'affiche aussi. Si la configuration annonce plus que le serveur, il ne reste plus de place pour la réponse. |
+| `--structured-outputs-config '{"backend":"xgrammar"}'` | Garantit un JSON conforme au schéma. Sans backend de sortie structurée, le modèle rend du texte libre et les réponses sont rejetées comme illisibles. |
+
+Utiles mais non bloquantes : `--served-model-name` (le nom à recopier dans le champ
+*Modèle*), `--enable-prefix-caching` (le prompt système est identique à chaque bloc,
+le cache le paye une fois), `--max-num-seqs` (à accorder avec *Requêtes en vol*).
+
+Le script de référence est `bench_vllm/serve_qwen38.sh` dans le dépôt.
+
+**Que faire devant « le modèle n'a rendu que du raisonnement »**, dans cet ordre :
+
+1. Vérifier que le serveur a bien `--reasoning-parser qwen3`. C'est la cause la plus
+   fréquente, et la seule où **augmenter le budget de raisonnement ne sert à rien**.
+2. Lancer `Docia.exe --config votre.toml bench` : il affiche maintenant le contexte
+   réellement servi. S'il est plus petit que le *Contexte du modèle* configuré,
+   corrigez ce dernier.
+3. Réduire la taille des blocs (`blocks.max_block_tokens`) : un bloc trop gros pour ce
+   serveur ne laisse pas de place à la réponse.
+4. En dernier recours seulement, décocher *Raisonnement* — la qualité du classement
+   en pâtit.
+
+**Attention au numéro de port.** Un test de connexion peut réussir contre une
+application qui n'a rien à voir : si une autre application occupe le port 8000, la
+machine répond, mais aux mauvaises questions (erreurs 405). Le port et le suffixe
+`/v1` doivent être ceux de vLLM.
+
 - Ligne de commande : `Docia.exe doctor`, `scan`, `run`, `report`, `export`, `backup`,
   `restore`, `reanalyze`, `campaigns` (voir README).
 
