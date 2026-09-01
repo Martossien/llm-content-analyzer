@@ -20,6 +20,13 @@ _SECURITY_COLORS: dict[str, str] = {
     "C3": "#b4453c",
     "N/A": "#cbd2d9",
 }
+_UNANALYSED_COLOR = "#e4e7eb"
+"""Part non analysée des barres empilées — gris très clair, volontairement discret.
+
+Sans ce segment, la barre était rapportée au nombre d'analysés : 20 fichiers C3 sur
+1 005 en remplissaient les deux tiers, et la section se lisait comme si le partage
+était massivement sensible alors que 3 % en avaient été vus."""
+
 _RGPD_COLORS: dict[str, str] = {
     "none": "#9aa5b1",
     "low": "#5b9279",
@@ -98,6 +105,13 @@ def _n(value: int) -> str:
     return views.format_int(value)
 
 
+def _pct(part: int, whole: int) -> str:
+    """Part en pourcentage, virgule décimale française — « — » si le total est nul."""
+    if not whole:
+        return "—"
+    return f"{views.percent(part, whole):.1f}".replace(".", ",") + " %"
+
+
 def _b(value: int) -> str:
     return views.format_bytes(value)
 
@@ -160,7 +174,13 @@ def _stacked(
     *,
     domain: str = "security",
 ) -> str:
-    """Barres empilées : répartition des classes par valeur d'axe."""
+    """Barres empilées : répartition des classes par valeur d'axe.
+
+    La barre est rapportée au nombre de **fichiers**, pas au nombre d'analysés, et le
+    reste est peint en « non analysé ». Normalisée sur les analysés, elle donnait à
+    20 fichiers C3 sur 1 005 les deux tiers de la barre : la section se lisait comme
+    si le partage était massivement sensible, alors que 3 % en avaient été vus.
+    """
     usable = [r for r in rows if r.analyzed > 0]
     if not usable:
         return '<p class="empty">Aucune analyse disponible pour cet axe.</p>'
@@ -175,20 +195,27 @@ def _stacked(
         y = index * row_h + 4
         offset = float(label_w)
         source = row.security if domain == "security" else row.rgpd
+        base = max(row.files, row.analyzed)  # `files` fait foi ; jamais de division par 0
         for key in keys:
             count = source.get(key, 0)
             if not count:
                 continue
-            length = bar_w * count / row.analyzed
+            length = bar_w * count / base
             parts.append(
                 f'<rect x="{offset:.1f}" y="{y + 2}" width="{length:.1f}" height="13" '
                 f'fill="{colors.get(key, "#cbd2d9")}"/>'
             )
             offset += length
+        reste = bar_w * (base - row.analyzed) / base
+        if reste > 0.5:
+            parts.append(
+                f'<rect x="{offset:.1f}" y="{y + 2}" width="{reste:.1f}" height="13" '
+                f'fill="{_UNANALYSED_COLOR}"/>'
+            )
         parts.append(
             f'<text x="0" y="{y + 12}" font-size="12" fill="#33475b">{_esc(row.label[-44:])}</text>'
             f'<text x="{label_w + bar_w + 8}" y="{y + 12}" font-size="12" fill="#52606d">'
-            f"{_esc(_n(row.analyzed))} analysés</text>"
+            f"{_esc(_n(row.analyzed))} / {_esc(_n(base))}</text>"
         )
     parts.append("</svg>")
     return "".join(parts)
@@ -468,21 +495,28 @@ def _section_hygiene(data: ReportData) -> str:
 
 
 def _section_risque(data: ReportData) -> str:
-    sec_headers: list[tuple[str, bool]] = [("Partage", False), ("Analysés", True)]
+    # « Fichiers » et « Analysés » côte à côte : sans le dénominateur, un partage de
+    # 1 005 fichiers dont 30 sont analysés se lit comme s'il était classé aux deux tiers
+    # en C3. Le taux de couverture n'apparaissait qu'une fois, dans une tuile de la
+    # section 1, et jamais dans le tableau qu'on lit pour décider.
+    sec_headers: list[tuple[str, bool]] = [
+        ("Partage", False),
+        ("Fichiers", True),
+        ("Analysés", True),
+        ("Couverture", True),
+    ]
     sec_headers += [(k, True) for k in views.SECURITY_CLASSES]
     sec_headers += [("RGPD élevé/critique", True)]
-    share_rows = [
-        [_esc(r.label), _n(r.analyzed)]
-        + [_n(r.security.get(k, 0)) for k in views.SECURITY_CLASSES]
-        + [_n(r.rgpd.get("high", 0) + r.rgpd.get("critical", 0))]
-        for r in data.by_share
-    ]
-    owner_rows = [
-        [_esc(r.label), _n(r.analyzed)]
-        + [_n(r.security.get(k, 0)) for k in views.SECURITY_CLASSES]
-        + [_n(r.rgpd.get("high", 0) + r.rgpd.get("critical", 0))]
-        for r in data.by_owner
-    ]
+
+    def _risk_row(r: views.AxisRow) -> list[str]:
+        return (
+            [_esc(r.label), _n(r.files), _n(r.analyzed), _pct(r.analyzed, r.files)]
+            + [_n(r.security.get(k, 0)) for k in views.SECURITY_CLASSES]
+            + [_n(r.rgpd.get("high", 0) + r.rgpd.get("critical", 0))]
+        )
+
+    share_rows = [_risk_row(r) for r in data.by_share]
+    owner_rows = [_risk_row(r) for r in data.by_owner]
     top_rows = [
         [
             _badge(f.security, _SECURITY_COLORS),
