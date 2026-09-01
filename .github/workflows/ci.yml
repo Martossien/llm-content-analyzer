@@ -61,11 +61,20 @@ jobs:
           TESSERACT_HOME: C:\Program Files\Tesseract-OCR
         run: pyinstaller --noconfirm Docia.spec
       - name: "Smoke test de l'exe (CLI + doctor — OCR et pdfium embarqués)"
+        shell: pwsh  # explicite : le bloc ci-dessous est du PowerShell, pas du cmd
+        # PowerShell ne rend que le code de la **dernière** commande : sans ces gardes,
+        # `--version`, `init` et `status` pouvaient tous échouer sans faire tomber
+        # l'étape, du moment que `doctor` finissait bien. Un exe cassé serait sorti
+        # de la CI en vert. Les étapes suivantes faisaient déjà ce contrôle.
         run: |
           dist\Docia.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dist\Docia.exe init --config smoke.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dist\Docia.exe --config smoke.toml status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dist\Docia.exe --config smoke.toml doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Smoke test de l'exe (extracteurs DocFuse embarqués)
         # Les extracteurs importent leurs bibliothèques paresseusement : seul un vrai
         # .docx/.pdf/.xlsx/.pptx traversé par l'exe prouve que tout est embarqué.

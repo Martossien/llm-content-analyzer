@@ -217,13 +217,17 @@ CSV réenregistré depuis Excel en cp1252 (« Compté été » → « Compt� �
 # --------------------------------------------------------------------- parsing
 
 
-def _read_quoted(line: str, start: int) -> tuple[str, int]:
+def _read_quoted(line: str, start: int) -> tuple[str, int, bool]:
     """Lit un champ quoté à partir de `start` (juste après le guillemet ouvrant).
 
-    Renvoie la valeur et l'index suivant le guillemet fermant. `\\"` et `""`
-    valent un guillemet littéral ; `\\"` suivi d'une virgule ou d'une fin de
-    ligne est en revanche un antislash final suivi du guillemet fermant (cas
-    des chemins UNC : `"\\\\srv\\part$\\"`).
+    Renvoie la valeur, l'index suivant le guillemet fermant, et **si ce guillemet
+    a bien été trouvé**. `\\"` et `""` valent un guillemet littéral ; `\\"` suivi
+    d'une virgule ou d'une fin de ligne est en revanche un antislash final suivi
+    du guillemet fermant (cas des chemins UNC : `"\\\\srv\\part$\\"`).
+
+    Le troisième élément existe parce qu'un guillemet resté ouvert signifie que le
+    champ **continue sur la ligne suivante** : sans lui, cette suite était relue
+    comme un enregistrement à part entière et fabriquait un fichier fantôme.
     """
     out: list[str] = []
     i = start
@@ -233,7 +237,7 @@ def _read_quoted(line: str, start: int) -> tuple[str, int]:
         if char == "\\" and i + 1 < n and line[i + 1] == '"':
             if i + 2 >= n or line[i + 2] == ",":
                 out.append("\\")
-                return "".join(out), i + 2
+                return "".join(out), i + 2, True
             out.append('"')
             i += 2
             continue
@@ -242,10 +246,43 @@ def _read_quoted(line: str, start: int) -> tuple[str, int]:
                 out.append('"')
                 i += 2
                 continue
-            return "".join(out), i + 1
+            return "".join(out), i + 1, True
         out.append(char)
         i += 1
-    return "".join(out), i  # guillemet fermant manquant : on tolère
+    return "".join(out), i, False  # guillemet fermant manquant
+
+
+def quote_left_open(line: str) -> bool:
+    r"""Vrai si la ligne se termine **à l'intérieur** d'un champ quoté.
+
+    SMBeagle écrit un enregistrement par ligne ; un guillemet resté ouvert signifie
+    donc qu'un nom de fichier ou un chemin contient un saut de ligne — NTFS
+    l'autorise. La suite du champ arrive alors sur la ligne suivante, que le
+    lecteur relisait comme un enregistrement complet : `"rapport\nfinal.pdf"`
+    produisait en base le chemin `\\srv\part$\docs\final.pdf"`, avec une taille
+    plausible de 802 octets. Ce chemin ne désigne aucun fichier, et ressortait dans
+    les candidats au nettoyage.
+
+    Le parcours réutilise `_read_quoted`, seule définition des règles
+    d'échappement (`\\"`, `""`, antislash final d'un chemin UNC) : les réécrire ici
+    aurait créé une seconde vérité, qui aurait fini par diverger.
+    """
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] == '"':
+            _, i, ferme = _read_quoted(line, i + 1)
+            if not ferme:
+                return True
+            while i < n and line[i] != ",":
+                i += 1
+        else:
+            virgule = line.find(",", i)
+            if virgule == -1:
+                return False
+            i = virgule
+        if i < n and line[i] == ",":
+            i += 1
+    return False
 
 
 def split_csv_line(line: str) -> list[str]:
@@ -261,7 +298,7 @@ def split_csv_line(line: str) -> list[str]:
     n = len(line)
     while True:
         if i < n and line[i] == '"':
-            value, i = _read_quoted(line, i + 1)
+            value, i, _ = _read_quoted(line, i + 1)
             while i < n and line[i] != ",":  # ferraille après le guillemet fermant
                 i += 1
         else:
@@ -313,7 +350,7 @@ def validate_csv_line_format(line: str, line_number: int) -> list[str]:
         elif not quoted and index in QUOTED_COLUMNS:
             errors.append(f"ligne {line_number}, colonne {index} : guillemets manquants")
         if quoted:
-            _, i = _read_quoted(line, i + 1)
+            _, i, _ = _read_quoted(line, i + 1)
             while i < n and line[i] != ",":
                 i += 1
         else:
@@ -491,6 +528,7 @@ def read_smbeagle_csv(
         if header_errors:
             yield CsvLineError(1, " ; ".join(header_errors), header.rstrip("\r\n")[:_MAX_RAW])
             return
+        suite_d_un_champ_ouvert = False
         for line_number, raw in enumerate(handle, start=2):
             if position is not None and line_number % _POSITION_EVERY == 0:
                 offset = _byte_position(handle)
@@ -498,6 +536,28 @@ def read_smbeagle_csv(
                     position.bytes_read = offset
             line = raw.rstrip("\r\n")
             if not line.strip():
+                continue
+            if suite_d_un_champ_ouvert:
+                # Suite d'un champ quoté laissé ouvert : ce n'est pas un
+                # enregistrement, c'est la fin du précédent. La relire comme une
+                # ligne à part entière fabriquait un fichier fantôme — un chemin
+                # tronqué, avec une taille plausible, qui ne désigne rien et
+                # ressortait pourtant dans les candidats au nettoyage.
+                suite_d_un_champ_ouvert = quote_left_open(line)
+                yield CsvLineError(
+                    line_number,
+                    "suite d'un champ quoté non refermé à la ligne précédente : "
+                    "un nom de fichier contient probablement un saut de ligne",
+                    line[:_MAX_RAW],
+                )
+                continue
+            if quote_left_open(line):
+                suite_d_un_champ_ouvert = True
+                yield CsvLineError(
+                    line_number,
+                    "champ quoté non refermé en fin de ligne",
+                    line[:_MAX_RAW],
+                )
                 continue
             try:
                 yield parse_line(line, line_number, strict=strict)

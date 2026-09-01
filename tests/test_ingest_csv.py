@@ -16,6 +16,7 @@ from docia.ingest.smbeagle_csv import (
     import_csv,
     parse_line,
     parse_smbeagle_datetime,
+    quote_left_open,
     read_smbeagle_csv,
     split_csv_line,
     validate_header,
@@ -641,3 +642,50 @@ def test_ligne_sans_nom_ni_dossier_est_rejetee(tmp_path: Path) -> None:
         assert (report.total, report.new, report.unchanged) == (1, 1, 0)
         assert report.invalid == 3
         assert db.counts()["files"] == 1
+
+
+def test_un_champ_quote_non_referme_ne_fabrique_pas_de_fichier_fantome(tmp_path: Path) -> None:
+    """GRAVE : un nom de fichier contenant un saut de ligne créait un enregistrement faux.
+
+    NTFS autorise le saut de ligne dans un nom. SMBeagle écrit un enregistrement par
+    ligne : le champ quoté n'est alors pas refermé, et la **suite** était relue comme
+    un enregistrement complet. Mesuré — `"rapport\\nfinal.pdf"` produisait en base le
+    chemin `\\\\srv\\part$\\docs\\final.pdf"` avec une taille plausible de 802 octets,
+    pour `total=2 new=2 invalid=1`. Ce chemin ne désigne aucun fichier, et ressortait
+    dans les candidats au nettoyage — la liste qui justifie des suppressions.
+
+    Les deux lignes sont maintenant refusées, chacune avec sa raison, et la ligne
+    saine qui suit est importée normalement : une ligne malformée ne fait pas perdre
+    le reste du fichier.
+    """
+    csv = tmp_path / "saut.csv"
+    csv.write_text(
+        HEADER_LINE
+        + "\n"
+        + quoted_line('"rapport\nfinal.pdf"')
+        + "\n"
+        + quoted_line('"normal.pdf"')
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+        chemins = [r["path"] for r in db.query("SELECT path FROM files")]
+
+    assert (report.total, report.new, report.invalid) == (1, 1, 2)
+    assert [c for c in chemins if c.endswith('"')] == [], "aucun chemin tronqué en base"
+    assert chemins == [r"\\srv\part$\docs\normal.pdf"]
+    assert "non refermé" in report.errors[0].reason
+    assert "saut de ligne" in report.errors[1].reason
+
+
+def test_un_antislash_final_de_chemin_unc_ne_passe_pas_pour_un_guillemet_ouvert() -> None:
+    """Contre-épreuve : `"\\\\srv\\part$\\"` est un chemin, pas un champ non refermé.
+
+    C'est le cas que `_read_quoted` traite spécialement depuis toujours ; la garde
+    ne doit pas le confondre, sinon tout scan SMBeagle serait rejeté ligne à ligne.
+    """
+    assert not quote_left_open(quoted_line('"a.pdf"'))
+    assert not quote_left_open(REAL_LINE)
+    assert quote_left_open(quoted_line('"coupe').rsplit(",", 18)[0])
