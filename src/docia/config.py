@@ -156,13 +156,11 @@ class FilterConfig:
             ".sqlite",
             ".mdb",
             ".ldb",
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".gif",
-            ".bmp",
-            ".tif",
-            ".tiff",
+            # Les images **matricielles** ne sont plus exclues : DocFuse les océrise
+            # depuis D-109. Un courrier scanné sort en .tif ou .jpg d'un copieur, pas
+            # en PDF, et ces fichiers étaient jusqu'ici absents de l'audit — ni classés,
+            # ni signalés. Restent exclus `.ico` (icône d'interface) et `.svg`
+            # (vectoriel : aucun moteur OCR ne le lit).
             ".ico",
             ".svg",
             ".mp3",

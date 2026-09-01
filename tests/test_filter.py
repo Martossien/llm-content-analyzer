@@ -207,17 +207,24 @@ def test_plan_fixture_tout_pending(tmp_path: Path) -> None:
 
 
 def test_plan_fixture_exclusions_par_defaut(tmp_path: Path) -> None:
-    """La fixture est presque entièrement sous `\\admin$\\` : 62 exclus, 1 retenu."""
+    """La fixture est presque entièrement sous `\\admin$\\`.
+
+    D-109 : les images matricielles ne sont plus exclues par extension — DocFuse
+    les océrise. Celles de la fixture qui vivent hors de `\\admin$\\` deviennent
+    donc analysables ; le compte d'exclus baisse d'autant. C'est le comportement
+    voulu : un courrier scanné en `.tif` n'a plus à sortir de l'audit.
+    """
     with Database(tmp_path / "docia.sqlite") as db:
         import_csv(db, FIXTURE)
         report = plan_files(db, FilterConfig())
         assert report.pending + report.excluded == 63
-        assert report.excluded == 62
-        assert sum(report.by_reason.values()) == 62
-        assert report.by_reason["dossier exclu (\\admin$\\)"] == 40
+        assert sum(report.by_reason.values()) == report.excluded
+        # Le motif de loin le plus fréquent reste le partage administratif.
+        assert report.by_reason["dossier exclu (\\admin$\\)"] == 50
         counts = db.counts()
-        assert counts["excluded"] == 62
-        assert counts["pending"] == 1
+        assert counts["excluded"] == report.excluded
+        assert counts["pending"] == report.pending
+        assert ".jpg" not in " ".join(report.by_reason), "une image n'est plus exclue par extension"
 
 
 def test_plan_fixture_taille_minimale(tmp_path: Path) -> None:

@@ -30,12 +30,17 @@ TEXTS = {
 
 @pytest.fixture
 def dossier(tmp_path: Path) -> Path:
-    """Trois documents texte distincts et une image, dans un dossier local."""
+    """Trois documents texte distincts et un fichier écarté, dans un dossier local.
+
+    D-109 : une image matricielle est désormais océrisée, donc analysée. Le
+    fichier écarté est ici un `.ico` — icône d'interface, qu'aucun moteur OCR ne
+    lit — pour que ce test garde un cas d'exclusion à vérifier.
+    """
     src = tmp_path / "partage"
     src.mkdir()
     for name, text in TEXTS.items():
         (src / name).write_text(text * 4, encoding="utf-8")
-    (src / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 400)
+    (src / "icone.ico").write_bytes(b"\x00\x00\x01\x00" + b"0" * 400)
     return src
 
 
@@ -53,13 +58,13 @@ def _config(tmp_path: Path, base_url: str) -> Config:
 def test_rows_from_directory_skip_unreadable(dossier: Path) -> None:
     unreadable: list[str] = []
     rows = list(csv_rows_from_paths([dossier], unreadable=unreadable))
-    assert {r.name for r in rows} == {*TEXTS, "logo.png"}
+    assert {r.name for r in rows} == {*TEXTS, "icone.ico"}
     assert unreadable == []
-    row = next(r for r in rows if r.name == "logo.png")
-    assert (row.extension, row.directory_type, row.host) == ("png", "LOCAL_FIXED", "localhost")
+    row = next(r for r in rows if r.name == "icone.ico")
+    assert (row.extension, row.directory_type, row.host) == ("ico", "LOCAL_FIXED", "localhost")
     assert row.fast_hash
     assert row.file_size > 0
-    assert Path(row.path) == dossier / "logo.png"
+    assert Path(row.path) == dossier / "icone.ico"
 
 
 def test_quick_analyzes_a_directory(tmp_path: Path, dossier: Path, fake_server) -> None:  # type: ignore[no-untyped-def]
@@ -81,13 +86,13 @@ def test_quick_analyzes_a_directory(tmp_path: Path, dossier: Path, fake_server) 
     assert first.retention.startswith("fiscal")
     assert first.resume
     excluded = next(f for f in report.files if f.status == "excluded")
-    assert excluded.name == "logo.png"
+    assert excluded.name == "icone.ico"
     assert "extension exclue" in excluded.reason
 
     lines = report.as_lines()
     assert all(len(line) <= 120 for line in lines)
     assert lines[0].startswith("fichier")
-    assert any("logo.png" in line and "excluded" in line for line in lines)
+    assert any("icone.ico" in line and "excluded" in line for line in lines)
     assert report.as_dict()["analyzed"] == 3
 
 
@@ -148,7 +153,7 @@ def test_quick_handler_returns_zero_and_prints_table(
     assert handlers["quick"](args, _config(tmp_path, fake_server.base_url_vllm)) == 0
     out = capsys.readouterr().out
     assert "contrat_dupont.txt" in out
-    assert "logo.png" in out
+    assert "icone.ico" in out
 
     args = parser.parse_args(["quick", str(tmp_path / "nulle_part")])
     assert handlers["quick"](args, _config(tmp_path, fake_server.base_url_vllm)) == 1
@@ -206,7 +211,7 @@ def test_quick_compte_et_signale_les_dossiers_refuses(dossier: Path) -> None:
     finally:
         prive.chmod(0o755)
 
-    assert {r.name for r in rows} == {*TEXTS, "logo.png"}
+    assert {r.name for r in rows} == {*TEXTS, "icone.ico"}
     assert denied == [str(prive)], "le dossier refusé doit être remonté à l'appelant"
     assert unreadable == []
 
