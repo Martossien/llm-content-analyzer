@@ -95,6 +95,7 @@ PDF scanné généré, GUI `--smoke`). Arrêter vLLM après chaque mesure.
 
 ## 7. En attente
 
-- Retirer `legacy/` (POC 2025, 18 000 lignes) du dépôt — l'historique git le garde.
+- Le POC 2025 (`legacy/`, 18 000 lignes) a été retiré le 01/09/2026 : l'historique git
+  le garde (avant `354c0bf`), ne pas le réintroduire.
 - v4 : `docia serve` (REST 1:1 sur `service.py`) et GUI web ; chapitre README
   « pré-requis Windows » avec captures prises sur un poste Windows.

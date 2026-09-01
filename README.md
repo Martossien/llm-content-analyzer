@@ -134,7 +134,7 @@ budget de raisonnement n'est pas relayé, seul le renvoi à budget doublé prot�
 
 Référence de tous les réglages : [`docs/REGLAGES.md`](docs/REGLAGES.md).
 Conception détaillée : [`docs/DESIGN_V3.md`](docs/DESIGN_V3.md) (§13 budget de raisonnement,
-§14 étape scanner, §15 comptage exact). POC d'origine (2025) : dossier `legacy/`, à retirer (voir `AGENTS.md` §7).
+§14 étape scanner, §15 comptage exact). POC d'origine (2025) retiré du dépôt le 01/09/2026 — il reste dans l'historique git (avant `354c0bf`).
 
 ## Installation développeur
 

@@ -38,6 +38,8 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ### Technique
 
+- **`legacy/` retiré du dépôt** (POC 2025, 76 fichiers, 18 000 lignes) : l'historique git
+  le garde ; le code vivant est `src/docia`.
 - `.coverage` ignoré par git.
 
 ## [3.0.0] — 2026-08-30
