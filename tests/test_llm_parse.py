@@ -143,6 +143,17 @@ def test_montants_mal_formes_rejetes() -> None:
     assert "finance.amounts" in parsed.invalid[0][1]
 
 
+def test_montant_non_fini_rejete() -> None:
+    """`json.loads` accepte `NaN` et `Infinity` : un tel montant partait en base et
+    dans les exports Excel/Power BI, puis ressortait en JSON invalide dans `raw`."""
+    entry = make_entry("dossier/rapport.md")
+    entry["finance"]["amounts"] = [{"value": 1.0, "currency": "EUR", "context": "total"}]
+    content = wrap(entry).replace("1.0", "NaN")
+    parsed = parse_block_response(content, block_files(["dossier/rapport.md"]))
+    assert parsed.analyses == {}
+    assert "finance.amounts" in parsed.invalid[0][1]
+
+
 def test_listes_de_chaines_verifiees() -> None:
     entry = make_entry("dossier/rapport.md")
     entry["rgpd"]["data_types"] = ["nom", 42]

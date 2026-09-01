@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -248,6 +249,10 @@ def _as_amounts(value: object) -> list[dict[str, Any]] | None:
             return None
         amount = item.get("value")
         if isinstance(amount, bool) or not isinstance(amount, int | float):
+            return None
+        if isinstance(amount, float) and not math.isfinite(amount):
+            # `json.loads` accepte `NaN`/`Infinity` : un tel montant serait sommé,
+            # exporté en Excel/Power BI et réécrit en JSON invalide dans `raw`.
             return None
         currency = item.get("currency")
         context = item.get("context")
