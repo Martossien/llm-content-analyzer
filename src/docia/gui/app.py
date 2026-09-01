@@ -27,6 +27,7 @@ import contextlib
 import logging
 import queue
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
@@ -791,7 +792,11 @@ class DociaApp:
                 continue
             self.status_line.configure(text=msg)
             self.log_box.configure(state="normal")
-            self.log_box.insert("end", msg + "\n")
+            # Horodatage : `docia.log` en a un, le journal de la fenêtre n'en avait
+            # pas — or c'est celui-ci qu'on copie pour demander de l'aide. Sans lui,
+            # on ne peut pas dire combien de temps une étape a duré : il a fallu
+            # *estimer* le temps mur d'un run par ordonnancement, faute d'heures.
+            self.log_box.insert("end", f"{time.strftime('%H:%M:%S')}  {msg}\n")
             if int(self.log_box.index("end-1c").split(".")[0]) > _MAX_LOG_LINES:
                 self.log_box.delete("1.0", "200.0")
             self.log_box.see("end")

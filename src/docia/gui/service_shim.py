@@ -12,6 +12,7 @@ d'appel à la CLI. Ce qui demande une fenêtre vit dans `docia.gui.dialogs`.
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 from docia import service
 from docia.config import Config
 from docia.db import Database, backup_dir_for
+from docia.gui.theme import format_duration
 from docia.service import RecentCampaign, RunEvent
 
 Log = Callable[[str], None]
@@ -96,15 +98,32 @@ class GuiService:
             if on_event is not None:
                 on_event(event)
 
+        # Le bilan disait tout sauf **combien de temps** : il a fallu estimer le temps
+        # mur d'un run par ordonnancement de ses blocs, faute de la mesure. C'est
+        # pourtant le premier chiffre qu'on regarde pour comparer deux réglages.
+        debut = time.time()
+        log(f"run démarré à {time.strftime('%H:%M:%S', time.localtime(debut))}")
         with self._open_db() as db:
             rep = service.run_campaign(
                 db, cfg, limit=limit, dry_run=dry_run, on_event=forward, cancel=cancel
             )
+        fin = time.time()
         log(
             f"run {rep.run_id} : {rep.files_done} analysé(s) sur {rep.files_selected} "
             f"({rep.files_duplicates} doublons hérités, {rep.files_segmented} découpés), "
             f"{rep.files_error} en erreur — tokens {rep.prompt_tokens} entrée / "
             f"{rep.completion_tokens} sortie"
+        )
+        log(
+            f"run {rep.run_id} : {time.strftime('%H:%M:%S', time.localtime(debut))} → "
+            f"{time.strftime('%H:%M:%S', time.localtime(fin))} "
+            f"({format_duration(fin - debut)})"
+            + (
+                f" — {rep.files_done / (fin - debut) * 3600:.0f} fichiers/h, "
+                f"{rep.prompt_tokens / (fin - debut):.0f} tokens d'entrée/s"
+                if fin > debut and rep.files_done
+                else ""
+            )
         )
         for e in rep.errors[:10]:
             log(f"   {e}")
