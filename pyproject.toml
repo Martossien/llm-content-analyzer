@@ -25,7 +25,7 @@ classifiers = [
 
 dependencies = [
     # DocFuse n'est pas sur PyPI : référence directe vers le dépôt (PEP 508).
-    "docfuse @ git+https://github.com/Martossien/DocFuse.git@6af877c4544ec7613e93a2c3fadcffbc81fa5bc",
+    "docfuse @ git+https://github.com/Martossien/DocFuse.git@cf013b3c065a9a32edd0e51ea42c0c8016e4c62f",
     "httpx>=0.27",
 ]
 
