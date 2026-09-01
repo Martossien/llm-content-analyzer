@@ -79,13 +79,11 @@ def _bloc_perimetre(data: ReportData) -> list[str]:
     return [*lines, ""]
 
 
-def render_markdown(
-    db: Database, *, today: date | None = None, data: ReportData | None = None
-) -> str:
-    """Rapport complet en Markdown (tableaux GFM)."""
-    report = data if data is not None else collect(db, today=today)
+def _head(report: ReportData) -> list[str]:
+    """En-tête : date, base, modèle, prompt."""
+    lines: list[str] = []
     o = report.overview
-    lines: list[str] = [
+    lines += [
         "# Doc-IA — rapport d'analyse",
         "",
         f"- **Généré le** : {o.generated_at.strftime('%d/%m/%Y')}",
@@ -94,7 +92,13 @@ def render_markdown(
         f"- **Prompt** : {o.prompt_name} `{o.prompt_hash}`",
         "",
     ]
-    lines += _bloc_perimetre(report)
+    return lines
+
+
+def _synthese(report: ReportData) -> list[str]:
+    """1. Synthèse : les dix indicateurs de l'aperçu."""
+    lines: list[str] = []
+    o = report.overview
     lines += [
         "## 1. Synthèse",
         "",
@@ -128,6 +132,13 @@ def render_markdown(
         empty="Base vide.",
     )
 
+    return lines
+
+
+def _hygiene(report: ReportData) -> list[str]:
+    """2. Hygiène du stockage : doublons, ancienneté, tailles, extensions,
+    propriétaires, partages, répertoires."""
+    lines: list[str] = []
     dup = report.duplicates
     lines += [
         "## 2. Hygiène du stockage",
@@ -215,6 +226,12 @@ def render_markdown(
     )
     lines += _cut(report, "directories", len(report.directories))
 
+    return lines
+
+
+def _risque(report: ReportData) -> list[str]:
+    """3. Risque et conformité : matrices, fichiers sensibles, conservation, nettoyage."""
+    lines: list[str] = []
     matrix_headers = ["Partage", "Analysés", *views.SECURITY_CLASSES, "RGPD élevé/critique"]
     lines += ["## 3. Risque et conformité", "", "### 3.1 Classification par partage", ""]
     lines += _table(
@@ -309,6 +326,12 @@ def render_markdown(
     )
     lines += _cut(report, "cleanup", len(cleanup.rows))
 
+    return lines
+
+
+def _verification(report: ReportData) -> list[str]:
+    """4. Vérification humaine : avancement et écarts."""
+    lines: list[str] = []
     rev = report.reviews
     lines += [
         "## 4. Vérification humaine",
@@ -334,6 +357,12 @@ def render_markdown(
     )
     lines += _cut(report, "discrepancies", len(rev.discrepancies))
 
+    return lines
+
+
+def _execution(report: ReportData) -> list[str]:
+    """5. Exécution : statuts, exclusions, runs."""
+    lines: list[str] = []
     lines += ["## 5. Exécution", "", "### 5.1 Statuts des fichiers", ""]
     lines += _table(
         ["Statut", "Fichiers", "Volume"],
@@ -393,6 +422,12 @@ def render_markdown(
         ],
         empty="Aucun run enregistré.",
     )
+    return lines
+
+
+def _pied() -> list[str]:
+    """Avertissement de fin."""
+    lines: list[str] = []
     lines += [
         "---",
         "",
@@ -400,4 +435,22 @@ def render_markdown(
         "vérifiées avant toute décision de suppression.*",
         "",
     ]
+    return lines
+
+
+def render_markdown(
+    db: Database, *, today: date | None = None, data: ReportData | None = None
+) -> str:
+    """Rapport complet en Markdown (tableaux GFM) — une fonction par section."""
+    report = data if data is not None else collect(db, today=today)
+    lines = (
+        _head(report)
+        + _bloc_perimetre(report)
+        + _synthese(report)
+        + _hygiene(report)
+        + _risque(report)
+        + _verification(report)
+        + _execution(report)
+        + _pied()
+    )
     return "\n".join(lines)

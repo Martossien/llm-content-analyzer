@@ -457,6 +457,130 @@ def _pump_stdout(stream: IO[str], sink: queue.Queue[str | None]) -> None:
         sink.put(None)
 
 
+@dataclass
+class _Followed:
+    """Ce que la lecture de la sortie du scanner a retenu."""
+
+    tail: list[str]
+    """Dernières lignes texte (diagnostic en cas d'échec)."""
+    last_files: int
+    """Plus grand compte de fichiers vu en progression."""
+    cancelled: bool
+
+
+def _launch_scanner(cmd: list[str], cwd: Path) -> subprocess.Popen[str]:
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — arguments construits par build_command, sans shell
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(cwd),
+        )
+    except OSError as exc:
+        raise ScanError(f"lancement du scanner impossible : {exc}") from exc
+    assert proc.stdout is not None
+    return proc
+
+
+def _follow_scanner(
+    proc: subprocess.Popen[str],
+    *,
+    cancel: threading.Event | None,
+    on_event: Callable[[ScanEvent], None] | None,
+    on_line: Callable[[str], None] | None,
+    started: float,
+) -> _Followed:
+    """Lit la sortie du scanner jusqu'à sa fin ou l'arrêt demandé, puis l'attend.
+
+    `cancel` est consulté toutes les `CANCEL_POLL_S`, y compris pendant les longs
+    silences du scanner ; un arrêt demandé termine le processus proprement et
+    conserve le CSV partiel.
+    """
+    assert proc.stdout is not None
+    lines: queue.Queue[str | None] = queue.Queue()
+    reader = threading.Thread(
+        target=_pump_stdout, args=(proc.stdout, lines), name="docia-scan-stdout", daemon=True
+    )
+    reader.start()
+    tail: list[str] = []
+    last_files = 0
+    cancelled = False
+    try:
+        while True:
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                proc.terminate()
+                _notify_line(on_line, "scan : arrêt demandé — CSV partiel conservé")
+                break
+            try:
+                line = lines.get(timeout=CANCEL_POLL_S)
+            except queue.Empty:
+                continue  # le scanner se tait (énumération, hôte injoignable) : on repasse par `cancel`
+            if line is None:  # fin de la sortie : le scanner a terminé
+                break
+            event = parse_progress_line(line)
+            if event is not None:
+                event.elapsed_s = event.elapsed_s or (time.monotonic() - started)
+                last_files = max(last_files, event.files)
+                _notify_event(on_event, event)
+                continue
+            if line.strip():
+                tail.append(line)
+                del tail[:-40]
+                _notify_line(on_line, f"scan : {line.strip()}")
+    finally:
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        # Le fil de lecture est un démon : on lui laisse le temps de finir sur une
+        # sortie normale (il a déjà rendu la main), sans jamais rallonger un arrêt
+        # demandé — un petit-fils orphelin peut garder le tube ouvert.
+        reader.join(timeout=CANCEL_POLL_S)
+    cancelled = cancelled or (cancel is not None and cancel.is_set())
+    return _Followed(tail=tail, last_files=last_files, cancelled=cancelled)
+
+
+def _read_manifest(manifest_out: Path | None) -> dict[str, object]:
+    """Manifeste écrit par le scanner ; `{}` s'il manque ou n'est pas un objet JSON."""
+    if manifest_out is None or not manifest_out.is_file():
+        return {}
+    try:
+        loaded = json.loads(manifest_out.read_text(encoding="utf-8"))
+    except ValueError:
+        logger.warning("manifeste illisible : %s", manifest_out)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _check_outcome(result: ScanResult, *, returncode: int | None) -> None:
+    """Lève `ScanError` quand le scan n'est pas exploitable (voir `run_scan`)."""
+    if returncode not in EXIT_ACCEPTED and not result.cancelled:
+        detail = " | ".join(result.tail[-3:]) if result.tail else "aucune sortie"
+        raise ScanError(f"scanner terminé avec le code {returncode} : {detail}")
+    if not result.csv_path.is_file():
+        raise ScanError(
+            "scan arrêté avant que le scanner n'écrive le CSV : rien à importer"
+            if result.cancelled
+            else "le scanner n'a produit aucun CSV"
+        )
+    if result.missing_files and not result.cancelled:
+        # Le scanner a annoncé plus de lignes qu'il n'en a écrit et n'a pas été
+        # arrêté : il est mort en écrivant (disque plein, partage coupé). Le CSV
+        # est un fragment muet — l'importer donnerait un audit qui se croit
+        # exhaustif. Le cas « aucune ligne du tout » n'est que le cas extrême de
+        # celui-ci ; le contrôle ne s'y limite plus.
+        raise ScanError(
+            f"le scanner annonçait {result.expected_files} fichier(s) mais {result.csv_path} "
+            f"n'en contient que {result.files} : écriture interrompue (disque plein, partage "
+            "coupé, scanner tombé). Le scan est à refaire, ce CSV n'est pas exploitable."
+        )
+
+
 def run_scan(
     profile: ScanProfile,
     csv_out: Path,
@@ -500,113 +624,37 @@ def run_scan(
     cmd = build_command(scanner, profile, csv_out, manifest_out=manifest_out)
     _notify_line(on_line, f"scan : {redact(cmd)}")
     started = time.monotonic()
-    tail: list[str] = []
-    last_files = 0
-    try:
-        proc = subprocess.Popen(  # noqa: S603 — arguments construits par build_command, sans shell
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(csv_out.parent),
-        )
-    except OSError as exc:
-        raise ScanError(f"lancement du scanner impossible : {exc}") from exc
-    assert proc.stdout is not None
-    lines: queue.Queue[str | None] = queue.Queue()
-    reader = threading.Thread(
-        target=_pump_stdout, args=(proc.stdout, lines), name="docia-scan-stdout", daemon=True
+    proc = _launch_scanner(cmd, csv_out.parent)
+    followed = _follow_scanner(
+        proc, cancel=cancel, on_event=on_event, on_line=on_line, started=started
     )
-    reader.start()
-    cancelled = False
-    try:
-        while True:
-            if cancel is not None and cancel.is_set():
-                cancelled = True
-                proc.terminate()
-                _notify_line(on_line, "scan : arrêt demandé — CSV partiel conservé")
-                break
-            try:
-                line = lines.get(timeout=CANCEL_POLL_S)
-            except queue.Empty:
-                continue  # le scanner se tait (énumération, hôte injoignable) : on repasse par `cancel`
-            if line is None:  # fin de la sortie : le scanner a terminé
-                break
-            event = parse_progress_line(line)
-            if event is not None:
-                event.elapsed_s = event.elapsed_s or (time.monotonic() - started)
-                last_files = max(last_files, event.files)
-                _notify_event(on_event, event)
-                continue
-            if line.strip():
-                tail.append(line)
-                del tail[:-40]
-                _notify_line(on_line, f"scan : {line.strip()}")
-    finally:
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        # Le fil de lecture est un démon : on lui laisse le temps de finir sur une
-        # sortie normale (il a déjà rendu la main), sans jamais rallonger un arrêt
-        # demandé — un petit-fils orphelin peut garder le tube ouvert.
-        reader.join(timeout=CANCEL_POLL_S)
     elapsed = time.monotonic() - started
-    manifest: dict[str, object] = {}
-    if manifest_out is not None and manifest_out.is_file():
-        try:
-            loaded = json.loads(manifest_out.read_text(encoding="utf-8"))
-            manifest = loaded if isinstance(loaded, dict) else {}
-        except ValueError:
-            logger.warning("manifeste illisible : %s", manifest_out)
+    manifest = _read_manifest(manifest_out)
     # Le nombre de fichiers est **toujours** celui du CSV : le chiffre annoncé par la
     # progression n'est pas un décompte de lignes, et le faire passer pour tel a déjà
     # annoncé « scan terminé : 42 000 fichiers » sur un CSV de 0 octet.
-    files = count_csv_rows(csv_out)
-    cancelled = cancelled or (cancel is not None and cancel.is_set())
-    skipped = manifest_skipped(manifest)
     result = ScanResult(
         csv_path=csv_out,
         manifest_path=manifest_out if manifest else None,
         exit_code=proc.returncode,
-        files=files,
+        files=count_csv_rows(csv_out),
         elapsed_s=elapsed,
         command=redact_args(cmd),
         manifest=manifest,
-        tail=tail,
-        skipped=skipped,
-        cancelled=cancelled,
-        expected_files=expected_file_count(manifest, last_files),
+        tail=followed.tail,
+        skipped=manifest_skipped(manifest),
+        cancelled=followed.cancelled,
+        expected_files=expected_file_count(manifest, followed.last_files),
     )
-    if proc.returncode not in EXIT_ACCEPTED and not cancelled:
-        detail = " | ".join(tail[-3:]) if tail else "aucune sortie"
-        raise ScanError(f"scanner terminé avec le code {proc.returncode} : {detail}")
-    if not csv_out.is_file():
-        raise ScanError(
-            "scan arrêté avant que le scanner n'écrive le CSV : rien à importer"
-            if cancelled
-            else "le scanner n'a produit aucun CSV"
-        )
-    if result.missing_files and not cancelled:
-        # Le scanner a annoncé plus de lignes qu'il n'en a écrit et n'a pas été
-        # arrêté : il est mort en écrivant (disque plein, partage coupé). Le CSV
-        # est un fragment muet — l'importer donnerait un audit qui se croit
-        # exhaustif. Le cas « aucune ligne du tout » n'est que le cas extrême de
-        # celui-ci ; le contrôle ne s'y limite plus.
-        raise ScanError(
-            f"le scanner annonçait {result.expected_files} fichier(s) mais {csv_out} "
-            f"n'en contient que {files} : écriture interrompue (disque plein, partage "
-            "coupé, scanner tombé). Le scan est à refaire, ce CSV n'est pas exploitable."
-        )
-    if skipped:
+    _check_outcome(result, returncode=proc.returncode)
+    if result.skipped:
         _notify_line(
             on_line,
             "scan : périmètre incomplet — non scanné(s) : "
-            + ", ".join(skipped)
+            + ", ".join(result.skipped)
             + " (accès refusé ou emplacement injoignable)",
         )
-        logger.warning("scan au périmètre incomplet, cibles écartées : %s", ", ".join(skipped))
+        logger.warning(
+            "scan au périmètre incomplet, cibles écartées : %s", ", ".join(result.skipped)
+        )
     return result

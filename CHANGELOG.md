@@ -20,6 +20,13 @@ antérieur à la v3 (POC 2025) est dans git.
   divergentes de `split_sql_statements` sont réduites à une (vérifiée identique sur
   les sept migrations) ; les helpers morts (`_stamp`, `_free_path`,
   `_idempotent_create_index`) sont retirés.
+- **`views.py` devient le paquet `docia.views`** — `_common` (socle), `axes`,
+  `hygiene`, `risk`, `retention`, `review`, `overview` ; la façade réexporte
+  tout, `views.overview(db)` ne change pas.
+- **`scan.run_scan`** (153 lignes, complexité 31) découpé : lancement, suivi de
+  la sortie (`_follow_scanner`), manifeste, contrôle du résultat.
+- **`report/markdown.render_markdown`** (322 lignes) : une fonction par section,
+  comme le rendu HTML.
 - **DocFuse épinglé sur un commit** dans `pyproject.toml` (build reproductible :
   un push sur `DocFuse@main` ne peut plus casser la CI ni l'exe). Remonter
   l'épingle fait partie de toute livraison DocFuse (voir `AGENTS.md`).
@@ -38,6 +45,9 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ### Technique
 
+- **Tests sans écran** : `docia doctor` avec sondes doublées (OCR, scanner,
+  serveur) et l'écran Accueil construit sur une doublure de `customtkinter`
+  — `cli_tools` 34 % → couvert, `gui/tab_home` 14 % → couvert (voir CI).
 - **`legacy/` retiré du dépôt** (POC 2025, 76 fichiers, 18 000 lignes) : l'historique git
   le garde ; le code vivant est `src/docia`.
 - `.coverage` ignoré par git.
