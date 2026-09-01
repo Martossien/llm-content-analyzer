@@ -1,8 +1,8 @@
-"""Base SQLite : schéma versionné, accès aux fichiers, blocs et analyses.
+"""Base SQLite : accès aux fichiers, blocs, analyses, revues et prompts.
 
 Une seule connexion par `Database` (mode WAL, `check_same_thread=False` car
 le pipeline est asynchrone mais mono-thread). Toutes les écritures passent par
-des méthodes explicites ; aucun `ALTER` implicite hors `_MIGRATIONS`.
+des méthodes explicites ; aucun `ALTER` implicite hors `docia.db.schema`.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator, Sequence
@@ -19,6 +18,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from docia.db.schema import _MIGRATIONS, FILES_INDEXES, SCHEMA_VERSION
+from docia.db.sql import (
+    _DISPLAY_ORDER_SQL,
+    _IS_LATEST,
+    _LATEST_FROM,
+    _LATEST_JOINS,
+    _LATEST_SELECT,
+    _PENDING_WHERE,
+    _PLAN_EXCLUDE_SQL,
+    _PLAN_KEEP_SQL,
+    _REVIEWS_JOIN,
+    _TOUCH_SQL,
+    _UNIQUE_INDEX_RE,
+    _latest_filters,
+    _needs_analysis,
+    date_key,
+    split_sql_statements,
+)
 from docia.models import (
     BlockFile,
     BlockSpec,
@@ -30,8 +47,6 @@ from docia.models import (
     SmbeagleRow,
     path_key,
 )
-
-SCHEMA_VERSION = 7
 
 BACKUP_DIR_SUFFIX = ".backups"
 """Suffixe du dossier de sauvegardes, à côté de la base (`docia.sqlite.backups`)."""
@@ -102,123 +117,6 @@ def campaign_kind(target: str | Path) -> str:
         con.close()
 
 
-def _stamp() -> str:
-    """Horodatage local `AAAAMMJJTHHMMSS` pour nommer une sauvegarde."""
-    return datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - nom de fichier, heure locale
-
-
-def _free_path(directory: Path, base: str, suffix: str = ".sqlite") -> Path:
-    """Chemin libre `<directory>/<base>[_n]<suffix>` : n'écrase jamais un fichier."""
-    candidate = directory / f"{base}{suffix}"
-    counter = 2
-    while candidate.exists():
-        candidate = directory / f"{base}_{counter}{suffix}"
-        counter += 1
-    return candidate
-
-
-def _split_sql_statements(script: str) -> list[str]:
-    """Découpe un script SQL en instructions, sur les `;` **hors littéraux**.
-
-    `sqlite3.Connection.executescript` ne convient pas aux migrations : il valide
-    implicitement la transaction en cours (comportement documenté de CPython),
-    donc chaque `ALTER`/`UPDATE`/`CREATE INDEX` serait validé séparément et une
-    interruption laisserait la base à mi-chemin. Les instructions sont donc
-    jouées une à une dans une transaction explicite, ce qui suppose de savoir
-    découper : un `;` dans une chaîne (`'a;b'`), un identifiant entre guillemets
-    ou un commentaire ne sépare rien.
-    """
-    statements: list[str] = []
-    current: list[str] = []
-    closing: str | None = None  # délimiteur de fin du littéral / identifiant courant
-    comment: str | None = None  # "--" (jusqu'à la fin de ligne) ou "/*"
-    index = 0
-    size = len(script)
-    while index < size:
-        char = script[index]
-        following = script[index + 1] if index + 1 < size else ""
-        if comment == "--":
-            if char == "\n":
-                comment = None
-                current.append(char)
-            index += 1
-            continue
-        if comment == "/*":
-            if char == "*" and following == "/":
-                comment = None
-                index += 2
-                continue
-            index += 1
-            continue
-        if closing is not None:
-            current.append(char)
-            index += 1
-            if char == closing:
-                if closing != "]" and following == closing:  # '' ou "" échappé
-                    current.append(following)
-                    index += 1
-                    continue
-                closing = None
-            continue
-        if char == "-" and following == "-":
-            comment = "--"
-            index += 2
-            continue
-        if char == "/" and following == "*":
-            comment = "/*"
-            index += 2
-            continue
-        if char in "'\"`":
-            closing = char
-        elif char == "[":
-            closing = "]"
-        elif char == ";":
-            statements.append("".join(current))
-            current = []
-            index += 1
-            continue
-        current.append(char)
-        index += 1
-    statements.append("".join(current))
-    return [stripped for statement in statements if (stripped := statement.strip())]
-
-
-_ANALYZE_RE = re.compile(r"^ANALYZE\b", re.IGNORECASE)
-"""`ANALYZE` reconstruit `sqlite_stat1` : hors transaction de migration (long, et
-purement statistique — le rejouer plus tard ne change aucune donnée)."""
-
-_CREATE_INDEX_RE = re.compile(r"^\s*CREATE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS\b)", re.IGNORECASE)
-
-
-def _idempotent_create_index(sql: str) -> str:
-    """Ajoute `IF NOT EXISTS` à un `CREATE INDEX` qui n'en a pas.
-
-    `sqlite_master.sql` conserve le texte d'origine **sans** le `IF NOT EXISTS` :
-    rejouer tel quel un index déjà présent lèverait `index … already exists`.
-    """
-    return _CREATE_INDEX_RE.sub("CREATE INDEX IF NOT EXISTS ", sql, count=1)
-
-
-_UNIQUE_INDEX_RE = re.compile(r"^\s*CREATE\s+UNIQUE\s+INDEX\b", re.IGNORECASE)
-"""Un index **UNIQUE** est une contrainte de données, pas une aide au planificateur."""
-
-_IF_NOT_EXISTS_RE = re.compile(r"\bIF\s+NOT\s+EXISTS\s+", re.IGNORECASE)
-
-
-def normalize_index_sql(sql: str) -> str:
-    """Forme canonique d'un `CREATE INDEX`, pour comparer deux définitions.
-
-    `sqlite_master.sql` conserve le texte d'origine moins le `IF NOT EXISTS`, avec
-    ses espaces et sa casse : comparer les chaînes brutes est impossible, comparer
-    les seuls **noms** ne prouve rien (un index déclaré sur les mauvaises colonnes
-    porte le même nom). On ramène donc les deux formes à la même chaîne : casse
-    unifiée, `IF NOT EXISTS` retiré, espaces réduits, ponctuation resserrée.
-    """
-    text = _IF_NOT_EXISTS_RE.sub("", sql.strip().rstrip(";")).lower()
-    text = re.sub(r"\s+", " ", text)
-    return re.sub(r"\s*([(),])\s*", r"\1", text)
-
-
 def _process_alive(pid: int) -> bool:
     """Vrai si le processus `pid` tourne encore sur cette machine.
 
@@ -250,465 +148,9 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def date_key_sql(column: str) -> str:
-    """Expression SQL rendant `yyyymmdd` (ou `''`) pour une date SMBeagle ou ISO.
-
-    Miroir exact de `date_key` : les deux doivent rendre la même chaîne pour
-    toute valeur (vérifié par `tests/test_db.py`). Sert à remplir `files.access_key`
-    et `files.write_key` (schéma v6) et à les rétro-remplir à la migration.
-    """
-    return (
-        f"CASE WHEN length({column})>=10 AND substr({column},3,1)='/' AND substr({column},6,1)='/'"
-        f" THEN substr({column},7,4)||substr({column},4,2)||substr({column},1,2)"
-        f" WHEN length({column})>=10 AND substr({column},5,1)='-'"
-        f" THEN substr({column},1,4)||substr({column},6,2)||substr({column},9,2)"
-        f" ELSE '' END"
-    )
-
-
-def date_key(value: str) -> str:
-    """`yyyymmdd` d'une date SMBeagle (`dd/MM/yyyy…`) ou ISO, `''` si illisible.
-
-    Clé comparable lexicographiquement : c'est elle qui est stockée dans
-    `files.access_key` / `files.write_key` pour que les vues d'ancienneté
-    s'appuient sur un index au lieu de reformater chaque ligne.
-
-    Miroir exact de `date_key_sql` — y compris sur l'octet NUL, où `length()` de
-    SQLite s'arrête alors que `len()` de Python compte tout. Sans cette
-    précaution, une base **importée** et une base **migrée** portant les mêmes
-    données n'auraient pas les mêmes clés (un CSV corrompu suffit : l'import lit
-    en `errors="replace"`), et les statistiques d'ancienneté divergeraient en
-    silence.
-    """
-    if len(value.partition("\x00")[0]) >= 10:
-        if value[2] == "/" and value[5] == "/":
-            return value[6:10] + value[3:5] + value[0:2]
-        if value[4] == "-":
-            return value[0:4] + value[5:7] + value[8:10]
-    return ""
-
-
-def first_access_sql(prefix: str = "") -> str:
-    """Date d'accès retenue pour l'ancienneté : la première observée (schéma v5).
-
-    Le hachage et l'extraction de l'audit lisent les fichiers et peuvent
-    rafraîchir la date d'accès NTFS : la statistique « non accédé depuis N ans »
-    s'appuie donc sur `access_time_first`, et ne retombe sur `access_time` que
-    si cette première observation manque.
-    """
-    return f"COALESCE(NULLIF({prefix}access_time_first, ''), {prefix}access_time)"
-
-
-def latest_analysis_sql(file_id: str, *, alias: str = "a", file_alias: str = "f") -> str:
-    """Condition SQL « `alias` est l'analyse qui **fait foi** pour le fichier `file_id` ».
-
-    Deux exigences, indissociables, et c'est tout l'objet de cette fonction :
-
-    1. **la plus récente** — par `created_at`, départagée par `id` décroissant quand
-       deux analyses portent le même horodatage (réanalyse dans la même seconde) ;
-    2. **portant sur le contenu actuel** — `content_version` de l'analyse égale celle
-       du fichier. Un fichier modifié depuis son analyse repasse `pending` avec
-       `content_version + 1` : sa classification ne décrit plus rien.
-
-    La seconde condition est **dans** la sous-requête, pas après elle : « la plus
-    récente parmi celles du contenu actuel », et non « la plus récente, si par chance
-    elle porte sur le contenu actuel ». Écrite en second filtre, elle faisait
-    disparaître de toutes les vues un fichier dont une analyse valide existait mais
-    qu'une analyse plus récente portant sur une autre version masquait.
-
-    Les séparer a coûté cher. La règle vivait en **cinq exemplaires** — `views`,
-    `db._LATEST_JOINS` (écran Résultats, exports CSV/JSON), `db._IS_LATEST`
-    (`classification_summary`, `docia status`), `db.count_analyzed_files` et
-    `report.powerbi` — et la seconde exigence n'a d'abord été ajoutée qu'à un seul.
-    Le test qui prétendait les comparer confrontait un fragment de texte qui,
-    justement, ne contenait pas `content_version` : il passait pendant que les
-    chemins divergeaient. Le rapport disait 0 candidat au nettoyage là où l'export
-    Power BI et le classeur en annonçaient un, avec la **nouvelle** taille du fichier
-    et son **ancienne** classe de sécurité.
-
-    La fonction vit ici, dans `docia.db`, et non dans `docia.views` : le cycle
-    d'imports va de `views` vers `db`, donc `db` ne pouvait pas importer sa propre
-    règle et en gardait une copie textuelle. C'est cette copie qui a divergé.
-
-    Args:
-        file_id: expression SQL désignant l'identifiant du fichier (`f.id`,
-            `a.file_id`…), selon la table par laquelle la requête entre.
-        alias: alias de la table `analyses`.
-        file_alias: alias de la table `files`. La requête **doit** la joindre :
-            sans elle, `content_version` n'a rien à quoi se comparer.
-    """
-    return (
-        f"{alias}.id = (SELECT id FROM analyses WHERE file_id = {file_id}"
-        f" AND content_version = {file_alias}.content_version"
-        " ORDER BY created_at DESC, id DESC LIMIT 1)"
-    )
-
-
-def split_sql_statements(script: str) -> list[str]:
-    """Découpe un script SQL en instructions, en respectant les littéraux `'…'`.
-
-    Sert aux migrations : elles doivent être jouées instruction par instruction
-    dans une transaction explicite, `executescript()` validant implicitement au
-    passage (donc sans aucune atomicité). Les commentaires `--` sont ignorés ;
-    un `;` à l'intérieur d'une chaîne ne coupe pas.
-    """
-    statements: list[str] = []
-    current: list[str] = []
-    in_string = False
-    in_comment = False
-    index = 0
-    while index < len(script):
-        char = script[index]
-        if in_comment:
-            if char == "\n":
-                in_comment = False
-                current.append(char)
-            index += 1
-            continue
-        if in_string:
-            current.append(char)
-            if char == "'":
-                # `''` à l'intérieur d'une chaîne est un apostrophe littéral.
-                if index + 1 < len(script) and script[index + 1] == "'":
-                    current.append("'")
-                    index += 2
-                    continue
-                in_string = False
-            index += 1
-            continue
-        if char == "'":
-            in_string = True
-            current.append(char)
-        elif char == "-" and script[index : index + 2] == "--":
-            in_comment = True
-            index += 2
-            continue
-        elif char == ";":
-            statement = "".join(current).strip()
-            if statement:
-                statements.append(statement)
-            current = []
-        else:
-            current.append(char)
-        index += 1
-    last = "".join(current).strip()
-    if last:
-        statements.append(last)
-    return statements
-
-
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
-
-_SCHEMA_V1 = """
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS scans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    csv_path TEXT NOT NULL,
-    imported_at TEXT NOT NULL,
-    rows_total INTEGER NOT NULL DEFAULT 0,
-    rows_new INTEGER NOT NULL DEFAULT 0,
-    rows_updated INTEGER NOT NULL DEFAULT 0,
-    rows_unchanged INTEGER NOT NULL DEFAULT 0,
-    rows_invalid INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    path_key TEXT NOT NULL UNIQUE,
-    path TEXT NOT NULL,
-    name TEXT NOT NULL,
-    extension TEXT NOT NULL DEFAULT '',
-    host TEXT NOT NULL DEFAULT '',
-    hostname TEXT NOT NULL DEFAULT '',
-    username TEXT NOT NULL DEFAULT '',
-    unc_directory TEXT NOT NULL DEFAULT '',
-    base TEXT NOT NULL DEFAULT '',
-    directory_type TEXT NOT NULL DEFAULT '',
-    size_bytes INTEGER NOT NULL DEFAULT 0,
-    creation_time TEXT NOT NULL DEFAULT '',
-    last_write_time TEXT NOT NULL DEFAULT '',
-    access_time TEXT NOT NULL DEFAULT '',
-    file_attributes TEXT NOT NULL DEFAULT '',
-    owner TEXT NOT NULL DEFAULT '',
-    fast_hash TEXT NOT NULL DEFAULT '',
-    file_signature TEXT NOT NULL DEFAULT '',
-    readable INTEGER NOT NULL DEFAULT 1,
-    writeable INTEGER NOT NULL DEFAULT 0,
-    deletable INTEGER NOT NULL DEFAULT 0,
-    first_seen_scan_id INTEGER NOT NULL,
-    last_seen_scan_id INTEGER NOT NULL,
-    content_version INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL DEFAULT 'pending',
-    exclusion_reason TEXT,
-    priority_score INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
-CREATE INDEX IF NOT EXISTS idx_files_fast_hash ON files(fast_hash);
-CREATE INDEX IF NOT EXISTS idx_files_extension ON files(extension);
-CREATE INDEX IF NOT EXISTS idx_files_priority ON files(priority_score DESC, path);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL DEFAULT 'running',
-    model TEXT NOT NULL,
-    prompt_hash TEXT NOT NULL,
-    config_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS blocks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER NOT NULL REFERENCES runs(id),
-    path TEXT NOT NULL,
-    tokens_estimated INTEGER NOT NULL DEFAULT 0,
-    tokens_with_margin INTEGER NOT NULL DEFAULT 0,
-    file_count INTEGER NOT NULL DEFAULT 0,
-    oversized INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'built',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    prompt_hash TEXT NOT NULL,
-    model TEXT NOT NULL,
-    usage_prompt_tokens INTEGER,
-    usage_completion_tokens INTEGER,
-    latency_ms INTEGER,
-    created_at TEXT NOT NULL,
-    sent_at TEXT,
-    completed_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_blocks_status ON blocks(status);
-
-CREATE TABLE IF NOT EXISTS block_files (
-    block_id INTEGER NOT NULL REFERENCES blocks(id),
-    file_id INTEGER NOT NULL REFERENCES files(id),
-    file_ref TEXT NOT NULL,
-    content_version INTEGER NOT NULL,
-    oversized INTEGER NOT NULL DEFAULT 0,
-    outcome TEXT,
-    PRIMARY KEY (block_id, file_id)
-);
-CREATE INDEX IF NOT EXISTS idx_block_files_file ON block_files(file_id);
-
-CREATE TABLE IF NOT EXISTS analyses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id INTEGER NOT NULL REFERENCES files(id),
-    block_id INTEGER REFERENCES blocks(id),
-    content_version INTEGER NOT NULL,
-    prompt_hash TEXT NOT NULL,
-    model TEXT NOT NULL,
-    resume TEXT NOT NULL DEFAULT '',
-    security_classification TEXT NOT NULL,
-    security_confidence INTEGER NOT NULL,
-    security_justification TEXT NOT NULL DEFAULT '',
-    rgpd_risk_level TEXT NOT NULL,
-    rgpd_data_types TEXT NOT NULL DEFAULT '[]',
-    rgpd_confidence INTEGER NOT NULL,
-    finance_document_type TEXT NOT NULL,
-    finance_amounts TEXT NOT NULL DEFAULT '[]',
-    finance_confidence INTEGER NOT NULL,
-    legal_contract_type TEXT NOT NULL,
-    legal_parties TEXT NOT NULL DEFAULT '[]',
-    legal_confidence INTEGER NOT NULL,
-    raw_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (file_id, content_version, prompt_hash, model)
-);
-CREATE INDEX IF NOT EXISTS idx_analyses_file ON analyses(file_id);
-CREATE INDEX IF NOT EXISTS idx_analyses_security ON analyses(security_classification);
-CREATE INDEX IF NOT EXISTS idx_analyses_rgpd ON analyses(rgpd_risk_level);
-"""
-
-_SCHEMA_V2 = """
-ALTER TABLE block_files ADD COLUMN segment_index INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE block_files ADD COLUMN segment_count INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE analyses ADD COLUMN segments INTEGER NOT NULL DEFAULT 1;
-
-CREATE TABLE IF NOT EXISTS segment_analyses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id INTEGER NOT NULL REFERENCES files(id),
-    block_id INTEGER REFERENCES blocks(id),
-    content_version INTEGER NOT NULL,
-    prompt_hash TEXT NOT NULL,
-    model TEXT NOT NULL,
-    segment_index INTEGER NOT NULL,
-    segment_count INTEGER NOT NULL,
-    raw_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (file_id, content_version, prompt_hash, model, segment_index)
-);
-CREATE INDEX IF NOT EXISTS idx_segment_analyses_file ON segment_analyses(file_id);
-"""
-
-_SCHEMA_V3 = """
-ALTER TABLE analyses ADD COLUMN retention_required INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE analyses ADD COLUMN retention_years INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE analyses ADD COLUMN retention_basis TEXT NOT NULL DEFAULT 'none';
-ALTER TABLE analyses ADD COLUMN retention_justification TEXT NOT NULL DEFAULT '';
-ALTER TABLE analyses ADD COLUMN retention_confidence INTEGER NOT NULL DEFAULT 0;
-
-CREATE TABLE IF NOT EXISTS prompts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    text TEXT NOT NULL,
-    hash TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS reviews (
-    file_id INTEGER PRIMARY KEY REFERENCES files(id),
-    status TEXT NOT NULL DEFAULT 'to_review',
-    comment TEXT NOT NULL DEFAULT '',
-    corrected_security TEXT,
-    corrected_rgpd TEXT,
-    corrected_retention_years INTEGER,
-    reviewer TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL
-);
-"""
-
-_SCHEMA_V4 = """
-CREATE INDEX IF NOT EXISTS idx_files_hash_size ON files(fast_hash, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner);
-CREATE INDEX IF NOT EXISTS idx_files_access_time ON files(access_time);
-CREATE INDEX IF NOT EXISTS idx_files_last_write ON files(last_write_time);
-CREATE INDEX IF NOT EXISTS idx_files_base ON files(base);
-CREATE INDEX IF NOT EXISTS idx_analyses_retention ON analyses(retention_required);
-CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
-"""
-"""v4 : index de restitution (`views.py`) — doublons, ancienneté, propriétaire, partage."""
-
-_SCHEMA_V5 = """
-ALTER TABLE files ADD COLUMN access_time_first TEXT NOT NULL DEFAULT '';
-UPDATE files SET access_time_first = access_time;
-ALTER TABLE scans ADD COLUMN kind TEXT NOT NULL DEFAULT 'import';
-ALTER TABLE scans ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '';
-ALTER TABLE scans ADD COLUMN scanner_elapsed_s REAL NOT NULL DEFAULT 0;
-"""
-"""v5 : `access_time_first` = date d'accès observée au premier scan (ou au dernier
-changement de contenu). L'audit lui-même lit les fichiers (hachage, signature,
-extraction) et peut mettre à jour la date d'accès NTFS : les statistiques
-« non accédé depuis N ans » s'appuient sur cette première observation, jamais
-sur une date rafraîchie par un rescan d'un fichier inchangé. `scans.kind` =
-`scan` (SMBeagle piloté par docia, manifeste conservé) ou `import` (CSV fourni)."""
-
-_SCHEMA_V6 = f"""
-ALTER TABLE files ADD COLUMN access_key TEXT NOT NULL DEFAULT '';
-ALTER TABLE files ADD COLUMN write_key TEXT NOT NULL DEFAULT '';
-UPDATE files SET access_key = {date_key_sql(first_access_sql())},
-                 write_key = {date_key_sql("last_write_time")};
-
-CREATE INDEX IF NOT EXISTS idx_files_access_key ON files(access_key, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_files_write_key ON files(write_key, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_files_extension_size ON files(extension, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_files_owner_size ON files(owner, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_files_share_size ON files(base, unc_directory, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_files_status_size ON files(status, size_bytes);
-CREATE INDEX IF NOT EXISTS idx_analyses_file_latest ON analyses(file_id, created_at, id);
-
-DROP INDEX IF EXISTS idx_files_extension;
-DROP INDEX IF EXISTS idx_files_owner;
-DROP INDEX IF EXISTS idx_files_base;
-DROP INDEX IF EXISTS idx_files_status;
-
-ANALYZE;
-"""
-"""v6 : `access_key` / `write_key` = dates d'accès et d'écriture normalisées en
-`yyyymmdd` (`''` si absente ou illisible), remplies à l'insertion comme à la mise
-à jour par `upsert_files` et rétro-remplies ici. Les vues d'ancienneté comparaient
-jusqu'ici des `substr()` calculés ligne par ligne : aucun index n'était utilisable
-et chaque seuil relançait un balayage complet. Les index sont couvrants (la taille
-suit la clé) pour que les totaux se lisent sans toucher la table ; les index d'une
-seule colonne qu'ils remplacent (préfixe identique) sont supprimés. `ANALYZE` donne
-au planificateur les cardinalités réelles dès la migration ; il est rejoué à la fin
-de chaque scan (`finish_scan`)."""
-
-_SCHEMA_V7 = """
-ALTER TABLE scans ADD COLUMN complete INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE scans ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '';
-ALTER TABLE scans ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE scans ADD COLUMN exit_code INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE scans ADD COLUMN expected_files INTEGER NOT NULL DEFAULT -1;
-"""
-"""v7 : le **périmètre** du scan, conservé avec la campagne.
-
-Un audit sert à décider de suppressions : « cette campagne porte-t-elle sur tout
-ce qu'on a demandé ? » doit trouver sa réponse en base des mois plus tard, sans
-le manifeste ni le CSV sous la main. Jusqu'ici la table `scans` ne portait que ce
-qui avait été importé, jamais ce qui manquait : un partage refusé par une ACL,
-un scan arrêté par l'utilisateur et un scan complet y étaient identiques.
-
-- `complete` : 0 dès qu'une cible a été écartée, que le scan a été arrêté ou que
-  le CSV est plus court que le compte annoncé. **1 par défaut** — les scans déjà
-  en base, et ceux d'un `SMBeagle.exe` antérieur qui rend 0 et n'écrit aucun
-  `skipped`, restent réputés complets : la migration n'invente pas de faux
-  positif « périmètre incomplet ».
-- `skipped_json` : liste JSON des cibles demandées mais non scannées (`''` = aucune).
-- `cancelled` : l'utilisateur a arrêté le scan (attendu) — à ne pas confondre
-  avec un scanner mort en écrivant, que `scan.run_scan` refuse d'importer.
-- `exit_code` : code de retour du scanner (0 par défaut ; 4 = périmètre amputé).
-- `expected_files` : nombre de fichiers annoncé par le scanner, à comparer à
-  `rows_total`. **-1 = inconnu** (import d'un CSV fourni, scan d'avant la v7) :
-  sans cette valeur distincte de 0, un import ordinaire aurait paru tronqué.
-"""
-
-_MIGRATIONS: list[tuple[int, str]] = [
-    (1, _SCHEMA_V1),
-    (2, _SCHEMA_V2),
-    (3, _SCHEMA_V3),
-    (4, _SCHEMA_V4),
-    (5, _SCHEMA_V5),
-    (6, _SCHEMA_V6),
-    (7, _SCHEMA_V7),
-]
-
-FILES_INDEXES: dict[str, str] = {
-    "idx_files_fast_hash": "CREATE INDEX IF NOT EXISTS idx_files_fast_hash ON files(fast_hash)",
-    "idx_files_priority": (
-        "CREATE INDEX IF NOT EXISTS idx_files_priority ON files(priority_score DESC, path)"
-    ),
-    "idx_files_hash_size": (
-        "CREATE INDEX IF NOT EXISTS idx_files_hash_size ON files(fast_hash, size_bytes)"
-    ),
-    "idx_files_access_time": (
-        "CREATE INDEX IF NOT EXISTS idx_files_access_time ON files(access_time)"
-    ),
-    "idx_files_last_write": (
-        "CREATE INDEX IF NOT EXISTS idx_files_last_write ON files(last_write_time)"
-    ),
-    "idx_files_access_key": (
-        "CREATE INDEX IF NOT EXISTS idx_files_access_key ON files(access_key, size_bytes)"
-    ),
-    "idx_files_write_key": (
-        "CREATE INDEX IF NOT EXISTS idx_files_write_key ON files(write_key, size_bytes)"
-    ),
-    "idx_files_extension_size": (
-        "CREATE INDEX IF NOT EXISTS idx_files_extension_size ON files(extension, size_bytes)"
-    ),
-    "idx_files_owner_size": (
-        "CREATE INDEX IF NOT EXISTS idx_files_owner_size ON files(owner, size_bytes)"
-    ),
-    "idx_files_share_size": (
-        "CREATE INDEX IF NOT EXISTS idx_files_share_size ON files(base, unc_directory, size_bytes)"
-    ),
-    "idx_files_status_size": (
-        "CREATE INDEX IF NOT EXISTS idx_files_status_size ON files(status, size_bytes)"
-    ),
-}
-"""Index secondaires de `files` attendus au schéma courant, avec leur définition.
-
-Miroir de ce que produisent les migrations (v1 + v4 + v6, moins ceux que la v6
-supprime) : `tests/test_db.py` compare ce dictionnaire aux index réellement
-présents dans une base neuve, il ne peut donc pas dériver en silence. Il sert de
-filet à l'ouverture (`_ensure_files_indexes`) quand un chargement en masse
-(`bulk_load`) a été interrompu avant d'avoir recréé les index.
-"""
 
 BULK_CACHE_PAGES = -262_144
 """Cache SQLite pendant un chargement en masse : 256 Mo (valeur négative = kio)."""
@@ -737,11 +179,6 @@ Windows) : six heures couvrent très largement le plus long import observé
 _TOUCH_FLUSH = 1_000
 """Mises à jour « fichier inchangé » accumulées avant un `executemany`."""
 
-_TOUCH_SQL = (
-    "UPDATE files SET last_seen_scan_id=?, access_time=?, access_key=?, updated_at=? WHERE id=?"
-)
-"""Mise à jour d'un fichier revu inchangé : il n'a été *vu*, rien de son contenu ne change."""
-
 REVIEW_STATUSES = ("to_review", "validated", "corrected")
 
 ITER_FILES_BATCH = 10_000
@@ -749,127 +186,6 @@ ITER_FILES_BATCH = 10_000
 
 APPLY_PLAN_BATCH = 5_000
 """Décisions de plan regroupées par `executemany` dans `apply_plan`."""
-
-_PLAN_EXCLUDE_SQL = (
-    "UPDATE files SET status='excluded', exclusion_reason=?, priority_score=?, updated_at=?"
-    " WHERE id=? AND status IN ('pending','excluded','queued')"
-)
-"""Décision « exclu » : ne rétrograde jamais un fichier `done` ou `error`."""
-
-_PENDING_WHERE = """
- WHERE f.status='pending'
-   AND NOT EXISTS (SELECT 1 FROM analyses a WHERE a.file_id=f.id
-                   AND a.content_version=f.content_version
-                   AND a.prompt_hash=? AND a.model=?)"""
-"""Critère unique de « fichier à analyser », partagé par `select_pending`,
-`select_pending_ids` et `count_pending` : trois formulations, une seule définition —
-elles ne peuvent plus diverger. Attend deux paramètres : `prompt_hash`, `model`."""
-
-_LATEST_SELECT = """SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f.host, f.status,
-       f.exclusion_reason, f.content_version, a.model, a.prompt_hash, a.resume,
-       a.security_classification, a.security_confidence, a.security_justification,
-       a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
-       a.finance_document_type, a.finance_amounts, a.finance_confidence,
-       a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at,
-       a.segments, a.retention_required, a.retention_years, a.retention_basis,
-       a.retention_justification, a.retention_confidence,
-       r.status AS review_status, r.comment AS review_comment,
-       r.corrected_security, r.corrected_rgpd, r.corrected_retention_years,
-       r.reviewer, r.updated_at AS reviewed_at, f.id AS id"""
-"""Colonnes rendues par `latest_analyses` : le fichier, sa dernière analyse, sa revue."""
-
-_REVIEWS_JOIN = " LEFT JOIN reviews r ON r.file_id = f.id"
-
-_LATEST_JOINS = f" LEFT JOIN analyses a ON {latest_analysis_sql('f.id')}" + _REVIEWS_JOIN
-"""Analyse faisant foi pour un fichier + sa revue. La sous-requête corrélée s'appuie
-sur `idx_analyses_file_latest (file_id, created_at, id)`.
-
-`LEFT JOIN` : un fichier dont l'analyse ne porte plus sur le contenu actuel reste
-**listé**, avec des colonnes d'analyse vides et son statut `pending` — il n'est ni
-masqué, ni décoré d'une classification périmée."""
-
-_LATEST_FROM = " FROM files f" + _LATEST_JOINS
-
-_IS_LATEST = latest_analysis_sql("a.file_id")
-"""Même règle que `_LATEST_JOINS`, mais en partant des analyses (`analyses a`).
-
-Sert aux compteurs de `counts` et à `classification_summary` — qui doivent donc
-**joindre `files`** (alias `f`) : ils s'en passaient, et comptaient de ce fait les
-analyses devenues caduques. `docia status` annonçait alors une classification pour
-des fichiers que la base sait pourtant `pending`."""
-
-_DISPLAY_ORDER_SQL = """
-    CASE WHEN COALESCE(a.security_classification,'') <> '' THEN 0
-         WHEN f.status='error' THEN 1
-         WHEN f.status='done' THEN 2
-         ELSE 3 END,
-    CASE COALESCE(a.security_classification,'')
-         WHEN '' THEN 0 WHEN 'C3' THEN 0 WHEN 'C2' THEN 1 WHEN 'C1' THEN 2
-         WHEN 'C0' THEN 3 WHEN 'N/A' THEN 4 ELSE 5 END,
-    LOWER(f.name)"""
-"""Ordre d'affichage de l'écran Résultats, en SQL — miroir de `gui.tab_results._display_order`.
-Approché sur le dernier critère : `LOWER()` de SQLite ignore les accents (voir
-`latest_analyses`). `''` en second rang vaut 0 : un fichier sans classification est
-déjà départagé par le premier rang, comme en Python."""
-
-
-def _like_escape(text: str) -> str:
-    """Rend littéraux `%`, `_` et `\\` dans un motif `LIKE … ESCAPE '\\'`.
-
-    Sans cela, chercher « 100% » ou « fichier_1 » dans l'écran Résultats ne
-    cherchait plus une sous-chaîne mais un motif : « % » ramenait la campagne
-    entière. Le filtrage Python qu'on remplace comparait, lui, des sous-chaînes.
-    """
-    for char in ("\\", "%", "_"):
-        text = text.replace(char, "\\" + char)
-    return text
-
-
-def _needs_analysis(security: str | None, rgpd: str | None, search: str | None) -> bool:
-    """Vrai si les filtres demandés lisent la dernière analyse (jointure coûteuse)."""
-    return security is not None or rgpd is not None or bool(search)
-
-
-def _latest_filters(
-    security: str | None, rgpd: str | None, review: str | None, search: str | None
-) -> tuple[str, list[object]]:
-    """(clause `WHERE`, paramètres) des filtres de l'écran Résultats.
-
-    Chaque filtre reproduit à l'identique le test Python qu'il remplace, `None`
-    valant « pas de filtre » et `''` un filtre sur la valeur vide (« non vérifié »).
-    """
-    clauses: list[str] = []
-    params: list[object] = []
-    if security is not None:
-        clauses.append("COALESCE(a.security_classification,'') = ?")
-        params.append(security)
-    if rgpd is not None:
-        clauses.append("COALESCE(a.rgpd_risk_level,'') = ?")
-        params.append(rgpd)
-    if review is not None:
-        clauses.append("COALESCE(r.status,'') = ?")
-        params.append(review)
-    if search:
-        # Même botte de foin qu'en Python : chemin, résumé, propriétaire, séparés par
-        # une espace. `LIKE` replie déjà la casse — mais **l'ASCII seulement**, des
-        # deux côtés : le motif n'est donc pas replié en Python avant d'arriver ici,
-        # sans quoi « Étude » deviendrait « étude » et ne retrouverait plus « Étude »
-        # dans une botte de foin que SQLite, lui, n'a pas repliée.
-        clauses.append(
-            "f.path || ' ' || COALESCE(a.resume,'') || ' ' || COALESCE(f.owner,'')"
-            " LIKE ? ESCAPE '\\'"
-        )
-        params.append(f"%{_like_escape(search)}%")
-    return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
-
-
-_PLAN_KEEP_SQL = (
-    "UPDATE files SET"
-    " status=CASE WHEN status IN ('excluded','queued') THEN 'pending' ELSE status END,"
-    " exclusion_reason=CASE WHEN status='excluded' THEN NULL ELSE exclusion_reason END,"
-    " priority_score=?, updated_at=? WHERE id=?"
-)
-"""Décision « à analyser » : un fichier `done` ou `error` garde son statut, son score est rafraîchi."""
 
 
 class Database:
@@ -1833,24 +1149,6 @@ class Database:
         )
         self._conn.commit()
 
-    def block_files(self, block_id: int) -> list[BlockFile]:
-        rows = self._conn.execute(
-            "SELECT file_id, file_ref, content_version, oversized, segment_index, segment_count"
-            " FROM block_files WHERE block_id=? ORDER BY rowid",
-            (block_id,),
-        ).fetchall()
-        return [
-            BlockFile(
-                int(r["file_id"]),
-                r["file_ref"],
-                int(r["content_version"]),
-                bool(r["oversized"]),
-                int(r["segment_index"]),
-                int(r["segment_count"]),
-            )
-            for r in rows
-        ]
-
     def file_attempts(
         self, file_id: int, *, segment_index: int | None = None, segment_count: int | None = None
     ) -> int:
@@ -1904,24 +1202,49 @@ class Database:
         self._conn.commit()
 
     def pending_blocks(self, *, prompt_hash: str, model: str) -> list[BlockSpec]:
-        """Blocs `built`/`sent` d'un run précédent, à (re)envoyer — reprise."""
+        """Blocs `built`/`sent` d'un run précédent, à (re)envoyer — reprise.
+
+        Deux requêtes en tout — les blocs, puis **tous** leurs fichiers d'un coup —
+        au lieu d'une par bloc : reprendre une campagne interrompue avec 20 000
+        blocs en attente coûtait 20 001 allers-retours SQLite avant le premier envoi.
+        """
         rows = self._conn.execute(
-            "SELECT * FROM blocks WHERE status IN ('built','sent') AND prompt_hash=? AND model=? ORDER BY id",
+            "SELECT * FROM blocks WHERE status IN ('built','sent') AND prompt_hash=? AND model=?"
+            " ORDER BY id",
             (prompt_hash, model),
         ).fetchall()
-        specs: list[BlockSpec] = []
-        for r in rows:
-            specs.append(
-                BlockSpec(
-                    path=Path(r["path"]),
-                    files=self.block_files(int(r["id"])),
-                    tokens_estimated=int(r["tokens_estimated"]),
-                    tokens_with_margin=int(r["tokens_with_margin"]),
-                    oversized=bool(r["oversized"]),
-                    block_id=int(r["id"]),
+        if not rows:
+            return []
+        files_by_block: dict[int, list[BlockFile]] = {int(r["id"]): [] for r in rows}
+        for r in self._conn.execute(
+            "SELECT bf.block_id, bf.file_id, bf.file_ref, bf.content_version, bf.oversized,"
+            " bf.segment_index, bf.segment_count FROM block_files bf"
+            " JOIN blocks b ON b.id = bf.block_id"
+            " WHERE b.status IN ('built','sent') AND b.prompt_hash=? AND b.model=?"
+            " ORDER BY bf.block_id, bf.rowid",
+            (prompt_hash, model),
+        ):
+            files_by_block[int(r["block_id"])].append(
+                BlockFile(
+                    int(r["file_id"]),
+                    r["file_ref"],
+                    int(r["content_version"]),
+                    bool(r["oversized"]),
+                    int(r["segment_index"]),
+                    int(r["segment_count"]),
                 )
             )
-        return specs
+        return [
+            BlockSpec(
+                path=Path(r["path"]),
+                files=files_by_block[int(r["id"])],
+                tokens_estimated=int(r["tokens_estimated"]),
+                tokens_with_margin=int(r["tokens_with_margin"]),
+                oversized=bool(r["oversized"]),
+                block_id=int(r["id"]),
+            )
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ analyses
     def store_analysis(

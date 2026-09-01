@@ -32,7 +32,7 @@ src/docia/
 ├── cli.py            argparse : init | ingest | plan | run | status | export | retry
 ├── config.py         docia.toml (tomllib) → Config (dataclass), validation
 ├── models.py         dataclasses partagées (FileRow, BlockSpec, FileAnalysis, …)
-├── db.py             SQLite (WAL), schéma versionné, requêtes (upsert, sélection, statuts)
+├── db/               SQLite (WAL) : database.py (classe Database), schema.py (versions), sql.py (fragments)
 ├── ingest/
 │   └── smbeagle_csv.py   parseur CSV 19 colonnes à guillemets sélectifs (porté du legacy)
 ├── filter.py         exclusions (extensions, taille, dossiers système) + score de priorité

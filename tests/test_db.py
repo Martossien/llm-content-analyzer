@@ -695,7 +695,7 @@ def test_migration_interrompue_laisse_la_base_intacte(
         # Coupure au milieu de la migration, après au moins un ALTER TABLE.
         return [*statements[:2], "SELECT panne_simulee()"]
 
-    monkeypatch.setattr(db_module, "split_sql_statements", decoupage_qui_echoue)
+    monkeypatch.setattr(db_module.database, "split_sql_statements", decoupage_qui_echoue)
     with pytest.raises(sqlite3.OperationalError) as echec:
         Database(path).close()
     assert "panne_simulee" in str(echec.value), "l'erreur d'origine ne doit pas être masquée"
