@@ -29,7 +29,7 @@ from docia.ingest.smbeagle_csv import ImportProgress, ImportReport, import_csv
 from docia.llm.schema import prompt_hash
 from docia.models import FileStatus
 from docia.pipeline import RunReport, resolve_system_prompt, run_pipeline
-from docia.scan import ScanError, ScanEvent, ScanProfile, ScanResult, run_scan
+from docia.scan import ScanError, ScanEvent, ScanProfile, ScanResult, run_scan, scope_warnings
 from docia.views import RunStat, format_int, runs_summary
 
 logger = logging.getLogger(__name__)
@@ -358,6 +358,13 @@ def scan_campaign(
     manifeste ; le scan importé porte `kind='scan'` et le manifeste. Un scan arrêté
     par `cancel` est quand même importé (CSV partiel : ce qui a été vu est utile).
     Le mot de passe SMB ne vient jamais de la config : argument ou `DOCIA_SMB_PASSWORD`.
+
+    Un périmètre amputé — cible écartée par le scanner, arrêt demandé — est
+    **écrit en base** (`scans.complete`, `skipped_json`, `cancelled`) en même temps
+    que le manifeste, et annoncé à l'appelant par `on_line`. Importer un scan
+    partiel reste le bon choix (ce qui a été vu est utile) ; n'en garder aucune
+    trace ne l'était pas : le rapport présentait ensuite un fragment comme un
+    inventaire exhaustif.
     """
     profile.preserve_access_time = cfg.scan.preserve_access_time
     profile.skip_acls = cfg.scan.skip_acls
@@ -383,7 +390,24 @@ def scan_campaign(
         report.scan_id,
         manifest_json=json.dumps(result.manifest, ensure_ascii=False) if result.manifest else "",
         scanner_elapsed_s=result.elapsed_s,
+        skipped=result.skipped,
+        cancelled=result.cancelled,
+        exit_code=result.exit_code,
+        expected_files=result.expected_files,
     )
+    if not result.complete:
+        # Journal seulement, jamais `on_line` : les deux façades affichent déjà ces
+        # avertissements pour leur compte (la CLI par le gestionnaire console du
+        # journal, la fenêtre par `tab_home`), et les pousser aussi ici les faisait
+        # sortir **deux fois** à l'écran. `logger` reste le chemin unique vers
+        # `docia.log`, le fichier qu'on demande de joindre en cas de souci.
+        for ligne in scope_warnings(
+            skipped=result.skipped,
+            cancelled=result.cancelled,
+            expected_files=result.expected_files,
+            files=result.files,
+        ):
+            logger.warning("%s", ligne)
     plan_report = (
         plan(db, cfg, progress=on_plan_progress) if do_plan else PlanReport(pending=0, excluded=0)
     )

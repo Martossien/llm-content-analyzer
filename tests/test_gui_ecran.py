@@ -1,9 +1,16 @@
 """Tests qui exigent un **vrai écran** : ils construisent la fenêtre CustomTkinter.
 
 Ignorés par défaut — la CI (Windows et Ubuntu sans session graphique) ne les joue pas.
-Pour les lancer sur le poste de développement :
+Pour les lancer sur le poste de développement, **sur un affichage dédié** :
 
-    DISPLAY=:1 DOCIA_GUI_SCREEN=1 .venv/bin/python -m pytest tests/test_gui_ecran.py -v
+    Xvnc :99 -geometry 1280x1024 -SecurityTypes None &     # ou tout autre serveur X libre
+    DISPLAY=:99 DOCIA_GUI_SCREEN=1 .venv/bin/python -m pytest tests/test_gui_ecran.py -v
+
+**Ne les lancez pas sur votre session graphique** (`DISPLAY=:1` ici) : chaque test y
+ouvre une fenêtre par-dessus votre travail, et la suite s'y est trouvée bloquée sans
+rendre la main — deux fois, à 150 s et 300 s — là où elle passe en 19 s sur un
+affichage sans gestionnaire de fenêtres. La cause exacte n'a pas été cherchée : il n'y
+a aucune raison de jouer ces tests sur un bureau occupé.
 
 Ils couvrent ce que les tests sans écran ne peuvent pas atteindre :
 

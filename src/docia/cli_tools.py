@@ -171,6 +171,14 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
         "invalid": report.invalid,
         "pending": plan_report.pending,
         "excluded": plan_report.excluded,
+        # Le périmètre doit figurer ici aussi : `--json` sert à piloter docia depuis
+        # un script, et ce script n'a pas d'yeux pour lire les avertissements que
+        # `on_line` envoie sur stderr. Sans ces quatre faits, il conclurait à un
+        # inventaire exhaustif d'un partage dont une part n'a jamais été ouverte.
+        "complete": result.complete,
+        "skipped": list(result.skipped),
+        "cancelled": result.cancelled,
+        "expected_files": result.expected_files,
     }
     # Le journal `docia.log` est unique pour tout le poste : sans le chemin de la
     # base, on ne sait pas de quelle campagne parle la ligne (voir `cli.CAMPAIGN_LOG`).
@@ -198,7 +206,11 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
             f"{service.format_import_report(report)} — "
             f"préparation : {plan_report.pending} à analyser, {plan_report.excluded} exclus"
         )
-    return 0
+    # 2 = « terminé, avec des réserves », la convention déjà tenue par `ingest`
+    # (lignes invalides) et `run` (fichiers en erreur). Un script enchaînant
+    # `docia scan && docia run && docia report` doit s'arrêter sur un périmètre
+    # amputé : le CSV est bon, mais l'inventaire n'est pas celui qu'on a demandé.
+    return 0 if result.complete else 2
 
 
 def doctor_report(cfg: Config) -> dict[str, Any]:

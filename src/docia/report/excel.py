@@ -55,6 +55,14 @@ from docia.report.data import ReportData, collect
 
 logger = logging.getLogger(__name__)
 
+SCOPE_SHEET = "Périmètre"
+"""Onglet ajouté **en premier**, et seulement quand l'inventaire est incomplet.
+
+Le classeur sert aux mêmes décisions de suppression que le rapport HTML : quand
+une cible n'a pas été parcourue ou qu'un scan a été arrêté, cela doit se voir à
+l'ouverture, pas au détour d'une ligne de la synthèse. Sur une campagne complète
+— le cas normal — le classeur garde exactement les onglets de `SHEETS`."""
+
 SHEETS: tuple[str, ...] = (
     "Synthèse",
     "Fichiers",
@@ -66,7 +74,7 @@ SHEETS: tuple[str, ...] = (
     "Revues",
     "Erreurs",
 )
-"""Onglets du classeur, dans l'ordre."""
+"""Onglets du classeur, dans l'ordre (`SCOPE_SHEET` s'ajoute devant si besoin)."""
 
 MAX_SHEET_ROWS = 1_048_576
 """Lignes par feuille acceptées par Excel (en-tête comprise) — limite du format xlsx."""
@@ -301,10 +309,27 @@ def write_workbook(
             f"La totalité est dans {where}."
         )
 
+    scope = report.scope
+    if scope.incomplete:
+        sheet(
+            SCOPE_SHEET,
+            ["Inventaire incomplet — à lire avant toute décision de suppression"],
+            [
+                [scope.headline()],
+                *[[f"Non parcouru : {cible}"] for cible in scope.skipped_targets],
+                *[[message] for message in scope.warnings],
+            ],
+        )
+
     sheet(
         "Synthèse",
         ["Indicateur", "Valeur", "Détail"],
         [
+            *(
+                [["Périmètre", "INCOMPLET", scope.headline()]]
+                if scope.incomplete
+                else [["Périmètre", "complet", "toutes les cibles demandées ont été parcourues"]]
+            ),
             ["Base", o.db_path, ""],
             ["Généré le", o.generated_at, ""],
             ["Modèle", o.model, ""],

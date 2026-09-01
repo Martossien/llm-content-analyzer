@@ -26,7 +26,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import queue
-import sqlite3
 import threading
 import traceback
 from collections.abc import Callable
@@ -35,8 +34,21 @@ from types import TracebackType
 from typing import Any
 
 from docia import __version__
-from docia.config import DEFAULT_CONFIG_NAME, Config, load_config
-from docia.db import Database
+from docia.config import (
+    DEFAULT_CONFIG_NAME,
+    Config,
+    TomlRewriteError,
+    default_toml,
+    load_config,
+    update_toml,
+)
+from docia.db import (
+    CAMPAIGN_DOCIA,
+    CAMPAIGN_FOREIGN,
+    CAMPAIGN_NEW,
+    Database,
+    campaign_kind,
+)
 from docia.gui.helpers import campaign_title, config_to_toml
 from docia.gui.service_shim import GuiService, default_backup_dir, load_recent, remember_recent
 from docia.gui.theme import ACCENT_ADMIN, FONT_FAMILY, FONT_SIZE, FONT_SIZE_SMALL, FONT_SIZE_TITLE
@@ -49,9 +61,17 @@ _DONE = "__done__"
 USER_TABS = ("Accueil", "Résultats", "Statistiques", "Rapports")
 ADMIN_TABS = ("Prompt", "Serveur & performances")
 
-NEW = "neuve"
-DOCIA = "docia"
-FOREIGN = "étrangère"
+NEW = CAMPAIGN_NEW
+DOCIA = CAMPAIGN_DOCIA
+FOREIGN = CAMPAIGN_FOREIGN
+"""Verdicts de `campaign_kind`, **alias** de ceux de `docia.db`.
+
+Le contrôle est né ici — une base « contacts » d'un autre logiciel s'était retrouvée
+enrichie des douze tables docia — puis a été transposé dans `docia.db` pour que la
+ligne de commande refuse elle aussi une faute de frappe dans `--db`. Deux copies
+identiques d'une fonction qui décide si on ouvre ou non le fichier de quelqu'un
+finissent par diverger : la fenêtre délègue donc, et ne garde que les noms courts
+que ses écrans emploient."""
 
 WINDOW_SKIP = "fenetre_deja_dite"
 """Attribut d'enregistrement (`extra={WINDOW_SKIP: True}`) qui réserve un message au
@@ -118,37 +138,6 @@ class _JournalToWindow(logging.Handler):
             self.handleError(record)
 
 
-def campaign_kind(target: Path) -> str:
-    """`neuve`, `docia` ou `étrangère` — sans rien créer ni modifier.
-
-    `Database(chemin)` greffe les douze tables docia dans **n'importe quel** SQLite
-    ouvrable : une base « contacts » d'un autre logiciel s'en retrouvait enrichie,
-    pendant que le journal affirmait « aucune donnée effacée ». On regarde donc avant
-    d'ouvrir : un fichier non vide sans `meta.schema_version` n'est pas une campagne.
-    """
-    try:
-        if not target.exists() or target.stat().st_size == 0:
-            return NEW
-        uri = target.resolve().as_uri() + "?mode=ro"
-        con = sqlite3.connect(uri, uri=True)
-    except (OSError, ValueError, sqlite3.Error):
-        return FOREIGN
-    try:
-        names = {
-            str(r[0]) for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        if not names:
-            return NEW  # fichier SQLite vide : utilisable comme campagne neuve
-        if "meta" not in names:
-            return FOREIGN
-        row = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        return DOCIA if row else FOREIGN
-    except sqlite3.Error:
-        return FOREIGN  # pas un fichier SQLite du tout (texte, archive, base corrompue)
-    finally:
-        con.close()
-
-
 def _owner_of(listener: Callable[..., Any]) -> Any:
     """Widget propriétaire d'un rappel — le cadre de l'onglet — s'il est identifiable.
 
@@ -189,6 +178,10 @@ class DociaApp:
         self._refresh_listeners: list[tuple[Callable[[], None], Any]] = []
         self._backup_dir: Path | None = None
         self._poll_failures = 0
+        # Posé tant qu'aucune campagne ne s'ouvre : voir `_touch_campaign`.
+        self._campaign_ready = threading.Event()
+        self._campaign_ready.set()
+        self._touch_pending = False
         self.service = GuiService(self.open_db)
 
         ctk.set_appearance_mode("light")
@@ -411,7 +404,14 @@ class DociaApp:
         return Path(self._db_path.strip() or self.config.db_path)
 
     def open_db(self) -> Database:
+        """Ouvre la campagne courante — **après** une migration en cours, jamais pendant.
+
+        L'attente est en principe immédiate : elle ne mord que si un écran administrateur
+        touche à la base pendant l'ouverture d'une campagne à migrer. Bloquer une seconde
+        vaut mieux que deux threads migrant la même base à la fois.
+        """
         self.config.db_path = str(self.db_path())
+        self._campaign_ready.wait()
         return Database(self.db_path())
 
     def backup_dir(self) -> Path:
@@ -429,6 +429,8 @@ class DociaApp:
         qui existe mais n'est **pas** une campagne Doc-IA est refusé, sans y toucher.
 
         L'ouverture faite ici est la seule : `open_campaign(touch=False)` ne la refait pas.
+        Une campagne **déjà existante** fait exception : elle peut demander une migration,
+        donc c'est `open_campaign` qui l'ouvre, en tâche de fond (voir `_touch_campaign`).
         """
         raw = db_path.strip()
         if not raw:
@@ -442,44 +444,72 @@ class DociaApp:
                 "choisis un autre nom (le fichier n'a pas été touché)"
             )
             return False
+        if kind == DOCIA:
+            self.log(f"campagne existante ouverte : {target} (aucune donnée effacée)")
+            self.open_campaign(str(target))
+            return True
         try:
-            Database(target).close()
+            Database(target).close()  # fichier neuf : création du schéma, rien à migrer
         except Exception as exc:  # noqa: BLE001 — chemin invalide, disque plein, droits
             self.log(f"campagne impossible à créer ({target}) : {exc}")
             return False
-        self.log(
-            f"campagne existante ouverte : {target} (aucune donnée effacée)"
-            if kind == DOCIA
-            else f"campagne créée : {target}"
-        )
+        self.log(f"campagne créée : {target}")
         self.open_campaign(str(target), touch=False)
         return True
 
-    def _touch_campaign(self) -> None:
-        """Ouvre la base une fois, ici, dans le thread Tk.
+    def _touch_campaign(self) -> bool:
+        """Ouvre la base une fois, **hors** du thread Tk. Rend vrai si un travail a démarré.
 
-        C'est cette ouverture qui déclenche une éventuelle migration de schéma (et sa
-        sauvegarde préalable). Les écrans calculent **ensuite**, en parallèle : laisser
-        trois threads découvrir en même temps une base à migrer serait un désastre.
+        Cette ouverture est celle qui déclenche une éventuelle migration de schéma et sa
+        sauvegarde préalable — 10,0 s mesurées sur une campagne de 817 Mo à migrer, et
+        bien davantage sur les bases réelles de cet outil. Jouée dans le thread Tk, elle
+        figeait la fenêtre pour toute cette durée, sans sablier ni message : plus de
+        redessin, plus de journal, rien.
 
-        La garantie tient parce que `open_campaign` migre ici, dans l'ordre, avant le
-        `refresh_all` qui lance les calculs, et parce que chaque calcul ouvre le chemin
-        que `LazyScreen._start` a capturé — jamais un chemin relu depuis le thread.
+        Le seul emplacement de travail (`run_in_thread`) sert ici de **verrou** : la
+        fenêtre affiche « ⏳ ouverture de la campagne en cours… », les boutons des écrans
+        se désactivent, et aucun autre travail ne peut démarrer avant la fin. Les deux
+        autres portes vers la base sont fermées par `_campaign_ready`, retiré le temps de
+        l'ouverture : `run_background` (les calculs d'écran, qui ouvrent la base depuis
+        leur thread) l'attend avant de calculer, et `open_db` l'attend avant d'ouvrir.
+        C'est ce qui interdit à deux threads de découvrir en même temps une base à
+        migrer — la faute qui avait produit `cannot rollback - no transaction is active`.
+
+        Refusé faute d'emplacement libre, le travail est **repris** à la fin de celui qui
+        occupe la place (`_touch_pending`, relu par `_drain`) : une campagne ouverte
+        pendant une analyse n'est jamais laissée sans sa migration.
         """
+        self._touch_pending = False
         if not self.db_path().exists():
-            return
-        try:
-            Database(self.db_path()).close()
-        except Exception as exc:  # noqa: BLE001 — base illisible : on le dit, on continue
-            logger.exception("ouverture de la campagne", extra={WINDOW_SKIP: True})
-            self.log(f"campagne illisible ({self.db_path()}) : {exc}")
+            return False
+        path = self.db_path()  # capturé ici, dans le thread Tk, comme pour les écrans
+
+        def work() -> None:
+            try:
+                Database(path).close()
+            except Exception as exc:  # noqa: BLE001 — base illisible : on le dit, on continue
+                logger.exception("ouverture de la campagne", extra={WINDOW_SKIP: True})
+                self.log(f"campagne illisible ({path}) : {exc}")
+            finally:
+                self._campaign_ready.set()  # quoi qu'il arrive : sinon plus rien ne lit
+
+        self._campaign_ready.clear()
+        if self.run_in_thread(work, "ouverture de la campagne"):
+            return True
+        self._campaign_ready.set()
+        self._touch_pending = True  # la place est prise : on réessaiera à la fin
+        return False
 
     def ensure_campaign(self) -> bool:
         """Garantit que la campagne courante existe sur le disque (créée au besoin)."""
         return True if self.db_path().exists() else self.create_campaign(str(self.db_path()))
 
     def open_campaign(self, db_path: str, *, touch: bool = True) -> None:
-        """`touch=False` : la base vient d'être ouverte par l'appelant (`create_campaign`)."""
+        """`touch=False` : la base vient d'être ouverte par l'appelant (`create_campaign`).
+
+        `refresh_all` ne fait rien tant que l'ouverture n'est pas terminée ; c'est `_drain`
+        qui le rappelle à la fin du travail, écrans à jour sur la base migrée.
+        """
         self._db_path = db_path
         self.config.db_path = db_path
         if touch:
@@ -545,11 +575,35 @@ class DociaApp:
         return self.config
 
     def save_config(self) -> None:
+        """Écrit `docia.toml` en **modifiant** le fichier, jamais en le refabriquant.
+
+        La regénération complète effaçait les 21 commentaires produits par `docia init`,
+        dont l'avertissement qui prévient que `<campagne>.blocks/` conserve le texte
+        intégral des documents analysés, OCR compris, en clair sur le disque : un seul
+        clic sur « Enregistrer » le faisait disparaître pour de bon. `update_toml` ne
+        touche donc qu'aux valeurs modifiées.
+
+        Deux replis, dans cet ordre : un fichier absent (ou vide) part du gabarit
+        commenté de `docia init` — il naît donc commenté ; un fichier que la réécriture
+        chirurgicale ne sait pas suivre sans risque (clé pointée, table en ligne, TOML
+        cassé) est regénéré comme avant, et la fenêtre le dit au lieu de le taire.
+        """
         cfg = self.collect_config()
         if cfg.validate():
             self.log("config non enregistrée (corrige les erreurs ci-dessus)")
             return
-        self.config_path.write_text(config_to_toml(cfg), encoding="utf-8")
+        try:
+            source = self.config_path.read_text(encoding="utf-8")
+        except OSError:
+            source = ""
+        if not source.strip():
+            source = default_toml()
+        try:
+            text = update_toml(source, cfg)
+        except TomlRewriteError as exc:
+            text = config_to_toml(cfg)
+            self.log(f"config réécrite en entier (commentaires perdus) : {exc}")
+        self.config_path.write_text(text, encoding="utf-8")
         self.log(f"config enregistrée : {self.config_path}")
 
     # ------------------------------------------------------------ travaux
@@ -586,10 +640,16 @@ class DociaApp:
         Contrairement à `run_in_thread`, n'occupe pas l'unique emplacement de travail :
         consulter un écran ne doit jamais empêcher de lancer une analyse. `apply(résultat)`
         s'exécute ensuite dans le thread Tk, via la file du journal.
+
+        Le calcul attend d'abord la fin d'une éventuelle ouverture de campagne : c'est ici
+        que passent les écrans, qui ouvrent la base **eux-mêmes** dans ce thread
+        (`LazyScreen._start`). L'attente a lieu dans le thread de travail, jamais dans
+        celui de Tk : la fenêtre reste vivante pendant ce temps.
         """
 
         def worker() -> None:
             try:
+                self._campaign_ready.wait()
                 result = compute()
             except Exception as exc:  # noqa: BLE001 — affiché, jamais avalé
                 logger.exception("échec %s", name, extra={WINDOW_SKIP: True})
@@ -644,6 +704,16 @@ class DociaApp:
         self._dispatch(self._busy_listeners, lambda cb: cb(busy), "état occupé")
 
     def refresh_all(self) -> None:
+        """Rafraîchit les écrans — sauf pendant l'ouverture d'une campagne.
+
+        Certains rappels de rafraîchissement ouvrent la base **dans le thread Tk**
+        (l'onglet Prompt lit ses profils) : les laisser passer pendant une migration,
+        c'est deux ouvertures concurrentes, et un thread Tk figé le temps de l'attente.
+        `_drain` rappelle `refresh_all` dès que l'ouverture est finie.
+        """
+        if not self._campaign_ready.is_set():
+            self._refresh_campaign_header()
+            return
         self._dispatch(self._refresh_listeners, lambda cb: cb(), "rafraîchissement")
         self._refresh_campaign_header()
 
@@ -711,6 +781,10 @@ class DociaApp:
             self.log_box.configure(state="disabled")
         if finished:
             self._set_busy(False)
+            # Une campagne ouverte pendant un autre travail n'a pas pu être migrée :
+            # la place se libère, on la reprend, et le rafraîchissement attend sa fin.
+            if self._touch_pending and self._touch_campaign():
+                return
             self.refresh_all()
 
     def run(self) -> None:

@@ -14,3 +14,9 @@ dist/
 *.blocks/
 docia.toml
 logs/
+
+# Journal d'exécution produit par docia lui-même (à côté du docia.toml).
+# Il a été commité par mégarde une fois : chaque exécution salissait ensuite
+# l'arbre de travail et faisait passer une trace de test pour du code.
+docia.log
+docia-*.log

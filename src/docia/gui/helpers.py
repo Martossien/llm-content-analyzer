@@ -12,7 +12,7 @@ from dataclasses import asdict
 from typing import Any
 
 from docia import __version__
-from docia.config import Config
+from docia.config import ROOT_KEYS, SECTIONS, Config, toml_value
 
 logger = logging.getLogger(__name__)
 
@@ -23,26 +23,20 @@ TOKENIZERS = ("approx", "mistral", "openai")
 # ---------------------------------------------------------------- helpers purs
 def config_to_toml(cfg: Config) -> str:
     """Sérialise une `Config` en TOML lisible (tomllib ne sait qu'écrire → on
-    formate à la main, champs simples uniquement)."""
+    formate à la main, champs simples uniquement).
 
-    def value(v: object) -> str:
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, int | float):
-            return str(v)
-        if isinstance(v, list):
-            return "[" + ", ".join(json.dumps(str(x), ensure_ascii=False) for x in v) + "]"
-        return json.dumps(str(v), ensure_ascii=False)
-
+    **Regénération complète, sans commentaires** : `DociaApp.save_config` ne s'en sert
+    plus que de repli, quand `config.update_toml` ne peut pas modifier le fichier
+    existant sans risque."""
     data = asdict(cfg)
     lines = [f"# docia.toml — écrit par l'interface docia {__version__}"]
-    for key in ("db_path", "prompt_path"):
-        lines.append(f"{key} = {value(data[key])}")
-    for section in ("llm", "blocks", "filter", "scan"):
+    for key in ROOT_KEYS:
+        lines.append(f"{key} = {toml_value(data[key])}")
+    for section in SECTIONS:
         lines.append("")
         lines.append(f"[{section}]")
         for key, v in data[section].items():
-            lines.append(f"{key} = {value(v)}")
+            lines.append(f"{key} = {toml_value(v)}")
     text = "\n".join(lines) + "\n"
     tomllib.loads(text)  # garantit qu'on écrit du TOML valide
     return text

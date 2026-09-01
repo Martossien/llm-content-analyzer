@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import sys
@@ -104,8 +105,31 @@ def test_parse_progress_line() -> None:
     assert parse_progress_line("{invalide") is None
 
 
-def _fake_scanner(tmp_path: Path, *, rows: int = 3, exit_code: int = 0, sleep: float = 0.0) -> Path:
-    """Faux SMBeagle : écrit un CSV 19 colonnes, des lignes de progression JSON, un manifeste."""
+def _fake_scanner(
+    tmp_path: Path,
+    *,
+    rows: int = 3,
+    exit_code: int = 0,
+    sleep: float = 0.0,
+    sleep_after: float = 0.0,
+    announced: int | None = None,
+    skipped: list[str] | None = None,
+    manifest_skipped_key: bool = True,
+) -> Path:
+    """Faux SMBeagle : écrit un CSV 19 colonnes, des lignes de progression JSON, un manifeste.
+
+    `announced` sépare le nombre de lignes **annoncées** (progression, manifeste)
+    du nombre de lignes réellement **écrites** (`rows`) : c'est ce qui permet de
+    rejouer un scanner mort en écrivant. `skipped` remplit la clé `skipped` du
+    manifeste (cibles écartées, code de retour 4) ; `manifest_skipped_key=False`
+    rejoue un `SMBeagle.exe` antérieur, dont le manifeste n'a pas cette clé.
+
+    `sleep` retarde l'écriture du CSV, `sleep_after` la suit : le second rejoue un
+    scan qu'on arrête alors qu'un CSV **partiel** existe déjà — le cas d'annulation
+    qui compte, puisque c'est celui que docia importe.
+    """
+    annonce = rows if announced is None else announced
+    skipped_json = json.dumps(list(skipped or []))
     script = tmp_path / "fake_smbeagle.py"
     script.write_text(
         f"""import json, sys, time
@@ -119,11 +143,15 @@ with open(csv_out, 'w', encoding='utf-8', newline='') as fh:
     fh.write({HEADER!r} + '\\n')
     for i in range({rows}):
         fh.write({ROW!r}.replace('a.txt', f'f{{i}}.txt') + '\\n')
-print(json.dumps({{'event': 'progress', 'stage': 'writing', 'hosts': 1, 'shares': 1, 'files': {rows}, 'elapsed_s': 0.2}}))
+print(json.dumps({{'event': 'progress', 'stage': 'writing', 'hosts': 1, 'shares': 1, 'files': {annonce}, 'elapsed_s': 0.2}}))
+time.sleep({sleep_after})
 if manifest:
+    contenu = {{'version': 'fake', 'options': {{'args': args}}, 'counts': {{'files': {annonce}}}}}
+    if {manifest_skipped_key!r}:
+        contenu['skipped'] = json.loads({skipped_json!r})
     with open(manifest, 'w', encoding='utf-8') as fh:
-        json.dump({{'version': 'fake', 'options': {{'args': args}}, 'counts': {{'files': {rows}}}}}, fh)
-print(json.dumps({{'event': 'done', 'files': {rows}, 'csv': csv_out, 'elapsed_s': 0.3}}))
+        json.dump(contenu, fh)
+print(json.dumps({{'event': 'done', 'files': {annonce}, 'csv': csv_out, 'elapsed_s': 0.3}}))
 sys.exit({exit_code})
 """,
         encoding="utf-8",
@@ -368,3 +396,174 @@ def test_scan_result_ne_conserve_pas_le_mot_de_passe(tmp_path: Path) -> None:
     )
     assert "s3cret" not in " ".join(result.command)
     assert "••••" in result.command
+
+
+# --------------------------------------------------- périmètre du scan (C1/C2/C3)
+
+
+def test_run_scan_accepte_le_code_4_perimetre_incomplet(tmp_path: Path) -> None:
+    """C1 : le code 4 du scanner n'est **pas** un échec, et les cibles écartées remontent.
+
+    Preuve d'origine, vrai binaire SMBeagle sur deux dossiers dont l'un en
+    `chmod 000` : docia relevait `EXIT=0`, `manifest.targets=[A]`, `counts.files=2`
+    et annonçait « scan terminé » — le contenu de `B` n'existait nulle part. Le
+    scanner sort désormais en 4 avec `skipped=[B]` ; docia le traitait alors comme
+    fatal (`scan.py` : code hors (0, 3) → `ScanError`), ce qui transformait un scan
+    parfaitement exploitable en échec dur. Vérifié en réel : `EXIT=4`,
+    `skipped=[B]`, 7 lignes importées.
+    """
+    exe = _fake_scanner(tmp_path, rows=7, exit_code=4, skipped=["\\\\srv\\finance"])
+    lignes: list[str] = []
+    result = run_scan(
+        ScanProfile(local_paths=[str(tmp_path)]),
+        tmp_path / "scan.csv",
+        exe=exe,
+        on_line=lignes.append,
+    )
+    assert result.exit_code == 4  # accepté, aucune ScanError
+    assert result.files == 7  # le CSV est bon : il s'importe normalement
+    assert result.skipped == ["\\\\srv\\finance"]
+    assert result.complete is False
+    assert any("périmètre incomplet" in ligne for ligne in lignes)
+
+
+def test_run_scan_sans_cible_ecartee_reste_complet(tmp_path: Path) -> None:
+    """Compatibilité descendante : un scanner antérieur au code 4 ne devient pas suspect.
+
+    Manifeste sans clé `skipped`, code de retour 0 : rien ne change, et surtout
+    aucun faux positif « périmètre incomplet »."""
+    exe = _fake_scanner(tmp_path, rows=3, manifest_skipped_key=False)
+    result = run_scan(ScanProfile(local_paths=[str(tmp_path)]), tmp_path / "scan.csv", exe=exe)
+    assert result.exit_code == 0
+    assert result.skipped == []
+    assert result.cancelled is False
+    assert result.complete is True
+
+
+def test_run_scan_refuse_un_csv_plus_court_que_le_compte_annonce(tmp_path: Path) -> None:
+    """C2 : un CSV tronqué ne passe plus pour un scan réussi.
+
+    Preuve d'origine : un scanner qui annonce 1 000 000 de fichiers, en écrit 5 et
+    rend 0 donnait `OK exit_code=0 files=5 → import total=5 invalid=0`, sans le
+    moindre avertissement — `scan.py` ne levait que si `files == 0 and
+    last_files > 0`. Le contrôle porte maintenant sur l'écart, dont « zéro ligne »
+    n'était que le cas extrême, et confronte le compte réel à `manifest.counts.files`.
+    """
+    exe = _fake_scanner(tmp_path, rows=5, announced=1_000_000)
+    with pytest.raises(ScanError, match="1000000 fichier"):
+        run_scan(ScanProfile(local_paths=[str(tmp_path)]), tmp_path / "scan.csv", exe=exe)
+
+
+def test_expected_file_count_fait_foi_sur_le_manifeste() -> None:
+    """Le manifeste prime sur la progression, et son absence n'invente aucun écart."""
+    from docia.scan import expected_file_count
+
+    # Le manifeste est écrit après la fermeture du CSV : c'est lui qui décrit le
+    # fichier tel qu'il a été refermé, pas le compteur en cours de progression.
+    assert expected_file_count({"counts": {"files": 12}}, 9) == 12
+    assert expected_file_count({}, 9) == 9  # pas de manifeste : repli sur la progression
+    assert expected_file_count({}, 0) == 0  # aucune annonce : aucun contrôle possible
+    assert expected_file_count({"counts": {"files": "12"}}, 0) == 12
+    assert expected_file_count({"counts": {"files": "?"}}, 4) == 4  # illisible : repli
+    assert expected_file_count({"counts": {"files": True}}, 4) == 4  # `True` ne vaut pas 1
+
+
+def test_scan_annule_est_marque_en_base(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """C3 : un scan annulé cesse d'être indiscernable d'un scan complet.
+
+    Preuve d'origine (faux scanner d'annulation) : `exit_code=-15`, 4 901 lignes
+    importées, `total=4901 invalid=0`, et **rien** — ni `ScanResult`, ni la table
+    `scans` — ne disait que la campagne portait sur un fragment. Importer le
+    partiel reste le bon choix ; n'en garder aucune trace ne l'était pas.
+
+    Le message et le stockage distinguent l'annulation (attendue) d'un scanner
+    mort en écrivant (anormal, couvert par le test précédent, qui refuse le CSV).
+    """
+    from docia import service
+    from docia.config import Config
+    from docia.db import Database
+
+    exe = _fake_scanner(tmp_path, rows=2, announced=500, sleep_after=1.5)
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "camp.sqlite")
+    cfg.scan.smbeagle_path = str(exe)
+    cfg.filter.excluded_dir_markers = []
+    cfg.filter.min_size_bytes = 1
+    cancel = threading.Event()
+    threading.Timer(0.25, cancel.set).start()
+    lignes: list[str] = []
+    with caplog.at_level(logging.WARNING), Database(cfg.db_path) as db:
+        result, report, _ = service.scan_campaign(
+            db,
+            cfg,
+            ScanProfile(local_paths=[str(tmp_path)]),
+            cancel=cancel,
+            on_line=lignes.append,
+            do_plan=False,
+        )
+        assert result.cancelled is True
+        assert result.complete is False
+        assert report.total == result.files  # le partiel est bien importé
+        last = db.last_scan()
+        assert last is not None
+        assert last["cancelled"] == 1
+        assert last["complete"] == 0
+        assert last["exit_code"] == result.exit_code
+        assert db.incomplete_scans()  # la base sait répondre, sans le manifeste
+    # L'avertissement passe par le **journal**, pas par `on_line` : les deux façades
+    # l'affichent déjà pour leur compte (la CLI par le gestionnaire console, la fenêtre
+    # par `tab_home`), et le pousser aussi dans `on_line` le faisait sortir deux fois
+    # à l'écran — constaté sur un vrai scan à périmètre amputé.
+    assert "arrêté en cours de route" in caplog.text
+    assert "écriture interrompue" not in caplog.text, "un arrêt demandé n'est pas un scanner mort"
+    assert not any("arrêté en cours de route" in ligne for ligne in lignes), "pas de doublon"
+
+
+def test_scan_complet_ne_marque_rien_en_base(tmp_path: Path) -> None:
+    """Le cas normal ne change pas : `complete=1`, aucun scan signalé incomplet."""
+    from docia import service
+    from docia.config import Config
+    from docia.db import Database
+
+    exe = _fake_scanner(tmp_path, rows=4)
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "camp.sqlite")
+    cfg.scan.smbeagle_path = str(exe)
+    cfg.filter.excluded_dir_markers = []
+    cfg.filter.min_size_bytes = 1
+    with Database(cfg.db_path) as db:
+        result, _report, _plan = service.scan_campaign(
+            db, cfg, ScanProfile(local_paths=[str(tmp_path)]), do_plan=False
+        )
+        assert result.complete is True
+        last = db.last_scan()
+        assert last is not None
+        assert last["complete"] == 1
+        assert last["cancelled"] == 0
+        assert last["skipped_json"] == ""
+        assert last["expected_files"] == 4
+        assert db.incomplete_scans() == []
+
+
+def test_scope_warnings_dit_quoi_faire_sans_jargon() -> None:
+    """Les messages nomment ce qui manque et l'action, sans code de retour brut."""
+    from docia.scan import scope_warnings
+
+    assert scope_warnings(skipped=[], cancelled=False, expected_files=7, files=7) == []
+    (ecarte,) = scope_warnings(skipped=["\\\\srv\\rh"], cancelled=False, expected_files=7, files=7)
+    assert "\\\\srv\\rh" in ecarte
+    assert "relancez le scan" in ecarte
+    assert "exit" not in ecarte.lower()
+    assert "code 4" not in ecarte
+    (annule,) = scope_warnings(skipped=[], cancelled=True, expected_files=500, files=2)
+    assert "arrêté en cours de route" in annule
+    (mort,) = scope_warnings(skipped=[], cancelled=False, expected_files=500, files=2)
+    assert "à refaire" in mort
+    assert "arrêté" not in mort  # scanner mort ≠ arrêt demandé
+    # Au-delà de trois cibles, la phrase reste lisible : trois noms puis un compte.
+    (beaucoup,) = scope_warnings(
+        skipped=[f"/part{i}" for i in range(5)], cancelled=False, expected_files=0, files=0
+    )
+    assert "/part2" in beaucoup
+    assert "/part3" not in beaucoup
+    assert "2 autre(s)" in beaucoup

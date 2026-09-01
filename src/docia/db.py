@@ -31,7 +31,7 @@ from docia.models import (
     path_key,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 BACKUP_DIR_SUFFIX = ".backups"
 """Suffixe du dossier de sauvegardes, à côté de la base (`docia.sqlite.backups`)."""
@@ -584,6 +584,35 @@ seule colonne qu'ils remplacent (préfixe identique) sont supprimés. `ANALYZE` 
 au planificateur les cardinalités réelles dès la migration ; il est rejoué à la fin
 de chaque scan (`finish_scan`)."""
 
+_SCHEMA_V7 = """
+ALTER TABLE scans ADD COLUMN complete INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE scans ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '';
+ALTER TABLE scans ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scans ADD COLUMN exit_code INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scans ADD COLUMN expected_files INTEGER NOT NULL DEFAULT -1;
+"""
+"""v7 : le **périmètre** du scan, conservé avec la campagne.
+
+Un audit sert à décider de suppressions : « cette campagne porte-t-elle sur tout
+ce qu'on a demandé ? » doit trouver sa réponse en base des mois plus tard, sans
+le manifeste ni le CSV sous la main. Jusqu'ici la table `scans` ne portait que ce
+qui avait été importé, jamais ce qui manquait : un partage refusé par une ACL,
+un scan arrêté par l'utilisateur et un scan complet y étaient identiques.
+
+- `complete` : 0 dès qu'une cible a été écartée, que le scan a été arrêté ou que
+  le CSV est plus court que le compte annoncé. **1 par défaut** — les scans déjà
+  en base, et ceux d'un `SMBeagle.exe` antérieur qui rend 0 et n'écrit aucun
+  `skipped`, restent réputés complets : la migration n'invente pas de faux
+  positif « périmètre incomplet ».
+- `skipped_json` : liste JSON des cibles demandées mais non scannées (`''` = aucune).
+- `cancelled` : l'utilisateur a arrêté le scan (attendu) — à ne pas confondre
+  avec un scanner mort en écrivant, que `scan.run_scan` refuse d'importer.
+- `exit_code` : code de retour du scanner (0 par défaut ; 4 = périmètre amputé).
+- `expected_files` : nombre de fichiers annoncé par le scanner, à comparer à
+  `rows_total`. **-1 = inconnu** (import d'un CSV fourni, scan d'avant la v7) :
+  sans cette valeur distincte de 0, un import ordinaire aurait paru tronqué.
+"""
+
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -591,6 +620,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
     (6, _SCHEMA_V6),
+    (7, _SCHEMA_V7),
 ]
 
 FILES_INDEXES: dict[str, str] = {
@@ -1230,17 +1260,61 @@ class Database:
         self._conn.commit()
         return int(cur.lastrowid or 0)
 
-    def annotate_scan(self, scan_id: int, *, manifest_json: str, scanner_elapsed_s: float) -> None:
-        """Attache le manifeste du scanner (options, cibles, compteurs) au scan importé."""
+    def annotate_scan(
+        self,
+        scan_id: int,
+        *,
+        manifest_json: str,
+        scanner_elapsed_s: float,
+        skipped: Sequence[str] = (),
+        cancelled: bool = False,
+        exit_code: int = 0,
+        expected_files: int = -1,
+    ) -> None:
+        """Attache au scan importé le manifeste **et le périmètre réellement couvert**.
+
+        `complete` est déduit ici, une seule fois, des trois faits qui amputent un
+        périmètre : une cible écartée, un arrêt demandé, ou un CSV plus court que
+        le compte annoncé. Les rapports et l'interface lisent cette colonne plutôt
+        que de refaire le raisonnement chacun de leur côté.
+
+        Les valeurs par défaut décrivent un scan complet d'un scanner antérieur au
+        code 4 (aucun `skipped`, aucun compte annoncé) : appelée comme avant, la
+        méthode ne marque donc jamais une campagne incomplète à tort.
+        """
+        rows = self.query_values("SELECT rows_total FROM scans WHERE id=?", (scan_id,))
+        rows_total = int(rows[0][0]) if rows else 0
+        tronque = expected_files >= 0 and expected_files > rows_total
+        complete = not skipped and not cancelled and not tronque
         self._conn.execute(
-            "UPDATE scans SET kind='scan', manifest_json=?, scanner_elapsed_s=? WHERE id=?",
-            (manifest_json, scanner_elapsed_s, scan_id),
+            "UPDATE scans SET kind='scan', manifest_json=?, scanner_elapsed_s=?,"
+            " complete=?, skipped_json=?, cancelled=?, exit_code=?, expected_files=?"
+            " WHERE id=?",
+            (
+                manifest_json,
+                scanner_elapsed_s,
+                int(complete),
+                json.dumps(list(skipped), ensure_ascii=False) if skipped else "",
+                int(cancelled),
+                exit_code,
+                expected_files,
+                scan_id,
+            ),
         )
         self._conn.commit()
 
     def last_scan(self) -> sqlite3.Row | None:
         row = self._conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
         return row if isinstance(row, sqlite3.Row) else None
+
+    def incomplete_scans(self) -> list[sqlite3.Row]:
+        """Scans de la campagne dont le périmètre n'est **pas** entier, du plus ancien au plus récent.
+
+        C'est la réponse durable à « cette campagne porte-t-elle sur tout ce qu'on
+        a demandé ? » : elle ne dépend ni du manifeste, ni du CSV, ni de la session
+        pendant laquelle le scan a tourné.
+        """
+        return list(self._conn.execute("SELECT * FROM scans WHERE complete=0 ORDER BY id"))
 
     def finish_scan(
         self, scan_id: int, *, total: int, new: int, updated: int, unchanged: int, invalid: int

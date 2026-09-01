@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import queue
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from docia.config import Config
+from docia import db as db_module
+from docia.config import Config, load_config
 from docia.db import Database
 from docia.gui.app import DOCIA, FOREIGN, NEW, DociaApp, campaign_kind
 from docia.gui.lazy import LazyScreen
@@ -179,11 +182,14 @@ def test_dispose_retire_les_rappels_et_perime_les_calculs(campagnes: tuple[Path,
 
 # ------------------------------------------------ B1 : rappels morts et exceptions
 class _WidgetVivant:
+    dernier: str = ""
+    """Dernier texte posé — le bandeau d'occupation est ce que l'utilisateur voit."""
+
     def winfo_exists(self) -> int:
         return 1
 
-    def configure(self, **_kw: Any) -> None:
-        return None
+    def configure(self, **kw: Any) -> None:
+        self.dernier = str(kw.get("text", self.dernier))
 
 
 class _WidgetMort:
@@ -201,6 +207,11 @@ def _app_nu() -> Any:
     app._refresh_listeners = []
     app._log_queue = queue.Queue()
     app.busy_label = _WidgetVivant()
+    app._worker = None
+    app.cancel = threading.Event()
+    app._campaign_ready = threading.Event()
+    app._campaign_ready.set()
+    app._touch_pending = False
     return app
 
 
@@ -383,3 +394,174 @@ def test_create_campaign_cree_puis_ouvre_dans_le_bon_ordre(tmp_path: Path) -> No
     # rouvrir la même campagne ne l'écrase pas et le dit
     app.create_campaign(str(cible))
     assert any("aucune donnée effacée" in ligne for ligne in _journal(app))
+
+
+# --------------------------------- D3 : un seul `campaign_kind`, celui de `docia.db`
+def test_la_fenetre_delegue_campaign_kind_a_docia_db() -> None:
+    """Deux copies d'un contrôle qui décide si on ouvre le fichier de quelqu'un divergent.
+
+    La fenêtre a découvert le danger (une base « contacts » enrichie de douze tables
+    docia) ; `docia.db` en porte la version que la CLI utilise aussi. Ce test interdit
+    de recréer la seconde copie : la fenêtre **délègue**, elle ne transpose pas.
+    """
+    assert campaign_kind is db_module.campaign_kind
+    assert (NEW, DOCIA, FOREIGN) == (
+        db_module.CAMPAIGN_NEW,
+        db_module.CAMPAIGN_DOCIA,
+        db_module.CAMPAIGN_FOREIGN,
+    )
+
+
+# ------------------------ D2 : la migration de schéma ne se joue plus dans le thread Tk
+class _DatabaseLente:
+    """Doublure de `Database` qui retient l'ouverture — ce que fait une migration."""
+
+    def __init__(self, verrou: threading.Event) -> None:
+        self.verrou = verrou
+        self.threads: list[str] = []
+
+    def __call__(self, chemin: Any) -> Any:
+        self.threads.append(threading.current_thread().name)
+        self.verrou.wait(5)
+        return db_module.Database(chemin)
+
+
+def _app_campagne(tmp_path: Path) -> tuple[Any, Path]:
+    base = tmp_path / "camp.sqlite"
+    Database(base).close()
+    app = _app_nu()
+    app.config = Config()
+    app._db_path = str(base)
+    app._refresh_campaign_header = lambda: None
+    return app, base
+
+
+def test_ouvrir_une_campagne_a_migrer_ne_fige_pas_le_thread_tk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """10,0 s de fenêtre figée mesurées sur une campagne de 817 Mo à migrer.
+
+    L'ouverture — donc la migration de schéma et sa sauvegarde préalable — était jouée
+    dans le thread Tk : plus de redessin, plus de sablier, plus de journal, pendant toute
+    la durée. Elle part désormais dans un thread, et `_touch_campaign` rend la main tout
+    de suite en affichant « ⏳ ouverture de la campagne en cours… ».
+    """
+    from docia.gui import app as app_module
+
+    app, _ = _app_campagne(tmp_path)
+    verrou = threading.Event()
+    lente = _DatabaseLente(verrou)
+    monkeypatch.setattr(app_module, "Database", lente)
+
+    depart = time.perf_counter()
+    demarre = app._touch_campaign()
+    rendu = time.perf_counter() - depart
+
+    assert rendu < 0.5, f"le thread appelant est resté bloqué {rendu:.2f} s"
+    assert demarre is True, "un travail d'ouverture doit avoir démarré"
+    assert app.busy_label.dernier == "⏳ ouverture de la campagne en cours…"
+    verrou.set()
+    app._worker.join(10)
+    assert lente.threads != []
+    assert lente.threads[0] != threading.current_thread().name, "ouverte hors du thread Tk"
+
+
+def test_aucun_calcul_de_fond_ne_touche_la_base_pendant_la_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deux threads découvrant en même temps une base à migrer : `cannot rollback`.
+
+    Le correctif d'alors ouvrait la base dans le thread Tk, avant tout calcul. Puisque
+    l'ouverture est maintenant en tâche de fond, c'est `_campaign_ready` qui tient la
+    garantie : un calcul d'écran (`run_background`, qui ouvre la base lui-même) attend la
+    fin de l'ouverture — dans **son** thread, jamais dans celui de Tk.
+    """
+    from docia.gui import app as app_module
+
+    app, _ = _app_campagne(tmp_path)
+    verrou = threading.Event()
+    monkeypatch.setattr(app_module, "Database", _DatabaseLente(verrou))
+    ordre: list[str] = []
+
+    assert app._touch_campaign() is True
+    app.run_background(lambda: ordre.append("calcul"), lambda _r: None, name="stats")
+
+    time.sleep(0.2)
+    assert ordre == [], "le calcul ne doit pas ouvrir la base pendant la migration"
+    verrou.set()
+    app._worker.join(10)
+    for _ in range(100):
+        if ordre:
+            break
+        time.sleep(0.02)
+    assert ordre == ["calcul"], "le calcul reprend dès l'ouverture terminée"
+
+
+def test_une_campagne_ouverte_pendant_un_travail_est_migree_a_la_fin(tmp_path: Path) -> None:
+    """La place unique de travail est prise : l'ouverture est **reprise**, pas perdue.
+
+    Sans reprise, ouvrir une campagne pendant une analyse laissait une base non migrée
+    aux calculs d'écran — exactement la course qu'on cherche à interdire.
+    """
+    from docia.gui import app as app_module
+
+    app, base = _app_campagne(tmp_path)
+    occupe = threading.Event()
+    app._worker = threading.Thread(target=lambda: occupe.wait(5), daemon=True)
+    app._worker.start()
+
+    assert app._touch_campaign() is False, "aucune place libre"
+    assert app._touch_pending is True
+    assert app._campaign_ready.is_set(), "sinon plus aucun calcul ne lirait la base"
+
+    occupe.set()
+    app._worker.join(5)
+    app._worker = None
+    _journal(app)  # « une opération est déjà en cours » : lu, la file ne garde que _DONE
+    app._log_queue.put(app_module._DONE)
+    app._drain()  # ce que fait `_poll` à la fin d'un travail
+
+    assert app._touch_pending is False
+    assert app._worker is not None
+    assert app._worker.name.endswith("ouverture de la campagne")
+    app._worker.join(10)
+    assert base.exists()
+
+
+# ------------------------------- D1 : « Enregistrer » ne mange plus les commentaires
+def test_save_config_preserve_les_commentaires_de_docia_toml(tmp_path: Path) -> None:
+    """Le bouton « Enregistrer » de l'onglet Serveur & performances, bout en bout."""
+    from docia.config import default_toml
+
+    cible = tmp_path / "docia.toml"
+    cible.write_text(default_toml(), encoding="utf-8")
+    app = _app_nu()
+    app.config = load_config(cible)
+    app.config_path = cible
+    app._db_path = str(tmp_path / "camp.sqlite")
+    app.tab_objects = {}
+    app.config.llm.max_in_flight = 16
+
+    app.save_config()
+
+    ecrit = cible.read_text(encoding="utf-8")
+    assert "TEXTE INTÉGRAL des documents" in ecrit, "l'avertissement RSSI doit survivre"
+    assert ecrit.count("#") == default_toml().count("#")
+    assert load_config(cible).llm.max_in_flight == 16
+    assert any("config enregistrée" in ligne for ligne in _journal(app))
+
+
+def test_save_config_part_du_gabarit_commente_si_le_fichier_manque(tmp_path: Path) -> None:
+    """Un `docia.toml` créé par la fenêtre naît commenté, avertissement RSSI compris."""
+    cible = tmp_path / "docia.toml"
+    app = _app_nu()
+    app.config = Config()
+    app.config_path = cible
+    app._db_path = str(tmp_path / "camp.sqlite")
+    app.tab_objects = {}
+
+    app.save_config()
+
+    ecrit = cible.read_text(encoding="utf-8")
+    assert "TEXTE INTÉGRAL des documents" in ecrit
+    assert load_config(cible).db_path == str(tmp_path / "camp.sqlite")

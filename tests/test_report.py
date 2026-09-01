@@ -359,16 +359,22 @@ def test_excel_tronque_au_dela_de_la_limite_de_lignes(db: Database, tmp_path: Pa
 def test_excel_sans_troncature_ne_previent_pas(db: Database, tmp_path: Path) -> None:
     """Sous la limite, rien ne change : pas d'avertissement, toutes les lignes présentes.
 
-    La limite est abaissée à 23 lignes — juste ce qu'il faut pour la Synthèse, le
-    plus gros onglet de cette base : le cas « pile à la limite » est donc couvert.
+    La limite est abaissée à la hauteur exacte de la Synthèse, le plus gros onglet
+    de cette base : le cas « pile à la limite » est donc couvert.
+
+    Elle est passée de 23 à 24 lignes le jour où la Synthèse a gagné son indicateur
+    « Périmètre » (complet / INCOMPLET) : le classeur sert aux mêmes décisions de
+    suppression que le rapport HTML et doit dire, lui aussi, si l'inventaire porte
+    sur tout ce qui a été demandé. Sans ce réglage, la Synthèse débordait d'une
+    ligne et le test échouait sur un avertissement de troncature parasite.
     """
     alertes: list[str] = []
     path = excel.write_workbook(
-        db, tmp_path / "complet.xlsx", today=TODAY, on_warning=alertes.append, max_sheet_rows=23
+        db, tmp_path / "complet.xlsx", today=TODAY, on_warning=alertes.append, max_sheet_rows=24
     )
     assert alertes == []
     classeur = load_workbook(path)
-    assert classeur["Synthèse"].max_row == 23  # 22 indicateurs + en-tête, pile la limite
+    assert classeur["Synthèse"].max_row == 24  # 23 indicateurs + en-tête, pile la limite
     feuille = classeur["Fichiers"]
     assert feuille.max_row == 5  # 4 fichiers + en-tête
     assert feuille.auto_filter.ref is not None
@@ -1015,3 +1021,80 @@ def test_le_html_echappe_le_resume_et_la_justification_de_la_llm(tmp_path: Path)
     controleur.close()
     assert controleur.errors == []
     assert "img" not in controleur.tags
+
+
+# -------------------------------------------- périmètre incomplet dans les rendus
+
+
+def _marque_incomplete(db: Database, **faits: object) -> None:
+    """Marque le scan de la base comme portant sur un périmètre amputé."""
+    scan_id = int(db.query_values("SELECT id FROM scans ORDER BY id LIMIT 1")[0][0])
+    db.annotate_scan(
+        scan_id,
+        manifest_json="{}",
+        scanner_elapsed_s=1.0,
+        **faits,  # type: ignore[arg-type]
+    )
+
+
+def test_rapports_taisent_le_perimetre_quand_il_est_complet(db: Database, tmp_path: Path) -> None:
+    """Cas normal : aucun des trois rendus ne parle de périmètre incomplet."""
+    data = collect(db, today=TODAY)
+    assert data.scope.incomplete is False
+    page = render_html(db, data=data)
+    assert '<div class="perimetre"' not in page  # la règle CSS reste, pas le bandeau
+    assert "Inventaire incomplet" not in page
+    assert "Périmètre incomplet" not in page
+    assert "Inventaire incomplet" not in render_markdown(db, data=data)
+    classeur = load_workbook(excel.write_workbook(db, tmp_path / "c.xlsx", today=TODAY))
+    assert classeur.sheetnames == list(excel.SHEETS)  # pas d'onglet « Périmètre »
+    assert classeur["Synthèse"].cell(row=2, column=2).value == "complet"
+
+
+def test_rapports_annoncent_un_perimetre_incomplet_sans_le_faire_chercher(
+    db: Database, tmp_path: Path
+) -> None:
+    """Un partage non parcouru se voit d'emblée dans le HTML, le Markdown et l'Excel.
+
+    Le rapport HTML est remis à la direction et sert à justifier des suppressions :
+    l'avertissement est un bandeau **avant** le sommaire et la synthèse, pas une
+    note en pied de page. Le Markdown le porte avant la section 1, et le classeur
+    en fait son premier onglet.
+    """
+    _marque_incomplete(db, skipped=["\\\\srv\\finance"], exit_code=4, expected_files=4)
+    data = collect(db, today=TODAY)
+    assert data.scope.incomplete is True
+    assert data.scope.skipped_targets == ["\\\\srv\\finance"]
+
+    html = render_html(db, data=data)
+    bandeau = html.index('<div class="perimetre"')
+    assert bandeau < html.index('<nav class="sommaire"')  # avant le sommaire
+    assert bandeau < html.index('id="synthese"')  # et avant la synthèse
+    assert "Inventaire incomplet" in html
+    assert "srv\\finance" in html
+    assert "Périmètre incomplet" in html  # dans le bandeau d'en-tête aussi
+    verificateur = _Checker()
+    verificateur.feed(html)
+    assert verificateur.errors == []
+
+    md = render_markdown(db, data=data)
+    assert md.index("Inventaire incomplet") < md.index("## 1. Synthèse")
+    assert "srv\\finance" in md
+
+    classeur = load_workbook(excel.write_workbook(db, tmp_path / "c.xlsx", today=TODAY))
+    assert classeur.sheetnames[0] == excel.SCOPE_SHEET
+    perimetre = "\n".join(
+        str(cell.value) for row in classeur[excel.SCOPE_SHEET].iter_rows() for cell in row
+    )
+    assert "srv\\finance" in perimetre
+    assert classeur["Synthèse"].cell(row=2, column=2).value == "INCOMPLET"
+
+
+def test_rapports_signalent_un_scan_arrete(db: Database) -> None:
+    """Un scan annulé se lit dans le rapport, des mois après, sans le manifeste."""
+    _marque_incomplete(db, cancelled=True, expected_files=999)
+    data = collect(db, today=TODAY)
+    assert data.scope.cancelled_scans == 1
+    assert "arrêté en cours de route" in " ".join(data.scope.warnings)
+    assert "arrêtés en cours de route" in data.scope.headline()
+    assert "Inventaire incomplet" in render_html(db, data=data)

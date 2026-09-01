@@ -16,9 +16,11 @@ lecture des résultats, vérification humaine, FAQ.
 1. Copier dans un même dossier : **`Docia.exe`** (artefact `Docia-windows-x64` de la
    [CI](../../actions)) et **`SMBeagle.exe`** (artefact `windows-x64` de la
    [CI de smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched/actions) — prenez
-   celui du dernier commit de `main` : la dernière release publiée, **v4.2.0 du 30/08**, est
-   antérieure au correctif `fix(args)` du 31/08 et scanne encore le mauvais dossier quand le
-   chemin est mal formé, au lieu de le refuser en code 2. Vérifié le 01/09.)
+   celui du dernier commit de `main` : la dernière release publiée, **v4.2.0 du 30/08**, scanne
+   encore le mauvais dossier quand le chemin est mal formé au lieu de le refuser en code 2,
+   écrit une taille de `0` quand elle n'a pas été collectée — ce qui vide la campagne en
+   silence — et rend `0` sur un partage fermé par ACL, présentant un périmètre amputé comme
+   complet. Vérifié le 01/09.)
 2. Lancer `Docia.exe` (double-clic = interface ; en console, `Docia.exe doctor` vérifie que tout
    est en place : DocFuse, pdfium, **OCR Tesseract embarqué** — rien d'autre à installer, ni .NET
    ni Tesseract). Le diagnostic fait un **vrai essai d'OCR** et affiche, en cas d'échec, le
@@ -118,10 +120,11 @@ budget de raisonnement n'est pas relayé, seul le renvoi à budget doublé prot�
 
 ## Qualité
 
-- `scripts/check.sh` : ruff + mypy strict + pytest (516 tests), **VERDICT** explicite — rien n'est
+- `scripts/check.sh` : ruff + mypy strict + pytest (579 tests), **VERDICT** explicite — rien n'est
   poussé sans `VERDICT: OK`. Les tests qui exigent un vrai écran (`tests/test_gui_ecran.py`,
-  marque `screen`) sont en plus, joués à la main : `DISPLAY=:1 DOCIA_GUI_SCREEN=1 pytest
-  tests/test_gui_ecran.py`.
+  marque `screen`) sont en plus, joués à la main **sur un affichage dédié**, jamais sur
+  la session graphique en cours : `DISPLAY=:99 DOCIA_GUI_SCREEN=1 pytest
+  tests/test_gui_ecran.py` (voir l'en-tête du fichier pour ouvrir cet affichage).
 - CI GitHub (Ubuntu + Windows) : lint/tests 3.11–3.13, build de `Docia.exe` (PyInstaller,
   bibliothèques des extracteurs et **Tesseract embarqués**), puis l'exe est **exécuté** sur le
   runner : `doctor`, extraction réelle de 11 formats bureautiques, **OCR d'un PDF scanné généré**

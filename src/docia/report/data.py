@@ -27,11 +27,13 @@ couper : lever la borne ne coûte ni une requête ni un octet de mémoire de poi
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
 
 from docia import views
 from docia.db import Database
+from docia.scan import scope_warnings
 
 TOP_ROWS = 50
 """Nombre de lignes détaillées gardées dans les tableaux « top »."""
@@ -65,6 +67,105 @@ def listing_of(name: str) -> str:
 
 
 @dataclass(frozen=True)
+class ScopeGap:
+    """Un scan de la campagne dont le périmètre n'est pas entier (table `scans`)."""
+
+    scan_id: int
+    imported_at: str
+    skipped: list[str]
+    cancelled: bool
+    expected_files: int
+    rows_total: int
+
+    @property
+    def warnings(self) -> list[str]:
+        """Ce qui manque et quoi faire, en français (voir `scan.scope_warnings`)."""
+        return scope_warnings(
+            skipped=self.skipped,
+            cancelled=self.cancelled,
+            expected_files=self.expected_files,
+            files=self.rows_total,
+        )
+
+
+@dataclass(frozen=True)
+class ScopeAlert:
+    """État du périmètre de la campagne : ce que l'inventaire n'a **pas** vu.
+
+    Vide dans le cas normal — y compris pour une campagne importée d'un CSV
+    fourni ou scannée par un `SMBeagle.exe` antérieur au code de retour 4 : sans
+    preuve d'un trou, la campagne est réputée complète.
+    """
+
+    gaps: list[ScopeGap] = field(default_factory=list)
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.gaps)
+
+    @property
+    def skipped_targets(self) -> list[str]:
+        """Tous les emplacements non parcourus, sans doublon, dans l'ordre rencontré."""
+        seen: dict[str, None] = {}
+        for gap in self.gaps:
+            for target in gap.skipped:
+                seen.setdefault(target, None)
+        return list(seen)
+
+    @property
+    def cancelled_scans(self) -> int:
+        return sum(1 for gap in self.gaps if gap.cancelled)
+
+    @property
+    def warnings(self) -> list[str]:
+        """Toutes les phrases d'avertissement, dans l'ordre des scans."""
+        return [message for gap in self.gaps for message in gap.warnings]
+
+    def headline(self) -> str:
+        """Une phrase d'accroche : ce qui manque, en tête de rapport."""
+        morceaux: list[str] = []
+        cibles = self.skipped_targets
+        if cibles:
+            morceaux.append(f"{len(cibles)} emplacement(s) demandé(s) n'ont pas pu être parcourus")
+        if self.cancelled_scans:
+            morceaux.append(f"{self.cancelled_scans} scan(s) ont été arrêtés en cours de route")
+        if not morceaux:
+            morceaux.append("un scan a écrit moins de fichiers qu'il n'en avait annoncé")
+        return (
+            "Cet inventaire est incomplet : "
+            + ", et ".join(morceaux)
+            + ". Les chiffres de ce rapport ne portent donc pas sur la totalité "
+            "du périmètre demandé."
+        )
+
+
+def collect_scope(db: Database) -> ScopeAlert:
+    """Périmètre de la campagne, lu dans la table `scans` (schéma v7).
+
+    Ne dépend ni du manifeste ni du CSV : une campagne rouverte des mois plus tard
+    sait toujours si elle porte sur tout ce qui avait été demandé.
+    """
+    gaps: list[ScopeGap] = []
+    for row in db.incomplete_scans():
+        raw = str(row["skipped_json"] or "")
+        try:
+            loaded = json.loads(raw) if raw else []
+        except ValueError:
+            loaded = []
+        gaps.append(
+            ScopeGap(
+                scan_id=int(row["id"]),
+                imported_at=str(row["imported_at"]),
+                skipped=[str(item) for item in loaded] if isinstance(loaded, list) else [],
+                cancelled=bool(row["cancelled"]),
+                expected_files=int(row["expected_files"]),
+                rows_total=int(row["rows_total"]),
+            )
+        )
+    return ScopeAlert(gaps=gaps)
+
+
+@dataclass(frozen=True)
 class ReportData:
     """Toutes les vues d'un rapport, déjà triées et bornées."""
 
@@ -87,6 +188,8 @@ class ReportData:
     runs: list[views.RunStat] = field(default_factory=list)
     totals: dict[str, int] = field(default_factory=dict)
     """Nombre réel de lignes **avant** la coupe, par nom de champ."""
+    scope: ScopeAlert = field(default_factory=ScopeAlert)
+    """Ce que l'inventaire n'a pas vu. Vide = périmètre entier (cas normal)."""
 
     def hidden(self, name: str, shown: int) -> int:
         """Lignes de `name` que le rendu ne montre pas (0 s'il les montre toutes)."""
@@ -145,4 +248,5 @@ def collect(
             "cleanup": cleanup.total_files,
             "discrepancies": reviews.total_discrepancies,
         },
+        scope=collect_scope(db),
     )

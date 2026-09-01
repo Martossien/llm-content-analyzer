@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from docia.config import Config, load_config
+from docia.config import (
+    Config,
+    TomlRewriteError,
+    default_toml,
+    load_config,
+    update_toml,
+)
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -102,3 +108,108 @@ def test_aucun_chemin_ne_signale_rien() -> None:
     messages: list[str] = []
     load_config(None, on_missing=messages.append)
     assert messages == []
+
+
+# ------------------------------------------------- réécriture en place (`update_toml`)
+
+
+def _commentaires(texte: str) -> list[str]:
+    """Les commentaires du fichier — un `#` entre guillemets n'en est pas un."""
+    trouves: list[str] = []
+    for ligne in texte.splitlines():
+        chaine = False
+        for index, car in enumerate(ligne):
+            if car == '"':
+                chaine = not chaine
+            elif car == "#" and not chaine:
+                trouves.append(ligne[index:])
+    return trouves
+
+
+def test_enregistrer_preserve_les_commentaires_de_docia_init(tmp_path: Path) -> None:
+    """Le défaut le plus grave de la fenêtre : « Enregistrer » effaçait les 21 commentaires.
+
+    Dont l'avertissement — une mention RSSI — qui prévient que `<campagne>.blocks/`
+    conserve le texte intégral des documents analysés, OCR compris, en clair sur le
+    disque. Un administrateur cliquait une fois, et le suivant ne le lisait jamais.
+    """
+    gabarit = default_toml()
+    assert len(_commentaires(gabarit)) == 21
+    cfg = load_config(_write(tmp_path, gabarit))
+    cfg.llm.model = "un-autre-modele"
+
+    sortie = update_toml(gabarit, cfg)
+
+    assert _commentaires(sortie) == _commentaires(gabarit)
+    assert "TEXTE INTÉGRAL des documents" in sortie, "l'avertissement RSSI doit survivre"
+    # et la disposition ne bouge pas : une seule ligne change, celle du modèle
+    changees = set(sortie.splitlines()) - set(gabarit.splitlines())
+    assert changees == {'model = "un-autre-modele"'}
+    assert load_config(_write(tmp_path, sortie)).llm.model == "un-autre-modele"
+
+
+def test_reecrire_sans_rien_changer_rend_le_fichier_a_lidentique(tmp_path: Path) -> None:
+    """Octet pour octet : une clé absente du fichier vaut son défaut, on ne l'ajoute pas."""
+    gabarit = default_toml()
+    assert update_toml(gabarit, load_config(_write(tmp_path, gabarit))) == gabarit
+
+
+def test_une_valeur_contenant_un_diese_nest_pas_prise_pour_un_commentaire(
+    tmp_path: Path,
+) -> None:
+    source = 'db_path = "a.sqlite"\n\n[llm]\napi_key = "sk-a#b"   # à ne pas versionner\n'
+    cfg = load_config(_write(tmp_path, source))
+    cfg.llm.model = "m2"
+
+    sortie = update_toml(source, cfg)
+
+    assert load_config(_write(tmp_path, sortie)).llm.api_key == "sk-a#b"
+    assert 'api_key = "sk-a#b"   # à ne pas versionner' in sortie
+    assert load_config(_write(tmp_path, sortie)).llm.model == "m2"
+
+
+def test_une_cle_absente_du_fichier_est_ajoutee_a_sa_section(tmp_path: Path) -> None:
+    source = 'db_path = "a.sqlite"\n\n[llm]\nmodel = "m"   # le modèle servi\n'
+    cfg = load_config(_write(tmp_path, source))
+    cfg.llm.timeout_s = 42
+
+    sortie = update_toml(source, cfg)
+
+    assert load_config(_write(tmp_path, sortie)).llm.timeout_s == 42
+    assert "# le modèle servi" in sortie
+    assert sortie.splitlines()[:4] == source.splitlines()[:4], "rien ne bouge avant l'ajout"
+
+
+def test_une_section_absente_est_ajoutee_en_fin_de_fichier(tmp_path: Path) -> None:
+    source = '# entête maison\ndb_path = "a.sqlite"\n'
+    cfg = load_config(_write(tmp_path, source))
+    cfg.scan.domain = "ACME"
+
+    sortie = update_toml(source, cfg)
+
+    assert load_config(_write(tmp_path, sortie)).scan.domain == "ACME"
+    assert sortie.startswith(source)
+    assert "[scan]" in sortie
+
+
+def test_une_mise_en_forme_inhabituelle_est_respectee(tmp_path: Path) -> None:
+    """Fichier édité à la main : tableau sur plusieurs lignes, commentaire à l'intérieur."""
+    source = (
+        'db_path = "a.sqlite"\n\n[filter]\nexcluded_extensions = [\n'
+        '  ".tmp",   # temporaires\n  ".log",\n]\nmin_size_bytes = 100\n'
+    )
+    cfg = load_config(_write(tmp_path, source))
+    cfg.filter.min_size_bytes = 5
+
+    sortie = update_toml(source, cfg)
+
+    relu = load_config(_write(tmp_path, sortie))
+    assert relu.filter.excluded_extensions == [".tmp", ".log"], "le tableau n'est pas retouché"
+    assert relu.filter.min_size_bytes == 5
+    assert "  # temporaires" in sortie
+
+
+def test_un_toml_casse_est_refuse_au_lieu_detre_ecrase() -> None:
+    """Plutôt lever que réécrire n'importe quoi : l'appelant retombe sur la regénération."""
+    with pytest.raises(TomlRewriteError):
+        update_toml("db_path = \n[llm\n", Config())

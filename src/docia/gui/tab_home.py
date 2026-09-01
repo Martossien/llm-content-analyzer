@@ -22,6 +22,7 @@ from docia.gui.theme import (
     severity_color,
 )
 from docia.gui.widgets import Card, KpiTile
+from docia.scan import scope_warnings
 
 
 class HomeTab(LazyScreen):
@@ -337,14 +338,52 @@ class HomeTab(LazyScreen):
                     on_import_progress=service.import_progress_logger(app.log),
                     cancel=app.cancel,
                 )
+            # « scan terminé » tout court sur un périmètre amputé (partage refusé,
+            # arrêt demandé) présentait un fragment comme un inventaire complet :
+            # le titre de la ligne dit maintenant ce qu'il en est, et le détail de
+            # ce qui manque suit immédiatement.
+            titre = "scan terminé" if result.complete else "scan terminé, PÉRIMÈTRE INCOMPLET"
             app.log(
-                f"scan terminé : {format_int(result.files)} fichiers en {format_duration(result.elapsed_s)} — "
+                f"{titre} : {format_int(result.files)} fichiers en {format_duration(result.elapsed_s)} — "
                 f"{report.new} nouveaux, {report.updated} modifiés, {report.unchanged} inchangés — "
                 f"{plan_report.pending} à analyser, {plan_report.excluded} exclus"
             )
+            for avertissement in scope_warnings(
+                skipped=result.skipped,
+                cancelled=result.cancelled,
+                expected_files=result.expected_files,
+                files=result.files,
+            ):
+                app.log(avertissement)
+            app.ui(lambda: self._show_scan_scope(result))
             app.remember_campaign(csv_path=str(result.csv_path))
 
         app.run_in_thread(work, "scan")
+
+    def _show_scan_scope(self, result: Any) -> None:
+        """Ligne d'état de l'étape « source » en fin de scan : complet, ou ce qui manque.
+
+        L'onglet annonçait « scan terminé : N fichiers » quelle que soit la réalité.
+        Un périmètre amputé s'affiche désormais en rouge, avec ce qui n'a pas été
+        parcouru — l'utilisateur décide ensuite de relancer ou non."""
+        if getattr(result, "complete", True):
+            self.source_status.configure(
+                text=f"scan terminé · {format_int(result.files)} fichiers · périmètre complet",
+                text_color=ACCENT_OK,
+            )
+            return
+        details = " ; ".join(
+            scope_warnings(
+                skipped=list(getattr(result, "skipped", [])),
+                cancelled=bool(getattr(result, "cancelled", False)),
+                expected_files=int(getattr(result, "expected_files", 0)),
+                files=int(result.files),
+            )
+        )
+        self.source_status.configure(
+            text=f"PÉRIMÈTRE INCOMPLET · {format_int(result.files)} fichiers · {details}",
+            text_color=ACCENT_STOP,
+        )
 
     def _show_scan_event(self, ev: Any) -> None:
         stage = {

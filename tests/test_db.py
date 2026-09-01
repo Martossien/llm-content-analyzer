@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import random
 import sqlite3
@@ -1356,3 +1357,94 @@ def test_la_fenetre_et_la_cli_jugent_une_campagne_de_la_meme_facon(tmp_path: Pat
     con.close()
     for cible in (tmp_path / "absente.sqlite", campagne, contacts, tmp_path):
         assert app.campaign_kind(cible) == db_module.campaign_kind(cible), cible
+
+
+# ------------------------------------------------- périmètre du scan (schéma v7)
+
+
+def _v6_database(path: Path) -> None:
+    """Base au schéma v6 portant un scan déjà importé (campagne d'avant la v7)."""
+    conn = sqlite3.connect(path)
+    for _version, sql in _MIGRATIONS[:6]:
+        conn.executescript(sql)
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '6')")
+    conn.execute(
+        "INSERT INTO scans(csv_path, imported_at, rows_total, kind)"
+        " VALUES('ancien.csv', '2026-01-01', 1234, 'scan')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_migration_v6_to_v7_ne_declare_aucun_perimetre_incomplet(tmp_path: Path) -> None:
+    """Compatibilité descendante : les scans déjà en base restent réputés complets.
+
+    La v7 ajoute les colonnes de périmètre. Un utilisateur peut avoir scanné avec
+    un `SMBeagle.exe` antérieur, qui rend 0 et n'écrit aucun `skipped` : la
+    migration ne doit inventer aucun faux positif « périmètre incomplet » sur des
+    campagnes dont on ne sait tout simplement rien. `expected_files = -1` marque
+    précisément cet inconnu — à 0, un import ordinaire aurait paru tronqué.
+    """
+    path = tmp_path / "campagne.sqlite"
+    _v6_database(path)
+    with Database(path) as db:
+        assert db.schema_version == SCHEMA_VERSION
+        row = db.last_scan()
+        assert row is not None
+        assert row["rows_total"] == 1234  # données intactes
+        assert row["complete"] == 1
+        assert row["cancelled"] == 0
+        assert row["exit_code"] == 0
+        assert row["expected_files"] == -1
+        assert row["skipped_json"] == ""
+        assert db.incomplete_scans() == []
+    # La sauvegarde d'avant-migration est bien passée par le mécanisme habituel.
+    assert list(backup_dir_for(path).glob(f"campagne_avant_migration_v{SCHEMA_VERSION}_*.sqlite"))
+
+
+def test_annotate_scan_deduit_le_perimetre(tmp_path: Path) -> None:
+    """`annotate_scan` répond en base à « a-t-on vu tout ce qu'on a demandé ? ».
+
+    Les trois faits qui amputent un périmètre — cible écartée, arrêt demandé, CSV
+    plus court que le compte annoncé — sont déduits ici une seule fois, pour que
+    ni les rapports ni l'interface n'aient à refaire le raisonnement.
+    """
+    with Database(tmp_path / "c.sqlite") as db:
+        # 1. cas normal : appelé comme avant la v7, rien n'est marqué incomplet
+        sid = db.start_scan("a.csv")
+        db.finish_scan(sid, total=10, new=10, updated=0, unchanged=0, invalid=0)
+        db.annotate_scan(sid, manifest_json="{}", scanner_elapsed_s=1.0)
+        assert db.last_scan()["complete"] == 1  # type: ignore[index]
+
+        # 2. cible écartée
+        sid = db.start_scan("b.csv")
+        db.finish_scan(sid, total=10, new=10, updated=0, unchanged=0, invalid=0)
+        db.annotate_scan(
+            sid,
+            manifest_json="{}",
+            scanner_elapsed_s=1.0,
+            skipped=["\\\\srv\\rh"],
+            exit_code=4,
+            expected_files=10,
+        )
+        row = db.last_scan()
+        assert row is not None
+        assert row["complete"] == 0
+        assert json.loads(row["skipped_json"]) == ["\\\\srv\\rh"]
+        assert row["exit_code"] == 4
+
+        # 3. arrêt demandé
+        sid = db.start_scan("c.csv")
+        db.finish_scan(sid, total=3, new=3, updated=0, unchanged=0, invalid=0)
+        db.annotate_scan(
+            sid, manifest_json="{}", scanner_elapsed_s=1.0, cancelled=True, expected_files=99
+        )
+        assert db.last_scan()["complete"] == 0  # type: ignore[index]
+
+        # 4. CSV plus court que le compte annoncé, sans arrêt ni cible écartée
+        sid = db.start_scan("d.csv")
+        db.finish_scan(sid, total=5, new=5, updated=0, unchanged=0, invalid=0)
+        db.annotate_scan(sid, manifest_json="{}", scanner_elapsed_s=1.0, expected_files=1000)
+        assert db.last_scan()["complete"] == 0  # type: ignore[index]
+
+        assert [int(r["id"]) for r in db.incomplete_scans()] == [2, 3, 4]

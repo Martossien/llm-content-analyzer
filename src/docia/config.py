@@ -7,10 +7,12 @@ pas traîner dans un fichier versionné.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -343,7 +345,13 @@ def load_config(path: Path | None, *, on_missing: Callable[[str], None] | None =
                 f"–{config.filter.max_size_bytes} o, modèle « {config.llm.model} »)"
             )
         return config
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    return config_from_data(tomllib.loads(path.read_text(encoding="utf-8")))
+
+
+def config_from_data(data: dict[str, Any]) -> Config:
+    """`Config` issue d'un `docia.toml` déjà analysé (défauts pour ce qui manque)."""
+    data = dict(data)  # `_merge` consomme les sections : ne pas vider le dict de l'appelant
+    config = Config()
     for section_name, target in (
         ("llm", config.llm),
         ("blocks", config.blocks),
@@ -399,3 +407,225 @@ exclude_hidden_shares = true       # ignore les partages administratifs (C$, ADM
 domain = ""                        # compte SMB explicite (facultatif ; mot de passe : variable DOCIA_SMB_PASSWORD)
 username = ""
 """
+
+
+# --------------------------------------------------------------- réécriture en place
+SECTIONS = ("llm", "blocks", "filter", "scan")
+"""Tables de `docia.toml`, dans l'ordre où elles y figurent."""
+
+ROOT_KEYS = ("db_path", "prompt_path")
+"""Clés hors table, écrites avant la première `[section]`."""
+
+
+class TomlRewriteError(ValueError):
+    """`update_toml` n'a pas pu modifier le fichier sans risque — ne rien écrire.
+
+    Levée quand le texte de départ n'est pas du TOML lisible, ou quand le texte
+    produit ne rendrait pas exactement les valeurs demandées (clé pointée, table
+    en ligne, mise en forme que le petit analyseur ci-dessous ne sait pas suivre).
+    L'appelant retombe alors sur une regénération complète : il perd les
+    commentaires, mais n'écrit jamais une configuration fausse.
+    """
+
+
+def toml_value(value: object) -> str:
+    """Rend une valeur simple en TOML (`true`, `12`, `"texte"`, `["a", "b"]`).
+
+    Les chaînes passent par `json.dumps` : les guillemets et les échappements de
+    JSON sont ceux des chaînes TOML de base, et un `#` s'y retrouve **entre
+    guillemets**, donc jamais pris pour un commentaire.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(json.dumps(str(x), ensure_ascii=False) for x in value) + "]"
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+_TABLE_RE = re.compile(r"^[ \t]*\[[ \t]*(?P<name>[^\[\]]+?)[ \t]*\][ \t]*(?:#.*)?$")
+_KEY_RE = re.compile(r"^[ \t]*(?P<key>[A-Za-z0-9_-]+|\"[^\"]*\"|'[^']*')[ \t]*=[ \t]*")
+
+
+def _end_of_string(text: str, start: int) -> int:
+    """Position juste après la chaîne qui commence en `start` (guillemet compris)."""
+    quote = text[start]
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\n":
+            return index  # chaîne non fermée : on ne dépasse pas la ligne
+        if quote == '"' and char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        index += 1
+    return len(text)
+
+
+def _end_of_value(text: str, start: int) -> int:
+    """Position de fin de la valeur qui commence en `start`.
+
+    Suit les chaînes (un `#` entre guillemets n'ouvre pas un commentaire), les
+    tableaux et tables en ligne — y compris sur plusieurs lignes — et s'arrête,
+    pour une valeur nue, au commentaire ou à la fin de ligne.
+    """
+    index, depth, size = start, 0, len(text)
+    while index < size:
+        char = text[index]
+        if char in "\"'":
+            triple = text[index : index + 3]
+            if triple in ('"""', "'''"):
+                closing = text.find(triple, index + 3)
+                index = size if closing < 0 else closing + 3
+            else:
+                index = _end_of_string(text, index)
+            continue
+        if char == "#":
+            if depth == 0:
+                break
+            newline = text.find("\n", index)  # commentaire dans un tableau multiligne
+            index = size if newline < 0 else newline
+            continue
+        if char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth <= 0:
+                index += 1
+                break
+        elif char == "\n" and depth == 0:
+            break
+        index += 1
+    while index > start and text[index - 1] in " \t\r\n":
+        index -= 1
+    return index
+
+
+def _scan_toml(text: str) -> tuple[dict[tuple[str, str], tuple[int, int]], dict[str, int]]:
+    """Repère les affectations et la fin de chaque section.
+
+    Rend `{(section, clé): (début, fin) de la valeur}` et `{section: position où
+    insérer une clé manquante}` — après la dernière ligne non vide de la section,
+    pour que l'ajout ne saute pas par-dessus la ligne blanche qui la sépare de la
+    suivante. La section hors table porte le nom `""`.
+    """
+    spans: dict[tuple[str, str], tuple[int, int]] = {}
+    ends: dict[str, int] = {"": 0}
+    section, position = "", 0
+    while position < len(text):
+        newline = text.find("\n", position)
+        line_end = len(text) if newline < 0 else newline
+        line = text[position:line_end]
+        if not line.strip():
+            position = line_end + 1
+            continue
+        table = _TABLE_RE.match(line)
+        if table:
+            section = table.group("name").strip().strip("\"'")
+            ends[section] = line_end
+            position = line_end + 1
+            continue
+        assignment = None if line.lstrip().startswith("#") else _KEY_RE.match(line)
+        if assignment is None:
+            ends[section] = line_end  # commentaire ou ligne inconnue : la section s'étend
+            position = line_end + 1
+            continue
+        key = assignment.group("key").strip("\"'")
+        value_start = position + assignment.end()
+        value_end = _end_of_value(text, value_start)
+        spans[(section, key)] = (value_start, value_end)
+        newline = text.find("\n", value_end)
+        line_end = len(text) if newline < 0 else newline
+        ends[section] = line_end
+        position = line_end + 1
+    return spans, ends
+
+
+def _flat_config(config: Config) -> dict[tuple[str, str], Any]:
+    """`{(section, clé): valeur}` de toute la configuration, dans l'ordre du fichier."""
+    data = asdict(config)
+    flat: dict[tuple[str, str], Any] = {("", key): data[key] for key in ROOT_KEYS}
+    for section in SECTIONS:
+        for key, value in data[section].items():
+            flat[(section, key)] = value
+    return flat
+
+
+def _read_value(data: dict[str, Any], section: str, key: str) -> Any:
+    table = data if section == "" else data.get(section)
+    if not isinstance(table, dict):
+        return None
+    return table.get(key)
+
+
+def update_toml(text: str, config: Config) -> str:
+    """Réécrit dans `text` les **seules valeurs qui changent** — commentaires intacts.
+
+    Regénérer le fichier à chaque « Enregistrer » effaçait ses 21 commentaires, dont
+    l'avertissement qui prévient que `<campagne>.blocks/` garde le texte intégral des
+    documents analysés, en clair, sur le disque : un administrateur cliquait une fois,
+    et le suivant ne lisait plus rien. On modifie donc le texte existant au lieu de le
+    reconstruire — les commentaires, l'ordre des clés, l'alignement et jusqu'aux clés
+    inconnues de `Config` survivent, et une valeur inchangée n'est **pas** retouchée.
+
+    Une clé absente du fichier n'y est ajoutée que si sa valeur **s'écarte du défaut**
+    (`Config()`) : absente vaut défaut, l'écrire n'apprendrait rien et allongerait le
+    fichier de tout ce que `docia init` a délibérément laissé de côté. Elle va à la fin
+    de sa section, ou dans une nouvelle section en fin de fichier. Conséquence : réécrire
+    sans rien changer un `docia.toml` produit par `docia init` le rend à l'identique,
+    octet pour octet. Le résultat est relu avant d'être rendu : s'il ne redonne pas
+    exactement les valeurs demandées, `TomlRewriteError` est levée et rien n'est écrit.
+
+    Raises:
+        TomlRewriteError: texte de départ illisible, ou réécriture non fidèle.
+    """
+    try:
+        current = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise TomlRewriteError(f"configuration illisible : {exc}") from exc
+
+    wanted = _flat_config(config)
+    defaults = _flat_config(Config())
+    spans, ends = _scan_toml(text)
+    edits: list[tuple[int, int, str]] = []  # (début, fin, remplacement)
+    inserted: dict[str, list[str]] = {}  # clés à ajouter, section présente ou non
+    for (section, key), value in wanted.items():
+        if (section, key) in spans:
+            if _read_value(current, section, key) == value:
+                continue  # valeur inchangée : la ligne n'est même pas retouchée
+            start, end = spans[(section, key)]
+            edits.append((start, end, toml_value(value)))
+        elif value != defaults[(section, key)]:
+            inserted.setdefault(section, []).append(f"{key} = {toml_value(value)}")
+
+    for section, lines in inserted.items():
+        if section not in ends:
+            continue  # section absente : ajoutée en fin de fichier, plus bas
+        position = ends[section]  # fin de la dernière ligne de la section
+        block = "\n".join(lines)
+        # `0` = rien avant la première `[table]` : les clés hors table ouvrent le fichier.
+        edits.append((0, 0, block + "\n") if position == 0 else (position, position, "\n" + block))
+    result = text
+    for start, end, replacement in sorted(edits, reverse=True):
+        result = result[:start] + replacement + result[end:]
+    for section in SECTIONS:  # section entièrement absente : ajoutée en fin de fichier
+        if section in inserted and section not in ends:
+            result = (
+                result.rstrip("\n") + f"\n\n[{section}]\n" + "\n".join(inserted[section]) + "\n"
+            )
+    if not result.endswith("\n"):
+        result += "\n"
+
+    # Relecture par le vrai chargeur : ce que `load_config` lira doit être exactement
+    # ce qu'on voulait écrire, sinon on n'écrit rien du tout.
+    try:
+        written = _flat_config(config_from_data(tomllib.loads(result)))
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise TomlRewriteError(f"réécriture invalide : {exc}") from exc
+    for entry, value in wanted.items():
+        if written[entry] != value:
+            raise TomlRewriteError(f"réécriture infidèle : {entry[0] or 'racine'}.{entry[1]}")
+    return result

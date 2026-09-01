@@ -60,6 +60,25 @@ def _cut(data: ReportData, name: str, shown: int) -> list[str]:
     ]
 
 
+def _bloc_perimetre(data: ReportData) -> list[str]:
+    """Avertissement « inventaire incomplet », **avant** la synthèse.
+
+    Même exigence que le bandeau du rapport HTML : ce qui manque se lit d'abord,
+    pas en pied de page. Liste vide quand le périmètre est entier.
+    """
+    scope = data.scope
+    if not scope.incomplete:
+        return []
+    lines = ["> ## ⚠ Inventaire incomplet", ">", f"> {scope.headline()}", ">"]
+    for cible in scope.skipped_targets:
+        lines.append(f"> - non parcouru : `{cible}`")
+    if scope.skipped_targets:
+        lines.append(">")
+    for message in scope.warnings:
+        lines += [f"> {message}", ">"]
+    return [*lines, ""]
+
+
 def render_markdown(
     db: Database, *, today: date | None = None, data: ReportData | None = None
 ) -> str:
@@ -74,6 +93,9 @@ def render_markdown(
         f"- **Modèle** : {o.model or '—'}",
         f"- **Prompt** : {o.prompt_name} `{o.prompt_hash}`",
         "",
+    ]
+    lines += _bloc_perimetre(report)
+    lines += [
         "## 1. Synthèse",
         "",
     ]

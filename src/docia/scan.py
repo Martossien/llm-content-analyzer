@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO
@@ -41,6 +41,17 @@ propriétaire, empreinte pour les doublons, signature)."""
 EXIT_OK = 0
 EXIT_ARGS = 2
 EXIT_NOTHING = 3
+EXIT_PARTIAL = 4
+"""Scan terminé, CSV bon, mais **une cible demandée n'a pas été scannée**.
+
+Le scanner sort en 4 dès que son manifeste porte un `skipped` non vide (ACL qui
+refuse un partage, montage cassé). Ce n'est pas un échec : les lignes écrites
+sont exactes et s'importent normalement — seul le périmètre est amputé. Traiter
+ce code comme fatal transformerait un scan parfaitement exploitable en échec dur.
+"""
+
+EXIT_ACCEPTED = (EXIT_OK, EXIT_NOTHING, EXIT_PARTIAL)
+"""Codes de retour qui ne sont pas des échecs : CSV exploitable dans les trois cas."""
 
 CANCEL_POLL_S = 0.25
 """Délai d'attente d'une ligne de sortie avant de reconsulter `cancel`.
@@ -130,7 +141,14 @@ class ScanEvent:
 class ScanResult:
     """Bilan d'un scan. `command` est **déjà masquée** (voir `redact_args`) : le
     mot de passe SMB ne doit pas survivre dans un objet qu'un journal, un
-    manifeste ou un rapport futur recopierait tel quel."""
+    manifeste ou un rapport futur recopierait tel quel.
+
+    Les trois champs de **périmètre** (`skipped`, `cancelled`, `expected_files`)
+    existent parce qu'un audit sert à décider de suppressions : « je n'ai pas
+    tout vu » doit être un fait transmis à l'appelant, pas une ligne perdue dans
+    la sortie du scanner. Ils sont recopiés en base par `service.scan_campaign`
+    et survivent donc au manifeste.
+    """
 
     csv_path: Path
     manifest_path: Path | None
@@ -141,6 +159,30 @@ class ScanResult:
     manifest: dict[str, object] = field(default_factory=dict)
     tail: list[str] = field(default_factory=list)
     """Dernières lignes de sortie (diagnostic en cas d'échec)."""
+    skipped: list[str] = field(default_factory=list)
+    """Cibles demandées que le scanner n'a **pas** scannées (`manifest.skipped`).
+
+    Vide sur un scan normal, et vide aussi avec un scanner antérieur au code 4 :
+    l'absence de la clé n'invente jamais un périmètre incomplet."""
+    cancelled: bool = False
+    """L'utilisateur a demandé l'arrêt : le CSV ne porte qu'un fragment du périmètre."""
+    expected_files: int = 0
+    """Nombre de fichiers **annoncé** par le scanner ; 0 quand il n'a rien annoncé.
+
+    Voir `expected_file_count` pour la source retenue et pourquoi."""
+
+    @property
+    def missing_files(self) -> int:
+        """Lignes annoncées mais absentes du CSV (0 si le compte est bon ou inconnu)."""
+        return max(self.expected_files - self.files, 0)
+
+    @property
+    def complete(self) -> bool:
+        """Vrai si le scan couvre **tout** ce qui a été demandé.
+
+        Faux dès qu'une cible a été écartée, que l'utilisateur a arrêté le scan,
+        ou que le CSV compte moins de lignes que le scanner n'en a annoncé."""
+        return not self.skipped and not self.cancelled and self.missing_files == 0
 
 
 def find_smbeagle(configured: str = "") -> Path | None:
@@ -261,12 +303,119 @@ def parse_progress_line(line: str) -> ScanEvent | None:
 
 
 def count_csv_rows(csv_path: Path) -> int:
-    """Lignes de données du CSV (en-tête exclu) ; 0 si absent."""
+    """Lignes de données du CSV (en-tête exclu) ; 0 si absent.
+
+    Le comptage est **physique** (une ligne du fichier = une ligne de données) :
+    un nom de fichier contenant un saut de ligne — légal sous POSIX — est écrit
+    entre guillemets et compte alors pour deux. Ce comptage ne peut donc que
+    **surestimer** le nombre réel d'enregistrements, jamais le sous-estimer :
+    c'est ce qui rend le contrôle de troncature (`files < expected_files`) sûr
+    contre les faux positifs. Mesuré sur les fixtures du dépôt smbeagle : 7
+    fichiers ordinaires → 7 ; un nom avec saut de ligne parmi 2 fichiers → 3.
+    """
     if not csv_path.is_file():
         return 0
     with csv_path.open("rb") as fh:
         n = sum(1 for _ in fh)
     return max(0, n - 1)
+
+
+def manifest_skipped(manifest: dict[str, object]) -> list[str]:
+    """Cibles écartées déclarées par le manifeste (`skipped`), liste vide sinon.
+
+    Tolère un manifeste sans la clé (`SMBeagle.exe` antérieur au code 4) comme un
+    manifeste dont la clé n'est pas une liste : dans les deux cas le périmètre est
+    réputé **entier**. Inventer une cible manquante serait pire que de n'en
+    signaler aucune.
+    """
+    raw = manifest.get("skipped")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def expected_file_count(manifest: dict[str, object], last_files: int) -> int:
+    """Nombre de fichiers que le scanner dit avoir produit ; 0 s'il n'a rien dit.
+
+    Trois sources annoncent ce compte, et **le manifeste fait foi** :
+
+    - `manifest.counts.files` est écrit *après* la fermeture et le vidage du CSV
+      (`Finish()` : `OutputHelper.CloseAndFlush()` puis `manifest.Write()`), à
+      partir du même compteur dédoublonné (`FileFinder.FileCount`) qui a produit
+      une ligne CSV par fichier. C'est donc le seul chiffre qui décrive le fichier
+      **tel qu'il a été refermé** ; vérifié sur les fixtures du dépôt smbeagle,
+      `counts.files` = 7 pour 7 lignes de données, sans décalage d'unité.
+    - l'événement `done` porte exactement la même valeur (`ProgressReporter.Done`
+      reçoit `manifest.Files`), mais transite par la sortie standard : un tube
+      coupé ou une ligne tronquée la perd.
+    - `last_files` (le maximum vu en progression) n'est qu'un compteur *en cours* :
+      il monte pendant l'énumération et n'est pas un décompte de lignes écrites.
+
+    Le repli sur `last_files` ne sert donc que si le manifeste manque — scanner
+    lancé sans `--manifest`, arrêt avant l'écriture du manifeste — et vaut alors
+    ce que vaut la progression : un minorant du travail annoncé, jamais un chiffre
+    de trop. Renvoie 0 quand aucune source ne s'est prononcée : pas d'annonce,
+    pas de contrôle.
+    """
+    counts = manifest.get("counts")
+    if isinstance(counts, dict):
+        raw = counts.get("files")
+        if isinstance(raw, bool):  # `True` vaudrait 1 : ce n'est pas un compte
+            return max(last_files, 0)
+        if isinstance(raw, int):
+            return max(raw, 0)
+        if isinstance(raw, (float, str)):
+            try:
+                return max(int(float(raw)), 0)
+            except (TypeError, ValueError):
+                logger.debug("manifeste : counts.files illisible (%r)", raw)
+    return max(last_files, 0)
+
+
+def scope_warnings(
+    *, skipped: Sequence[str], cancelled: bool, expected_files: int, files: int
+) -> list[str]:
+    """Phrases d'avertissement sur le périmètre, pour un administrateur pressé.
+
+    Une phrase par fait constaté : ce qui manque, puis quoi faire. Aucun code de
+    retour brut, aucun nom de champ. Liste vide quand le périmètre est entier —
+    c'est le cas normal, et il ne doit rien afficher du tout.
+
+    Prend des faits nus plutôt qu'un objet : le même texte doit sortir juste après
+    le scan (depuis un `ScanResult`) et des mois plus tard dans un rapport (depuis
+    la table `scans`), sans que les deux formulations puissent diverger.
+    """
+    messages: list[str] = []
+    if skipped:
+        # Les trois premiers noms suffisent à situer le problème dans une ligne de
+        # journal ou un bandeau ; la liste entière est portée à part (`skipped`),
+        # là où un rapport peut l'afficher proprement.
+        noms = ", ".join(skipped[:3])
+        reste = len(skipped) - 3
+        if reste > 0:
+            noms += f" et {reste} autre(s)"
+        messages.append(
+            f"Périmètre incomplet : {len(skipped)} emplacement(s) demandé(s) n'ont pas pu "
+            f"être parcourus ({noms}). Les fichiers qu'ils contiennent sont absents de "
+            "l'audit. Vérifiez les droits d'accès (ou que le partage est bien monté), "
+            "puis relancez le scan avant de décider la moindre suppression."
+        )
+    if cancelled:
+        detail = (
+            f"{files} fichier(s) sur les {expected_files} déjà repérés"
+            if expected_files > files
+            else f"{files} fichier(s)"
+        )
+        messages.append(
+            f"Scan arrêté en cours de route : l'audit ne porte que sur {detail}. "
+            "Relancez un scan complet avant de décider la moindre suppression."
+        )
+    elif expected_files > files:
+        messages.append(
+            f"Inventaire incomplet : le scanner annonçait {expected_files} fichier(s) et "
+            f"n'en a écrit que {files}. Le scan est à refaire."
+        )
+    return messages
 
 
 def _notify_event(on_event: Callable[[ScanEvent], None] | None, event: ScanEvent) -> None:
@@ -326,10 +475,15 @@ def run_scan(
     silences du scanner, et les rappels `on_event` / `on_line` sont protégés :
     ni un « Arrêter » ignoré ni une fenêtre détruite ne doivent coûter un scan.
 
+    Le résultat dit toujours si le périmètre est entier (`ScanResult.complete`) :
+    cibles écartées par le scanner (`skipped`, code de retour 4), arrêt demandé
+    (`cancelled`), ou CSV plus court que ce que le scanner a annoncé.
+
     Raises:
         ScanError: profil invalide, scanner introuvable ou impossible à lancer,
-            code de sortie inattendu, aucun CSV produit, ou CSV vide alors que la
-            progression annonçait des fichiers (écriture interrompue).
+            code de sortie inattendu (le 4 « périmètre incomplet » n'en est pas
+            un), aucun CSV produit, ou CSV plus court que le compte annoncé
+            **sans** arrêt demandé (écriture interrompue).
     """
     errors = profile.validate()
     if errors:
@@ -412,6 +566,8 @@ def run_scan(
     # progression n'est pas un décompte de lignes, et le faire passer pour tel a déjà
     # annoncé « scan terminé : 42 000 fichiers » sur un CSV de 0 octet.
     files = count_csv_rows(csv_out)
+    cancelled = cancelled or (cancel is not None and cancel.is_set())
+    skipped = manifest_skipped(manifest)
     result = ScanResult(
         csv_path=csv_out,
         manifest_path=manifest_out if manifest else None,
@@ -421,9 +577,11 @@ def run_scan(
         command=redact_args(cmd),
         manifest=manifest,
         tail=tail,
+        skipped=skipped,
+        cancelled=cancelled,
+        expected_files=expected_file_count(manifest, last_files),
     )
-    cancelled = cancelled or (cancel is not None and cancel.is_set())
-    if proc.returncode not in (EXIT_OK, EXIT_NOTHING) and not cancelled:
+    if proc.returncode not in EXIT_ACCEPTED and not cancelled:
         detail = " | ".join(tail[-3:]) if tail else "aucune sortie"
         raise ScanError(f"scanner terminé avec le code {proc.returncode} : {detail}")
     if not csv_out.is_file():
@@ -432,10 +590,23 @@ def run_scan(
             if cancelled
             else "le scanner n'a produit aucun CSV"
         )
-    if files == 0 and last_files > 0 and not cancelled:
+    if result.missing_files and not cancelled:
+        # Le scanner a annoncé plus de lignes qu'il n'en a écrit et n'a pas été
+        # arrêté : il est mort en écrivant (disque plein, partage coupé). Le CSV
+        # est un fragment muet — l'importer donnerait un audit qui se croit
+        # exhaustif. Le cas « aucune ligne du tout » n'est que le cas extrême de
+        # celui-ci ; le contrôle ne s'y limite plus.
         raise ScanError(
-            f"le scanner annonçait {last_files} fichier(s) mais {csv_out} ne contient "
-            "aucune ligne de données : écriture interrompue (disque plein, partage coupé, "
-            "scanner tombé). Le scan est à refaire, ce CSV n'a rien à importer."
+            f"le scanner annonçait {result.expected_files} fichier(s) mais {csv_out} "
+            f"n'en contient que {files} : écriture interrompue (disque plein, partage "
+            "coupé, scanner tombé). Le scan est à refaire, ce CSV n'est pas exploitable."
         )
+    if skipped:
+        _notify_line(
+            on_line,
+            "scan : périmètre incomplet — non scanné(s) : "
+            + ", ".join(skipped)
+            + " (accès refusé ou emplacement injoignable)",
+        )
+        logger.warning("scan au périmètre incomplet, cibles écartées : %s", ", ".join(skipped))
     return result

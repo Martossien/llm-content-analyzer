@@ -66,12 +66,20 @@ td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: t
 .legend { font-size: 12px; color: #52606d; margin: 2px 0 10px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 12px; }
 .empty { color: #7b8794; font-style: italic; }
+.perimetre { background: #fdecea; border: 2px solid #b4453c; border-left-width: 8px;
+  border-radius: 4px; padding: 14px 18px; margin: 0 0 22px; color: #6b1f18; }
+.perimetre h2 { margin: 0 0 6px; font-size: 18px; border: 0; padding: 0; color: #8c2f26; }
+.perimetre p { margin: 4px 0; font-size: 14px; }
+.perimetre ul { margin: 6px 0 0; padding-left: 20px; font-size: 13px; }
+.perimetre li { margin: 2px 0; }
+.perimetre code { font-family: Consolas, "DejaVu Sans Mono", monospace; word-break: break-all; }
 footer { color: #7b8794; font-size: 12px; border-top: 1px solid #d9e2ec; padding-top: 10px; margin-top: 30px; }
 @media print {
   body { background: #fff; font-size: 11px; }
   header.page { background: #fff; color: #1f2933; border-bottom: 2px solid #23384d; }
   header.page .meta { color: #52606d; }
   nav.sommaire { display: none; }
+  .perimetre { break-inside: avoid; break-after: avoid; }
   section { break-inside: avoid; }
   h2 { break-after: avoid; }
   table { break-inside: auto; }
@@ -223,6 +231,30 @@ def _undetermined_note(plan: views.RetentionPlan) -> str:
 
 
 # ----------------------------------------------------------------- sections
+
+
+def _bandeau_perimetre(data: ReportData) -> str:
+    """Bandeau « inventaire incomplet », **avant** le sommaire et la synthèse.
+
+    Le rapport HTML est remis à la direction et sert à justifier des suppressions :
+    un périmètre amputé ne peut pas être une note en pied de page. Chaîne vide
+    quand le périmètre est entier — un rapport normal ne montre rien.
+    """
+    scope = data.scope
+    if not scope.incomplete:
+        return ""
+    cibles = scope.skipped_targets
+    liste = (
+        "<ul>" + "".join(f"<li><code>{_esc(c)}</code></li>" for c in cibles) + "</ul>"
+        if cibles
+        else ""
+    )
+    quoi_faire = "".join(f"<p>{_esc(message)}</p>" for message in scope.warnings)
+    return (
+        '<div class="perimetre" id="perimetre"><h2>Inventaire incomplet</h2>'
+        f"<p>{_esc(scope.headline())}</p>"
+        f"{liste}{quoi_faire}</div>"
+    )
 
 
 def _section_synthese(data: ReportData) -> str:
@@ -669,6 +701,7 @@ def render_html(db: Database, *, today: date | None = None, data: ReportData | N
         f"<span>Base : {_esc(o.db_path)}</span>"
         f"<span>Modèle : {_esc(o.model or '—')}</span>"
         f"<span>Prompt : {_esc(o.prompt_name)} {_esc(o.prompt_hash)}</span>"
+        + ("<span>⚠ Périmètre incomplet</span>" if report.scope.incomplete else "")
     )
     body = "".join(
         [
@@ -687,7 +720,7 @@ def render_html(db: Database, *, today: date | None = None, data: ReportData | N
         f"<style>{_CSS}</style></head><body>"
         f'<header class="page"><div class="wrap"><h1>Doc-IA — rapport d\'analyse</h1>'
         f'<div class="meta">{meta}</div></div></header>'
-        f'<div class="wrap"><nav class="sommaire">{nav}</nav>{body}'
+        f'<div class="wrap">{_bandeau_perimetre(report)}<nav class="sommaire">{nav}</nav>{body}'
         "<footer>Rapport produit par Doc-IA analyzer — les classifications sont proposées "
         "par un modèle de langage et doivent être vérifiées avant toute décision "
         "de suppression.</footer></div></body></html>"
