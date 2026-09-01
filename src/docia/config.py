@@ -345,7 +345,14 @@ def load_config(path: Path | None, *, on_missing: Callable[[str], None] | None =
                 f"–{config.filter.max_size_bytes} o, modèle « {config.llm.model} »)"
             )
         return config
-    return config_from_data(tomllib.loads(path.read_text(encoding="utf-8")))
+    # `utf-8-sig` et non `utf-8` : sous Windows, le Bloc-notes et une redirection
+    # PowerShell (`>`) écrivent un BOM en tête. `tomllib` échouait alors dès le
+    # premier caractère (« Invalid statement at line 1, column 1 ») — toute la
+    # configuration était perdue, la campagne repartait sur les valeurs par défaut,
+    # et « Enregistrer » écrasait ensuite le fichier de l'administrateur. C'est le
+    # naufrage le plus probable d'un déploiement en exécutable autonome, pour un
+    # suffixe d'encodage. Le BOM est retiré s'il est là, ignoré sinon.
+    return config_from_data(tomllib.loads(path.read_text(encoding="utf-8-sig")))
 
 
 def config_from_data(data: dict[str, Any]) -> Config:

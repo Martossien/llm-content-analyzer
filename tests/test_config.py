@@ -213,3 +213,35 @@ def test_un_toml_casse_est_refuse_au_lieu_detre_ecrase() -> None:
     """Plutôt lever que réécrire n'importe quoi : l'appelant retombe sur la regénération."""
     with pytest.raises(TomlRewriteError):
         update_toml("db_path = \n[llm\n", Config())
+
+
+def test_un_docia_toml_avec_bom_reste_lisible(tmp_path: Path) -> None:
+    """Le Bloc-notes Windows écrit un BOM : sans `utf-8-sig`, toute la config est perdue.
+
+    `tomllib` échouait dès le premier caractère (« Invalid statement at line 1,
+    column 1 »). La campagne repartait alors sur les valeurs par défaut — seuils de
+    taille, modèle, chemin de base — sans que rien ne le dise à l'écran, puis
+    « Enregistrer » remplaçait le fichier de l'administrateur. Sur un exécutable
+    autonome livré à des postes Windows, c'est le naufrage le plus probable, et il
+    tient à un suffixe d'encodage.
+    """
+    chemin = tmp_path / "docia.toml"
+    chemin.write_bytes(
+        b"\xef\xbb\xbf" + b'db_path = "campagne.sqlite"\n\n[filter]\nmin_size_bytes = 4096\n'
+    )
+
+    config = load_config(chemin)
+
+    assert config.db_path == "campagne.sqlite"
+    assert config.filter.min_size_bytes == 4096, "les réglages de l'administrateur, pas les défauts"
+
+
+def test_reecrire_un_fichier_avec_bom_ne_le_replique_pas_au_milieu(tmp_path: Path) -> None:
+    """Le BOM lu doit disparaître, pas se retrouver inséré dans le texte réécrit."""
+    chemin = tmp_path / "docia.toml"
+    chemin.write_bytes(b"\xef\xbb\xbf" + default_toml().encode("utf-8"))
+
+    source = chemin.read_text(encoding="utf-8-sig")
+    resultat = update_toml(source, load_config(chemin))
+
+    assert "﻿" not in resultat

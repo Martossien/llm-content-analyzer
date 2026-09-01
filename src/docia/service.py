@@ -625,14 +625,17 @@ def reanalyze(
     une réanalyse sans rien effacer. Une sauvegarde est prise avant l'opération
     (`backup=False` pour la désactiver, à réserver aux tests).
 
-    **Atomicité — limite connue.** Remettre les fichiers `pending` et supprimer
-    leurs analyses sont deux écritures, et `Database` n'expose aujourd'hui aucune
-    opération qui les enchaîne dans une seule transaction (`set_files_status` et
-    `delete_analyses` ouvrent chacune la leur). Une coupure entre les deux laisse
-    donc un état intermédiaire ; l'ordre choisi ci-dessous le rend visible et
-    réparable en rejouant la même commande, mais seule une méthode
-    `Database.reset_for_reanalysis(...)` (une transaction, les deux écritures)
-    supprimerait complètement la fenêtre.
+    **Atomicité.** Remettre les fichiers `pending` et supprimer leurs analyses sont
+    deux écritures : faites séparément, une coupure entre les deux laissait un état
+    intermédiaire — au mieux visible et réparable, jamais souhaitable.
+    `Database.reset_for_reanalysis` les enchaîne dans **une seule transaction**, et
+    c'est elle qui est appelée ici. La fenêtre est fermée : une coupure rend la
+    campagne exactement telle qu'elle était.
+
+    Cette méthode existait, testée, et **personne ne l'appelait** — pendant que cette
+    docstring affirmait qu'elle n'existait pas. C'est le travers qu'une relecture
+    extérieure a nommé sur ce projet : « le correctif est écrit, le test est écrit,
+    le branchement est oublié, et la documentation raconte la version corrigée ».
     """
     if scope not in REANALYZE_SCOPES:
         raise ServiceError(
@@ -650,19 +653,10 @@ def reanalyze(
         logger.info("réanalyse (%s) : aucun fichier ciblé", scope)
         return 0
     phash, model = _effective_keys(db, cfg)
-    # L'ordre compte, et il n'est pas anodin : `db.py` n'expose pas d'opération qui
-    # fasse les deux écritures dans une seule transaction (voir la note ci-dessus),
-    # donc une coupure entre les deux est possible. Remettre les fichiers `pending`
-    # **d'abord** rend cet état intermédiaire visible et réparable :
-    #   - visible : la campagne affiche 0 % au lieu de mentir avec « 100 % analysé » ;
-    #   - réparable : rejouer *la même* commande de réanalyse retrouve les fichiers
-    #     (ils sont `pending`, et leurs analyses sont toujours là pour un `--where`)
-    #     et termine le travail.
-    # Dans l'ordre inverse, la coupure laissait des fichiers `done` sans analyse :
-    # `run`, `retry`, `plan` et un `reanalyze` ciblé n'en voyaient plus aucun, et
-    # seul `reanalyze --all` — que personne n'a de raison de tenter — réparait.
-    db.set_files_status(file_ids, FileStatus.PENDING, None)
-    deleted = db.delete_analyses(file_ids, prompt_hash=phash, model=model)
+    # Une seule transaction pour les deux écritures : ni ordre à ruser, ni état
+    # intermédiaire à rendre réparable. Une coupure au milieu laisse la campagne
+    # exactement telle qu'elle était.
+    deleted = db.reset_for_reanalysis(file_ids, prompt_hash=phash, model=model)
     logger.info(
         "réanalyse (%s) : %s fichier(s) remis à analyser, %s analyse(s) supprimée(s)",
         scope,

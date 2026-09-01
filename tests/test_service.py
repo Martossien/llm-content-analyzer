@@ -836,18 +836,21 @@ def _campagne_analysee(tmp_path: Path, combien: int = 6) -> tuple[Config, Path]:
     return cfg, db_path
 
 
-def test_une_reanalyse_coupee_en_deux_reste_reparable(tmp_path: Path) -> None:
-    """M1 : coupure entre les deux écritures de `reanalyze`.
+def test_une_reanalyse_tuee_en_plein_vol_ne_laisse_aucune_trace(tmp_path: Path) -> None:
+    """Une réanalyse interrompue laisse la campagne **exactement** telle qu'elle était.
 
-    Le processus est réellement tué juste après la première des deux écritures,
-    quelle qu'elle soit. Avant correction, l'ordre laissait des fichiers `done`
-    sans analyse : la campagne annonçait « 100 % analysé » pendant que le rapport
-    disait « 0 analysé », `run`/`retry`/`plan` ne voyaient plus rien, et rejouer la
-    même commande de réanalyse ne rattrapait aucun fichier — seul `reanalyze --all`
-    réparait, ce que personne n'a de raison de tenter.
+    Historique de ce test, parce qu'il dit quelque chose sur la méthode. Il vérifiait
+    d'abord qu'un état intermédiaire restait *réparable* : `reanalyze` faisait deux
+    écritures séparées, une coupure entre les deux laissait des fichiers `done` sans
+    analyse, la campagne annonçait « 100 % analysé » là où le rapport disait
+    « 0 analysé », et seul `reanalyze --all` rattrapait le coup. L'ordre des deux
+    écritures avait été inversé pour rendre cet état honnête et réparable.
 
-    Après correction, l'état intermédiaire est honnête (0 %) et *la même commande*,
-    rejouée, termine le travail.
+    C'était un pis-aller : `Database.reset_for_reanalysis` — une seule transaction
+    pour les deux écritures — existait déjà, testée, et **personne ne l'appelait**.
+    Maintenant qu'elle est branchée, il n'y a plus d'état intermédiaire du tout, donc
+    plus rien à réparer. Le test tue le processus au cœur de la transaction et vérifie
+    la propriété forte : **rien n'a bougé**.
     """
     cfg, db_path = _campagne_analysee(tmp_path)
     script = tmp_path / "coupure_reanalyse.py"
@@ -861,19 +864,32 @@ def test_une_reanalyse_coupee_en_deux_reste_reparable(tmp_path: Path) -> None:
         from docia.service import reanalyze
 
         base = Path({str(db_path)!r})
-        originaux = {{
-            nom: getattr(db_module.Database, nom)
-            for nom in ("delete_analyses", "set_files_status")
-        }}
+        # La machine s'éteint **au cœur** de la transaction : les statuts viennent
+        # de passer `pending`, la suppression des analyses n'a pas encore eu lieu.
+        # Sans transaction unique, c'est exactement l'état bâtard d'avant.
+        from contextlib import contextmanager
 
-        def _coupe_apres(nom):
-            def wrapper(self, *args, **kwargs):
-                originaux[nom](self, *args, **kwargs)
-                os._exit(9)  # la machine s'éteint entre les deux écritures
-            return wrapper
+        _transaction = db_module.Database.transaction
 
-        for nom in originaux:
-            setattr(db_module.Database, nom, _coupe_apres(nom))
+        # `sqlite3.Connection` est immuable : on l'enveloppe pour couper dedans.
+        class _Mandataire:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *a, **k):
+                if sql.lstrip().upper().startswith("DELETE FROM ANALYSES"):
+                    os._exit(9)
+                return self._conn.execute(sql, *a, **k)
+
+            def __getattr__(self, nom):
+                return getattr(self._conn, nom)
+
+        @contextmanager
+        def _coupe_au_milieu(self):
+            with _transaction(self) as conn:
+                yield _Mandataire(conn)
+
+        db_module.Database.transaction = _coupe_au_milieu
 
         with db_module.Database(base) as db:
             reanalyze(
@@ -893,16 +909,18 @@ def test_une_reanalyse_coupee_en_deux_reste_reparable(tmp_path: Path) -> None:
 
     with Database(db_path) as db:
         interrompu = campaign_status(db)
-        assert interrompu.percent_done == 0.0, "la campagne annonce un avancement qu'elle n'a plus"
-        # la même commande, rejouée, doit rattraper les fichiers
+        assert (interrompu.done, interrompu.pending, interrompu.analyses) == (6, 0, 6), (
+            "la transaction n'a pas été annulée : la coupure a laissé une trace"
+        )
+        # et la réanalyse, relancée, fait son travail normalement
         repris = reanalyze(db, cfg, scope="filter", where={"security": "C3"}, backup=False)
         apres = campaign_status(db)
         phash, model = _effective_keys(db, cfg)
         selectionnables = db.select_pending_ids(1000, prompt_hash=phash, model=model)
 
-    assert repris == 6, "rejouer la même réanalyse ne rattrape aucun fichier"
+    assert repris == 6
     assert (apres.done, apres.pending, apres.analyses) == (0, 6, 0)
-    assert len(selectionnables) == 6, "`docia run` ne sélectionne toujours rien"
+    assert len(selectionnables) == 6, "`docia run` retrouve bien les fichiers à refaire"
 
 
 # ----------------------------------------------------- vérification humaine

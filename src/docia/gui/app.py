@@ -164,10 +164,22 @@ class DociaApp:
 
         self.ctk = ctk
         self.config_path = config_path or Path(DEFAULT_CONFIG_NAME)
+        self._config_error = ""
+        """Message d'une configuration illisible, à afficher dès que le journal existe.
+
+        Le repli sur `Config()` n'allait que dans le journal du poste : l'utilisateur
+        voyait une fenêtre normale et lançait une campagne avec les seuils par défaut
+        au lieu des siens — puis « Enregistrer » écrasait son fichier. Un repli doit se
+        voir à l'écran, là où il change ce que fait l'outil."""
         try:
             self.config = load_config(self.config_path if self.config_path.exists() else None)
         except ValueError as exc:
             logger.warning("config invalide, défauts utilisés : %s", exc)
+            self._config_error = (
+                f"ATTENTION — {self.config_path} est illisible ({exc}). Les réglages par "
+                "défaut sont appliqués : vérifiez le fichier avant de lancer une campagne, "
+                "car « Enregistrer » le remplacerait."
+            )
             self.config = Config()
         self._log_queue: queue.Queue[str | Callable[[], object]] = queue.Queue()
         self._worker: threading.Thread | None = None
@@ -324,6 +336,9 @@ class DociaApp:
         )
         self.log_box.configure(state="disabled")
         self._journal_visible = False
+
+        if self._config_error:  # le journal existe enfin : le repli doit s'y voir
+            self.log(self._config_error)
 
         self._touch_campaign()
         self._refresh_campaign_header()
@@ -593,7 +608,9 @@ class DociaApp:
             self.log("config non enregistrée (corrige les erreurs ci-dessus)")
             return
         try:
-            source = self.config_path.read_text(encoding="utf-8")
+            # `utf-8-sig` comme `load_config` : un BOM laissé par le Bloc-notes ne doit
+            # pas se retrouver au milieu du fichier réécrit.
+            source = self.config_path.read_text(encoding="utf-8-sig")
         except OSError:
             source = ""
         if not source.strip():
