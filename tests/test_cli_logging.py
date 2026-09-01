@@ -221,21 +221,24 @@ def test_main_rend_une_ligne_sur_base_en_lecture_seule(
     `sqlite3.OperationalError: attempt to write a readonly database` levé par
     `PRAGMA journal_mode=WAL` — vingt lignes de trace Python pour l'utilisateur.
     """
-    from docia.db import Database
+    import sqlite3
+
+    import docia.db
 
     dossier_journal = tmp_path / "journal"
     dossier_journal.mkdir()
     monkeypatch.setattr(cli, "_log_file", lambda _c: dossier_journal / "docia.log")
-    programme = tmp_path / "programme"
-    programme.mkdir()
-    base = programme / "docia.sqlite"
-    with Database(base):
-        pass
-    programme.chmod(0o555)
-    try:
-        code = cli.main(["--db", str(base), "status"])
-    finally:
-        programme.chmod(0o755)
+
+    # On reproduit l'erreur que SQLite lève réellement, au lieu de verrouiller un
+    # dossier : `chmod(0o555)` n'interdit rien sous Windows, qui ignore les bits
+    # POSIX sur les répertoires. Le test passait donc sous Linux et échouait sur la
+    # plateforme cible du produit — alors que ce qu'il vérifie, le garde-fou de
+    # `main()`, ne dépend pas du système de fichiers.
+    def refuse(_self: object, _path: object) -> None:
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    monkeypatch.setattr(docia.db.Database, "__init__", refuse)
+    code = cli.main(["--db", str(tmp_path / "programme" / "docia.sqlite"), "status"])
     for handler in racine_propre.handlers:
         handler.flush()
 
