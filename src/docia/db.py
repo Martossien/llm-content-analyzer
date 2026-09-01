@@ -310,6 +310,12 @@ def latest_analysis_sql(file_id: str, *, alias: str = "a", file_alias: str = "f"
        du fichier. Un fichier modifié depuis son analyse repasse `pending` avec
        `content_version + 1` : sa classification ne décrit plus rien.
 
+    La seconde condition est **dans** la sous-requête, pas après elle : « la plus
+    récente parmi celles du contenu actuel », et non « la plus récente, si par chance
+    elle porte sur le contenu actuel ». Écrite en second filtre, elle faisait
+    disparaître de toutes les vues un fichier dont une analyse valide existait mais
+    qu'une analyse plus récente portant sur une autre version masquait.
+
     Les séparer a coûté cher. La règle vivait en **cinq exemplaires** — `views`,
     `db._LATEST_JOINS` (écran Résultats, exports CSV/JSON), `db._IS_LATEST`
     (`classification_summary`, `docia status`), `db.count_analyzed_files` et
@@ -333,8 +339,8 @@ def latest_analysis_sql(file_id: str, *, alias: str = "a", file_alias: str = "f"
     """
     return (
         f"{alias}.id = (SELECT id FROM analyses WHERE file_id = {file_id}"
+        f" AND content_version = {file_alias}.content_version"
         " ORDER BY created_at DESC, id DESC LIMIT 1)"
-        f" AND {alias}.content_version = {file_alias}.content_version"
     )
 
 
