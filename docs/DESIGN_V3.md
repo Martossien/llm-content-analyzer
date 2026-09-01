@@ -175,8 +175,12 @@ plus tard » en web v4), sans logique métier dans `gui/` :
 | pied | dernière ligne du journal + journal complet dépliable |
 
 Modules : `theme.py` (palette de sévérité commune au rapport HTML, libellés FR, formats),
-`widgets.py` (KpiTile, Badge, Card, BarChart, Table, ReadOnlyText), `helpers.py` (fonctions pures
-testées : avancement, ETA, débit, titre de campagne), `service_shim.py`. Thème clair, police 13.
+`widgets.py` (KpiTile, Badge, Card, BarChart, `Table` — qui porte l'**identité** de ses lignes,
+`sort_rows` pure —, ReadOnlyText), `helpers.py` (fonctions pures testées : avancement, titre de
+campagne, mise en forme des valeurs), `lazy.py` (`LazyScreen` : le patron *jeton + campagne
+capturée + `_dirty` remis dans `apply`* que partagent Accueil, Résultats et Statistiques, testable
+sans écran), `service_shim.py` (toute **écriture** de campagne, aucun Tk), `dialogs.py` (ce qui a
+besoin de Tk *et* de la CLI : produire un document). Thème clair, police 13.
 
 ## 13. Budget de raisonnement (banc du 30/08, soir — « il ne faut pas regarder le souci de budget de thinking ? »)
 
@@ -242,6 +246,20 @@ classification n'agrège en SQL que l'axe demandé, et `overview` ne demande que
 de reconstruire chaque vue détaillée. `ANALYZE` à la fin de chaque scan donne au planificateur les
 cardinalités réelles. Sur 200 000 fichiers / 40 000 analyses : 26,5 s → 2,4 s pour l'onglet complet.
 
+**Import d'un gros CSV** (« l'intégration dure très très longtemps sur un fichier de 250 Mo ») :
+la lecture du CSV n'y était pour rien (10,6 s pour 934 028 lignes) ; tout le temps partait dans la
+maintenance des onze index secondaires de `files`, ligne à ligne. `Database.bulk_load()` relit leurs
+définitions dans `sqlite_master`, les supprime le temps du chargement, élargit `cache_size` et
+`temp_store`, puis les recrée d'un bloc (l'index UNIQUE implicite de `path_key` n'est jamais touché :
+c'est lui qui rend l'upsert immédiat). Les mises à jour « fichier inchangé » d'un rescan passent en
+`executemany`. Sur le CSV de 252 Mo : **168,5 s → 53,4 s** à l'import, 48,6 s → 41,0 s au rescan, base
+identique au bit près (hachage des lignes triées) et compteurs inchangés. Un import tué en plein vol
+laisserait la base sans index : `Database` vérifie à chaque ouverture que les index de `FILES_INDEXES`
+sont là et reconstruit ceux qui manquent (une lecture de `sqlite_master`, ~1 ms). `import_csv` accepte
+enfin un rappel `progress` (lignes lues, pourcentage estimé par les octets lus) que la CLI et la
+fenêtre affichent toutes les 2 s ou 50 000 lignes : « intégration en cours » ne reste plus muet
+pendant des minutes.
+
 **Exe Windows complet** (« attention à ne pas oublier les paquets ») : les extracteurs DocFuse
 importent leurs bibliothèques **paresseusement** (pypdf, pdfminer, pypdfium2, python-docx, python-pptx,
 openpyxl, lxml, bs4, striprtf, ftfy, oxmsg, office_oxide…) — invisibles pour PyInstaller → l'exe
@@ -277,3 +295,41 @@ par fichier, remet le fichier `pending` **sans consommer de tentative**, puis la
 passe** dans le même run avec `max_file_tokens / ratio × 0,9` (`RunReport.files_resplit`).
 Testé avec le faux serveur (`tokens_per_char` = 0,5 : segments refusés puis re-découpés, fichier
 `done`, 0 erreur).
+
+## 16. Charge : borner la mémoire, pas la campagne (31/08, premier audit réel)
+
+Le premier audit sur un vrai serveur Windows a montré un défaut de **classe**, invisible sur les
+jeux de test : plusieurs opérations chargeaient toute la campagne en mémoire Python. Profilé sur
+une campagne réaliste de **934 028 fichiers** (CSV SMBeagle de 252 Mo, base de 1,05 Go) :
+
+| opération | avant | après |
+|---|---|---|
+| `run` (sélection des fichiers à analyser) | 13,0 s — **1 721 Mo**, retenus pendant tout le run | 2,7 s — **45 Mo** |
+| `export --format xlsx` | 333 s — **11 741 Mo** | 230 s — **205 Mo** |
+| `export --format json` | 48 s — **6 935 Mo** | 45 s — **22 Mo** |
+| `export --format powerbi` | 39 s — **2 691 Mo** | 36 s — **127 Mo** |
+| `export --format csv` | 27 s — **1 329 Mo** | 26 s — **22 Mo** |
+| `plan` | 59 s — **1 069 Mo** | 47 s — **68 Mo** |
+| onglet Résultats (chargement) | 14,6 s — **1 129 Mo** | 4,1 s — **68 Mo** |
+| onglet Résultats (100 validations) | ~24 min | **1,5 s** |
+| import du CSV de 252 Mo | 168 s | **53 s** |
+| vues statistiques (200 000 fichiers) | 26,5 s | **2,4 s** |
+
+**Règle de conception qui en découle** : *toute opération de docia doit être bornée en mémoire,
+quelle que soit la taille de la campagne*. Concrètement — parcourir les curseurs SQLite en flux,
+écrire par lots (`executemany`), descendre filtres, tri et limite dans SQL, ne jamais faire
+`list(...)` sur une table entière, et matérialiser des identifiants (8 octets) plutôt que des
+lignes complètes quand seule l'itération compte. Avant de déclarer une opération « rapide », la
+profiler avec `/usr/bin/time -v` sur une campagne de cet ordre, pas sur les fixtures : le serveur
+cible a 8 à 16 Go partagés avec d'autres services, et 12 Go demandés le font tomber.
+
+Mécanismes ajoutés : `Database.bulk_load()` (index secondaires retirés le temps d'un import, avec
+marqueur en base pour qu'une seconde connexion ne les reconstruise pas au milieu), colonnes de
+dates matérialisées et indexées (schéma v6), `select_pending_ids` / `files_by_ids`, filtres SQL de
+l'onglet Résultats, classeur Excel en écriture seule (avec troncature explicite à la limite d'un
+million de lignes d'Excel, qui renvoie vers `powerbi` ou `csv`).
+
+Corollaire de robustesse traité dans le même lot : les migrations de schéma sont désormais
+**atomiques** (jouées instruction par instruction dans une vraie transaction — `executescript()`
+validait implicitement et laissait la base à moitié migrée, donc inouvrable, après une coupure),
+et leur sauvegarde préalable est horodatée et passe par l'API `sqlite3.backup`, qui inclut le WAL.

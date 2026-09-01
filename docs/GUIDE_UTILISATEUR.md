@@ -42,8 +42,18 @@ En cas d'échec, il affiche le message de Tesseract lui-même, ce qui donne la c
 (fichier de langue absent ou mis en quarantaine par l'antivirus, dossier `tessdata` inaccessible…).
 
 Un fichier **`docia.log`** est tenu à côté de `Docia.exe` : la console ne montre qu'une ligne par
-incident, le détail complet (pile d'appels) va dans ce fichier, qui tourne automatiquement
-(4 Mo × 4). C'est ce fichier qu'il faut joindre pour toute demande d'aide.
+incident, le détail complet (pile d'appels, et les messages internes que l'écran ne montre pas)
+va dans ce fichier, qui tourne automatiquement (4 Mo × 4). C'est ce fichier qu'il faut joindre
+pour toute demande d'aide.
+
+Deux précisions utiles :
+
+- **Hors exécutable empaqueté** (Doc-IA installé avec `pip`), le journal est écrit à côté du
+  fichier de configuration désigné par `--config`, et non à côté de l'exe — qui n'existe pas.
+- Si `docia.log` est **déjà ouvert par une autre instance** (la fenêtre et un `Docia.exe scan` en
+  parallèle, deux sessions RDS…), Doc-IA écrit dans `docia-<numéro de processus>.log` au même
+  endroit. Et si la rotation devient impossible pour la même raison, elle est simplement
+  abandonnée — le journal continue de grossir plutôt que de s'arrêter d'écrire.
 
 ![Accueil — parcours en quatre étapes](images/01_accueil.png)
 
@@ -63,6 +73,10 @@ Puis, carte **1 · Source**, deux possibilités :
   mode standard : le scan passe par Windows, avec le compte de la session — il doit **lire** le
   partage. La progression s'affiche (fichiers vus) ; on peut **Arrêter** — ce qui a été vu est
   conservé. (Le mode « nom du serveur SMB » existe mais n'est pas utilisé pour l'audit.)
+  Le chemin doit être **complet** : `D:\dossier`, `P:\`, `\\serveur\partage`. Un chemin
+  relatif est refusé avec un message clair — il serait sinon cherché ailleurs que là où
+  vous croyez. Un sous-dossier dont l'accès est refusé est signalé et ignoré : **l'audit
+  continue** sur le reste du partage.
 - **Importer un CSV SMBeagle existant** si un scan a déjà été fait ailleurs.
 
 À la fin, la ligne d'état indique combien de fichiers seront analysés et combien sont exclus
@@ -146,8 +160,15 @@ Onglet **Rapports** : **Rapport HTML** (un seul fichier, pour la direction), **M
 Excel** (un onglet par vue), **Dossier Power BI** (CSV au schéma stable pour Power BI Report
 Server), **CSV** et **JSON**. « Ouvrir le dernier document » l'affiche aussitôt.
 
+Sur un très grand partage, un mot sur le classeur Excel : **Excel n'accepte pas plus d'un million
+de lignes par onglet**. Au-delà, l'onglet « Fichiers » est tronqué et le dit — une ligne
+d'avertissement en fin de tableau, et le même message au journal — en renvoyant vers **Dossier
+Power BI** ou **CSV des fichiers**, qui n'ont pas cette limite. Les autres onglets (doublons,
+sensibles, conservation…) ne sont pas concernés.
+
 À droite, **Sauvegarde de la base** : sauvegarder maintenant, restaurer une sauvegarde. Une
-sauvegarde est faite automatiquement avant toute réanalyse complète.
+sauvegarde est faite automatiquement avant toute réanalyse complète — et avant toute migration du
+schéma, sous un nom horodaté qui n'écrase jamais une sauvegarde précédente.
 
 ![Rapports et sauvegarde](images/06_rapports.png)
 
@@ -202,6 +223,37 @@ pratique pour vérifier un document avant de le déposer.
 
 ![Serveur & performances](images/07_serveur.png)
 
+### Où est le texte des documents — à lire avant le premier audit
+
+Pour interroger l'IA, Doc-IA écrit sur le disque du poste des fichiers de travail appelés
+**blocs**. Un bloc est un fichier `.md` qui contient le **texte intégral** des documents du
+lot, en clair : le contenu d'un bulletin de paie, d'un compte rendu médical, d'un courrier
+RH ou d'un fichier de mots de passe s'y retrouve recopié tel quel, OCR compris. Ce n'est pas
+un extrait ni un résumé.
+
+- **Où** : le dossier `<nom-de-la-campagne>.blocks/`, **à côté du fichier `.sqlite`** de la
+  campagne. Si la campagne est sur un partage réseau, les blocs y sont aussi. Réglage
+  `blocks.work_dir` dans `docia.toml` pour les écrire ailleurs (un disque local, par exemple).
+- **Quoi** : un `.md` par bloc, sans chiffrement, avec les droits d'accès du dossier parent —
+  **quiconque peut lire la campagne peut lire les documents**.
+- **Combien de temps** : par défaut (`keep_blocks = true`), **indéfiniment** — rien ne les
+  efface, ni la fin de l'analyse, ni la fermeture de l'application. Ils servent à reprendre une
+  analyse interrompue sans tout réextraire, et à vérifier ce qui a réellement été soumis à l'IA
+  quand une classification surprend.
+- **Comment les supprimer** : fermer Doc-IA, puis supprimer le dossier `<campagne>.blocks/`.
+  Rien n'est perdu : les analyses sont dans le `.sqlite`. Une analyse relancée après suppression
+  réextrait simplement les fichiers concernés.
+- **Pour ne pas les garder du tout** : mettre `keep_blocks = false` dans `docia.toml`
+  (section `[blocks]`). Chaque bloc est alors effacé dès qu'il a été traité ; il ne reste que
+  ceux d'une analyse interrompue, nécessaires à la reprise.
+
+**Recommandation.** Le défaut livré est `true`, pour la reprise et le diagnostic. Sur un
+partage contenant des données de santé, des données RH ou des identifiants, mettez
+`keep_blocks = false` **et** placez `blocks.work_dir` sur un disque local chiffré : la reprise
+d'une analyse interrompue reste possible, et le partage audité ne se retrouve pas recopié en
+clair à côté de lui-même. Dans tous les cas, supprimez le dossier `.blocks/` à la clôture de
+l'audit — c'est la seule chose qui reste après coup.
+
 La description **champ par champ** de tous les réglages (interface et `docia.toml`), avec leur
 nature (envoyé par requête / local au poste / descriptif du serveur) : [`docs/REGLAGES.md`](REGLAGES.md).
 
@@ -222,13 +274,21 @@ nature (envoyé par requête / local au poste / descriptif du serveur) : [`docs/
   Si l'attente reste longue, c'est la taille de la campagne : le rapport HTML donne les mêmes
   chiffres sans rester devant l'écran.
 - *Des traces Python défilent dans la console* → il n'y a plus qu'une ligne par fichier
-  problématique ; le détail est dans `docia.log`, à côté de `Docia.exe`. Un mail ou un PDF
+  problématique ; le détail est dans `docia.log`, à côté de `Docia.exe` (voir plus haut). Un mail ou un PDF
   illisible n'interrompt jamais l'analyse : le fichier est marqué en erreur, les autres passent.
 - *« Mesurer la vitesse de la LLM » répond « aucun bloc exploitable »* → le message du serveur est
   affiché juste en dessous (contexte dépassé, modèle inconnu, clé refusée…) ; c'est lui qui donne
   la cause. **Tester la connexion** d'abord.
 - *`SMBeagle.exe` lancé à la main refuse un dossier* → un chemin contenant une espace doit être
   entre guillemets : `--local-path "D:\mes fichiers"`, et **sans antislash final** (`"D:\dossier\"`
-  ne ferme pas les guillemets sous Windows). Depuis la version 4.2.1, le scanner refuse
-  explicitement (code 2) au lieu de scanner le mauvais dossier. Depuis l'interface, le problème
-  ne se pose pas : le chemin est transmis tel quel.
+  ne ferme pas les guillemets sous Windows). Le scanner refuse désormais explicitement (code 2)
+  tout chemin qui n'est pas complet, au lieu de scanner silencieusement le mauvais dossier —
+  c'est le piège le plus courant, car un fragment comme `Documents` existe souvent dans le
+  dossier depuis lequel on lance la commande. Ce refus explicite est postérieur à la release
+  **v4.2.0** du scanner : avec ce binaire-là, le mauvais dossier est encore scanné en silence —
+  prenez le `SMBeagle.exe` du dernier commit de `main` (voir README, installation). Pour scanner
+  plusieurs dossiers, les valeurs se suivent : `--local-path "D:\un" "E:\deux"`. Depuis
+  l'interface, rien de tout cela ne se pose.
+- *Un mail `.msg` ressort vide ou en erreur* → les mails français dont l'encodage est mal
+  déclaré (le cas le plus répandu) sont lus correctement depuis la version de septembre 2026 ;
+  mettez `Docia.exe` à jour. Un mail vraiment illisible n'interrompt jamais l'analyse.

@@ -11,7 +11,7 @@ from html import escape
 
 from docia import views
 from docia.db import Database
-from docia.report.data import ReportData, collect
+from docia.report.data import ReportData, collect, listing_of
 
 _SECURITY_COLORS: dict[str, str] = {
     "C0": "#9aa5b1",
@@ -193,6 +193,35 @@ def _badge(value: str, colors: dict[str, str]) -> str:
     return f'<span class="badge" style="background:{colors.get(value, "#9aa5b1")}">{_esc(value)}</span>'
 
 
+def _cut(data: ReportData, name: str, shown: int) -> str:
+    """Note « ce tableau est coupé », ou rien du tout s'il ne l'est pas.
+
+    Un rapport de direction a le droit d'être court ; il n'a pas le droit
+    d'annoncer « 182 346 fichiers, 7,5 To libérables » puis d'en montrer
+    cinquante sans le dire.
+    """
+    hidden = data.hidden(name, shown)
+    if not hidden:
+        return ""
+    total = shown + hidden
+    return (
+        f'<p class="note">Les {_n(shown)} premières lignes sur {_n(total)} — '
+        f"les {_n(hidden)} autres sont dans {_esc(listing_of(name))}.</p>"
+    )
+
+
+def _undetermined_note(plan: views.RetentionPlan) -> str:
+    """Fichiers « à conserver » dont le modèle n'a pas donné de durée."""
+    if not plan.undetermined_files:
+        return ""
+    return (
+        f'<p class="note">{_n(plan.undetermined_files)} fichier(s) sont déclarés à conserver '
+        "<strong>sans durée</strong> (0 an) : la réponse du modèle est incohérente, aucune fin "
+        "de conservation n'est calculée et ces fichiers ne sont <strong>jamais</strong> comptés "
+        "comme échus. À trancher par un humain.</p>"
+    )
+
+
 # ----------------------------------------------------------------- sections
 
 
@@ -314,6 +343,7 @@ def _section_hygiene(data: ReportData) -> str:
                 dup_rows,
                 empty="Aucun doublon détecté.",
             ),
+            _cut(data, "duplicates", len(dup.families)),
             "<h3>2.2 Ancienneté</h3>",
             '<p class="note">Fichiers dont la date de dernier accès (ou de dernière '
             "modification) est antérieure au seuil.</p>",
@@ -352,6 +382,7 @@ def _section_hygiene(data: ReportData) -> str:
                 ext_rows,
                 empty="Aucun fichier.",
             ),
+            _cut(data, "extensions", len(data.extensions)),
             "<h3>2.5 Propriétaires</h3>",
             _bars([(g.label, g.bytes, _b(g.bytes)) for g in data.owners[:12]], color="#7d6b91"),
             _table(
@@ -359,6 +390,7 @@ def _section_hygiene(data: ReportData) -> str:
                 owner_rows,
                 empty="Aucun fichier.",
             ),
+            _cut(data, "owners", len(data.owners)),
             "<h3>2.6 Partages</h3>",
             _table(
                 [("Partage", False), ("Fichiers", True), ("Volume", True), ("% volume", True)],
@@ -377,6 +409,7 @@ def _section_hygiene(data: ReportData) -> str:
                 dir_rows,
                 empty="Aucun répertoire.",
             ),
+            _cut(data, "directories", len(data.directories)),
             "</section>",
         ]
     )
@@ -416,7 +449,7 @@ def _section_risque(data: ReportData) -> str:
         [
             _esc(r.end_date.strftime("%d/%m/%Y") if r.end_date else "—"),
             _esc(views.RETENTION_BASIS_LABELS.get(r.basis, r.basis)),
-            _n(r.years),
+            _esc(views.RETENTION_UNDETERMINED) if r.undetermined else _n(r.years),
             f'<span class="path">{_esc(r.path)}</span>',
             _esc(r.owner),
             _b(r.size_bytes),
@@ -446,6 +479,7 @@ def _section_risque(data: ReportData) -> str:
             "<h3>3.2 Classification par propriétaire</h3>",
             _stacked(data.by_owner, _SECURITY_COLORS, views.SECURITY_CLASSES),
             _table(sec_headers, owner_rows, empty="Aucune analyse."),
+            _cut(data, "by_owner", len(data.by_owner)),
             "<h3>3.3 Répartition RGPD par partage</h3>",
             _legend(_RGPD_COLORS, views.RGPD_LEVELS),
             _stacked(data.by_share, _RGPD_COLORS, views.RGPD_LEVELS, domain="rgpd"),
@@ -466,10 +500,12 @@ def _section_risque(data: ReportData) -> str:
                 top_rows,
                 empty="Aucun fichier sensible identifié.",
             ),
+            _cut(data, "sensitive", len(data.sensitive)),
             "<h3>3.5 Plan de conservation</h3>",
             f'<p class="note">{_n(plan.total_files)} fichier(s) à conserver '
             f"({_esc(_b(plan.total_bytes))}), dont {_n(plan.expired_files)} dont la durée est "
             "échue. La date de fin vaut « dernière écriture + durée ».</p>",
+            _undetermined_note(plan),
             _table(
                 [("Fondement", False), ("Fichiers", True), ("Volume", True)],
                 basis_rows,
@@ -488,6 +524,7 @@ def _section_risque(data: ReportData) -> str:
                 plan_rows,
                 empty="Aucun fichier à conserver.",
             ),
+            _cut(data, "retention", len(plan.rows)),
             "<h3>3.6 Candidats au nettoyage</h3>",
             f'<p class="note">Fichiers sans obligation de conservation, classés C0 ou C1, '
             f"non accédés depuis {cleanup.years} ans (avant le "
@@ -504,6 +541,7 @@ def _section_risque(data: ReportData) -> str:
                 cleanup_rows,
                 empty="Aucun candidat.",
             ),
+            _cut(data, "cleanup", len(cleanup.rows)),
             "</section>",
         ]
     )
@@ -544,6 +582,7 @@ def _section_verification(data: ReportData) -> str:
                 gap_rows,
                 empty="Aucun écart : aucune classe corrigée ne diffère de la classe rendue.",
             ),
+            _cut(data, "discrepancies", len(r.discrepancies)),
             "</section>",
         ]
     )

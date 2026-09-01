@@ -122,6 +122,7 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
     """`docia scan` : scanner → import → préparation, progression sur stderr."""
     from docia import service
     from docia.db import Database
+    from docia.filter import plan_progress_logger
     from docia.scan import ScanProfile
 
     profile = ScanProfile(
@@ -151,6 +152,10 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
                 csv_out=args.csv,
                 on_event=on_event,
                 on_line=None if args.json else lambda line: print(line, file=sys.stderr),
+                on_import_progress=service.import_progress_logger(
+                    lambda line: print(line, file=sys.stderr)
+                ),
+                on_plan_progress=plan_progress_logger(lambda line: print(line, file=sys.stderr)),
                 do_plan=not args.no_plan,
             )
     except service.ServiceError as exc:
@@ -170,11 +175,12 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
+        # Le bilan d'import est formulé une seule fois, dans `service` : il était
+        # recopié ici, dans `cli.py` et dans la fenêtre, et les trois divergeaient.
         print(
             f"scan : {result.files} fichiers en {result.elapsed_s:.0f} s → {result.csv_path}\n"
-            f"import : {report.new} nouveaux, {report.updated} modifiés, {report.unchanged} inchangés, "
-            f"{report.invalid} invalides — préparation : {plan_report.pending} à analyser, "
-            f"{plan_report.excluded} exclus"
+            f"{service.format_import_report(report)} — "
+            f"préparation : {plan_report.pending} à analyser, {plan_report.excluded} exclus"
         )
     return 0
 
@@ -235,15 +241,17 @@ def doctor_report(cfg: Config) -> dict[str, Any]:
         report["tesseract_langs"] = probe.get("available_languages", [])
         report["tesseract_lang_utilisee"] = probe.get("effective_lang", "")
         report["tessdata_prefix"] = probe.get("tessdata_prefix") or "(hérité du système)"
-        ocr_ok = bool(probe.get("ocr_ok"))
+        # Le booléen fait foi, pas la phrase : le code retour de `doctor` en dépend,
+        # et la CI Windows s'en sert. Le reformuler ne doit jamais rendre 1 en silence.
+        report["ocr_ok"] = bool(probe.get("ocr_ok"))
         report["ocr_essai"] = (
             f"ok — « {probe.get('ocr_text', '')} » relu"
-            if ocr_ok
+            if report["ocr_ok"]
             else f"ÉCHEC (code {probe.get('returncode')}) : {probe.get('stderr') or 'sans message'}"
         )
     except Exception as exc:  # noqa: BLE001
-        report["ocr"] = f"ÉCHEC : {exc}"
-        ocr_ok = False
+        report["ocr_ok"] = False
+        report["ocr"] = f"ÉCHEC : {exc} — OCR indisponible, les PDF scannés sortiront vides"
     if cfg.llm.transport == "vllm":
         try:
             import httpx
@@ -287,11 +295,11 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     else:
         for key, value in report.items():
             print(f"{key:24} {value}")
-    ok = str(report.get("ocr_essai", "")).startswith("ok") and report.get("pdfium_raster") == "ok"
+    ok = bool(report.get("ocr_ok")) and report.get("pdfium_raster") == "ok"
     if not ok:
+        detail = report.get("ocr_essai") or report.get("ocr") or "OCR indisponible"
         print(
-            "doctor : OCR indisponible ou en échec — les PDF scannés sortiront vides "
-            "(voir « ocr_essai » ci-dessus : c'est le message de Tesseract lui-même)",
+            f"doctor : les PDF scannés sortiront vides — {detail}",
             file=sys.stderr,
         )
     return 0 if ok else 1

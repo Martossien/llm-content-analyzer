@@ -1,13 +1,17 @@
 """Pont entre la fenêtre et la couche service (`docia.service`).
 
-La fenêtre n'appelle jamais `db`/`pipeline` directement pour les opérations de
-campagne : elle passe par `GuiService`, qui délègue à `docia.service` — la même
-couche que la CLI et, demain, le serveur web distant (v4). Ici : uniquement la
-mise en forme des messages pour le journal.
+Toute **écriture** de campagne (import, préparation, run, réanalyse, sauvegarde,
+vérification humaine) passe par `GuiService`, qui délègue à `docia.service` — la même
+couche que la CLI et, demain, le serveur web distant (v4). Ici : uniquement la mise en
+forme des messages pour le journal.
+
+Ce module ne connaît **rien** de Tk : pas de `filedialog`, pas de `webbrowser`, pas
+d'appel à la CLI. Ce qui demande une fenêtre vit dans `docia.gui.dialogs`.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -36,63 +40,6 @@ def list_backups(db_path: Path) -> list[Path]:
     return service.list_backups(db_path)
 
 
-def produce_document(
-    app: Any,
-    fmt: str,
-    kind: str,
-    *,
-    on_done: Callable[[Path], None] | None = None,
-) -> None:
-    """Demande l'emplacement, produit le document, puis **ouvre le rapport HTML**.
-
-    Partagé par l'onglet Rapports et par le bouton « Rapport HTML… » des Statistiques :
-    un bouton qui promet un document doit produire ce document, pas seulement changer
-    d'onglet. Le chemin complet est écrit au journal — c'est la réponse à « où est le
-    fichier ? ».
-    """
-    from tkinter import filedialog
-
-    if not app.db_path().exists():
-        app.log("aucune campagne ouverte")
-        return
-    stem = app.db_path().stem
-    if fmt == "powerbi":
-        chosen = filedialog.askdirectory(title="Dossier de sortie Power BI")
-    else:
-        chosen = filedialog.asksaveasfilename(
-            title=f"Enregistrer le document {fmt.upper()}",
-            defaultextension=f".{fmt}",
-            initialfile=f"{stem}-rapport.{fmt}",
-            filetypes=[(fmt.upper(), f"*.{fmt}")],
-        )
-    if not chosen:
-        return
-    out = Path(chosen)
-    db_path = str(app.db_path())
-
-    def work() -> None:
-        from docia.cli import main as cli_main
-
-        try:
-            code = cli_main(["--db", db_path, kind, "--format", fmt, "--out", str(out)])
-        except SystemExit as exc:  # `_load` sort par SystemExit sur une config invalide
-            app.log(f"{fmt} : configuration refusée ({exc.code})")
-            return
-        if code != 0:
-            app.log(f"{fmt} : échec de la production du document")
-            return
-        app.log(f"document {fmt} écrit : {out}")
-        if fmt == "html":
-            import webbrowser
-
-            webbrowser.open(out.as_uri())
-            app.log("le rapport s'ouvre dans le navigateur")
-        if on_done is not None:
-            app.ui(lambda: on_done(out))
-
-    app.run_in_thread(work, f"document {fmt}")
-
-
 class GuiService:
     """Opérations de campagne exposées à la fenêtre, indépendantes de Tk."""
 
@@ -101,18 +48,34 @@ class GuiService:
 
     # ---- import / plan / run
     def import_scan(self, csv_path: Path, *, strict: bool, log: Log) -> None:
+        """Importe un CSV et rend compte de l'avancement au journal.
+
+        Un CSV de 250 Mo demande une minute et plus : sans les lignes
+        d'avancement, la fenêtre reste muette et l'utilisateur croit à un blocage.
+        `import_progress_logger` espace ces lignes (2 s ou 50 000 lignes).
+        """
         with self._open_db() as db:
-            rep = service.import_scan(db, csv_path, strict=strict)
-        log(
-            f"import : {rep.total} lignes — {rep.new} nouveaux, {rep.updated} modifiés, "
-            f"{rep.unchanged} inchangés, {rep.invalid} invalides"
-        )
+            rep = service.import_scan(
+                db, csv_path, strict=strict, progress=service.import_progress_logger(log)
+            )
+        # Le bilan d'import est formulé une seule fois, dans `service` : la CLI, `scan`
+        # et la fenêtre l'écrivaient chacun de leur côté, et les trois divergeaient.
+        log(service.format_import_report(rep))
         for err in rep.errors[:5]:
             log(f"   ligne {err.line_number} : {err.reason}")
 
     def plan(self, cfg: Config, log: Log) -> None:
+        """Prépare la campagne et rend compte de l'avancement au journal.
+
+        Une préparation d'un million de fichiers dure une minute : sans les
+        lignes d'avancement, la fenêtre reste muette et l'utilisateur croit à un
+        blocage. `plan_progress_logger` les espace (2 s ou 50 000 fichiers),
+        exactement comme l'import.
+        """
+        from docia.filter import plan_progress_logger
+
         with self._open_db() as db:
-            rep = service.plan(db, cfg)
+            rep = service.plan(db, cfg, progress=plan_progress_logger(log))
         log(f"préparation : {rep.pending} fichier(s) à analyser, {rep.excluded} exclu(s)")
         for reason, n in sorted(rep.by_reason.items(), key=lambda kv: -kv[1])[:6]:
             log(f"   {n:>7}  {reason}")
@@ -152,6 +115,27 @@ class GuiService:
         rep = quick_analyze(cfg, [target], db_path=db_path, progress=log, cancel=cancel)
         for line in rep.as_lines():
             log(line)
+
+    # ---- vérification humaine (onglet Résultats)
+    def latest_analysis(self, file_id: int) -> sqlite3.Row | None:
+        """Fiche complète d'un fichier, par son identifiant — None s'il a disparu."""
+        with self._open_db() as db:
+            return next(iter(db.latest_analyses(file_id=file_id)), None)
+
+    def set_review(self, file_id: int, status: str, **kwargs: Any) -> sqlite3.Row | None:
+        """Enregistre la vérification humaine (`to_review` / `validated` / `corrected`).
+
+        Passe par ici, et non par `Database` depuis la fenêtre : c'est la seule écriture
+        que l'onglet Résultats provoque, et la doctrine « toute écriture par le service »
+        n'a de valeur que si elle n'a pas d'exception.
+
+        Rend la fiche **relue après écriture** (None si le fichier a disparu) : l'écran
+        s'en sert pour réécrire la seule ligne concernée au lieu de relire toute la
+        campagne, et il l'obtient sans rouvrir la base une seconde fois.
+        """
+        with self._open_db() as db:
+            db.set_review(file_id, status, **kwargs)
+            return next(iter(db.latest_analyses(file_id=file_id)), None)
 
     # ---- relancer
     def reanalyze(self, cfg: Config, scope: str, log: Log) -> int:

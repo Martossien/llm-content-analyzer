@@ -30,6 +30,22 @@ _REQUIRED_KEYS = ("file_ref", "resume", "security", "rgpd", "finance", "legal", 
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
+MAX_TEXT_CHARS = 4_000
+"""Plafond, en caractères, de toute chaîne rendue par le modèle (`resume`,
+justifications, parties, contextes de montants…) et de toute chaîne conservée
+dans `raw`.
+
+Le schéma JSON borne `maxItems` mais AUCUNE longueur de chaîne : xgrammar ne
+sait pas contraindre `maxLength`. Le garde-fou est donc ici, à la validation.
+Sans lui, un modèle qui part en boucle écrit des dizaines de Mo par entrée —
+`resume` ET `raw` partant tous deux en base. 4 000 caractères, c'est déjà une
+page dense : au-delà, ce n'est plus un résumé."""
+
+_TRUNCATION_MARK = " […tronqué]"
+
+_MAX_JSON_STARTS = 5
+"""Nombre de débuts d'objet essayés avant d'abandonner le décodage (borne le coût)."""
+
 
 def strip_thinking(content: str) -> str:
     """Retire un bloc de raisonnement `<think>…</think>` laissé dans la réponse
@@ -42,6 +58,79 @@ def strip_thinking(content: str) -> str:
 
 class ParseError(Exception):
     """Réponse inexploitable : JSON illisible ou sans tableau `files`."""
+
+
+def _decode_json(content: str) -> Any:
+    """Décode la valeur JSON contenue dans `content`, même mal emballée.
+
+    Décodage INCRÉMENTAL (`raw_decode`) : on s'arrête au premier document JSON
+    complet et on ignore tout ce qui suit. Sans cela, un seul caractère de trop
+    après le JSON — clôture markdown ``` ```, phrase de politesse — coûtait le
+    bloc entier (`Extra data`), soit jusqu'à 500 fichiers repartis puis mis en
+    `error`. Une réponse **tronquée**, elle, reste bien une `ParseError` : rien
+    ne s'y décode complètement.
+
+    Raises:
+        ParseError: aucun document JSON complet trouvé.
+    """
+    text = _THINK_BLOCK.sub("", content).strip()
+    decoder = json.JSONDecoder()
+
+    # Candidats : le premier caractère structurant (pour qu'une racine tableau
+    # reste diagnostiquée « objet attendu »), puis les `{` suivants — un modèle
+    # peut avoir bavardé une accolade avant le vrai JSON.
+    starts: list[int] = []
+    first = min((i for i in (text.find("{"), text.find("[")) if i >= 0), default=-1)
+    if first >= 0:
+        starts.append(first)
+        pos = text.find("{", first + 1)
+        while pos >= 0 and len(starts) < _MAX_JSON_STARTS:
+            starts.append(pos)
+            pos = text.find("{", pos + 1)
+
+    head_error: str | None = None
+    fallback: list[Any] = []  # vide = rien décodé (un `None` décodé reste distinguable)
+    for rank, start in enumerate(starts):
+        try:
+            value, _end = decoder.raw_decode(text, start)
+        except ValueError as exc:  # JSONDecodeError
+            if rank == 0:
+                head_error = str(exc)
+            continue
+        if isinstance(value, dict) and isinstance(value.get("files"), list):
+            return value
+        if not fallback:
+            fallback.append(value)
+
+    if head_error is not None:
+        # Le document commencé au premier `{` ne se referme pas : réponse coupée
+        # en plein vol. Ce qu'on a pu décoder plus loin n'est qu'un fragment.
+        raise ParseError(f"réponse JSON illisible : {head_error}")
+    if fallback:
+        return fallback[0]
+    raise ParseError("réponse JSON illisible : aucun objet JSON trouvé dans la réponse")
+
+
+def _clip(text: str) -> str:
+    """Tronque proprement une chaîne rendue par le modèle à `MAX_TEXT_CHARS`."""
+    if len(text) <= MAX_TEXT_CHARS:
+        return text
+    return text[: MAX_TEXT_CHARS - len(_TRUNCATION_MARK)] + _TRUNCATION_MARK
+
+
+def _clip_deep(value: Any, depth: int = 0) -> Any:
+    """Applique `_clip` à toutes les chaînes d'une structure (clés comprises).
+
+    Sert à borner `raw`, qui part en base tel quel."""
+    if isinstance(value, str):
+        return _clip(value)
+    if depth >= 6:
+        return value
+    if isinstance(value, dict):
+        return {_clip(str(k)): _clip_deep(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clip_deep(item, depth + 1) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -70,21 +159,45 @@ def _basename(ref: str) -> str:
     return _normalize(ref).rsplit("/", 1)[-1]
 
 
+_PART_SUFFIX = re.compile(r"\s*\[partie\s*\d+\s*/\s*\d+\]\s*$", re.IGNORECASE)
+"""Suffixe ajouté par `blocks.builder._segment_blocks` au `file_ref` d'un segment."""
+
+
+def _bare(ref: str) -> str:
+    """Nom de base privé du suffixe « [partie i/K] ».
+
+    Le `file_ref` d'un segment PORTE ce suffixe : ni la comparaison exacte, ni la
+    normalisée, ni le nom de base ne rattrapent une référence nue. Or les modèles
+    raccourcissent spontanément les chemins ornés, et un segment perdu suffisait à
+    mettre tout un gros fichier en erreur.
+
+    Le suffixe est retiré AVANT de découper sur « / » : il en contient un
+    (« [partie 2/7] »), et `_basename` seul rendrait « 7] »."""
+    return _basename(_PART_SUFFIX.sub("", _normalize(ref)))
+
+
 class _Index:
-    """Trois niveaux de correspondance : exact, normalisé, nom de base unique."""
+    """Quatre niveaux : exact, normalisé, nom de base unique, nom de base sans
+    suffixe de segment (unique lui aussi)."""
 
     def __init__(self, files: Sequence[BlockFile]) -> None:
         self._exact: dict[str, BlockFile] = {}
         self._normalized: dict[str, BlockFile] = {}
         base_counts: dict[str, int] = {}
         base_first: dict[str, BlockFile] = {}
+        bare_counts: dict[str, int] = {}
+        bare_first: dict[str, BlockFile] = {}
         for bf in files:
             self._exact.setdefault(bf.file_ref, bf)
             self._normalized.setdefault(_normalize(bf.file_ref), bf)
             base = _basename(bf.file_ref)
             base_counts[base] = base_counts.get(base, 0) + 1
             base_first.setdefault(base, bf)
+            bare = _bare(bf.file_ref)
+            bare_counts[bare] = bare_counts.get(bare, 0) + 1
+            bare_first.setdefault(bare, bf)
         self._basenames = {b: bf for b, bf in base_first.items() if base_counts[b] == 1}
+        self._bare = {b: bf for b, bf in bare_first.items() if bare_counts[b] == 1 and b}
 
     def match(self, ref: str) -> BlockFile | None:
         found = self._exact.get(ref)
@@ -93,7 +206,10 @@ class _Index:
         found = self._normalized.get(_normalize(ref))
         if found is not None:
             return found
-        return self._basenames.get(_basename(ref))
+        found = self._basenames.get(_basename(ref))
+        if found is not None:
+            return found
+        return self._bare.get(_bare(ref))
 
 
 # -- validation d'une entrée --------------------------------------------
@@ -159,6 +275,8 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
     resume = entry["resume"]
     if not isinstance(resume, str):
         return None, "`resume` doit être une chaîne"
+    file_ref = _clip(file_ref)
+    resume = _clip(resume)
 
     domains: dict[str, DomainAnalysis] = {}
     specs = (
@@ -213,7 +331,11 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
             if not isinstance(justification, str):
                 return None, "`retention.justification` doit être une chaîne"
             details = {"required": required, "years": years, "justification": justification}
-        domains[key] = DomainAnalysis(label=label, confidence=confidence, details=details)
+        # `_clip_deep` : justifications, types de données, parties et contextes de
+        # montants partent aussi en base — aucun n'a de longueur bornée par le schéma.
+        domains[key] = DomainAnalysis(
+            label=label, confidence=confidence, details=_clip_deep(details)
+        )
 
     return (
         FileAnalysis(
@@ -223,7 +345,7 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
             rgpd=domains["rgpd"],
             finance=domains["finance"],
             legal=domains["legal"],
-            raw=dict(entry),
+            raw=_clip_deep(dict(entry)),
             retention=domains["retention"],
         ),
         "",
@@ -239,16 +361,18 @@ def parse_block_response(content: str, files: Sequence[BlockFile]) -> ParsedBloc
     Raises:
         ParseError: JSON illisible, racine non-objet ou clé `files` absente/non liste.
     """
-    try:
-        data = json.loads(strip_thinking(content))
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise ParseError(f"réponse JSON illisible : {exc}") from exc
+    if not isinstance(content, str):
+        raise ParseError("réponse JSON illisible : contenu non textuel")
+    data = _decode_json(content)
     if not isinstance(data, dict):
         raise ParseError("racine JSON : objet attendu")
     entries = data.get("files")
     if not isinstance(entries, list):
         raise ParseError("clé `files` absente ou non liste")
 
+    # Un bloc à un seul fichier et une réponse à une seule entrée : la référence,
+    # même raccourcie ou inventée, ne peut désigner que ce fichier-là.
+    unambiguous = files[0] if len(files) == 1 and len(entries) == 1 else None
     index = _Index(files)
     analyses: dict[int, FileAnalysis] = {}
     unknown_refs: list[str] = []
@@ -265,6 +389,13 @@ def parse_block_response(content: str, files: Sequence[BlockFile]) -> ParsedBloc
             invalid.append((ref_label, reason))
             continue
         target = index.match(analysis.file_ref)
+        if target is None and unambiguous is not None:
+            logger.warning(
+                "bloc à un seul fichier : référence « %s » attribuée à « %s »",
+                analysis.file_ref,
+                unambiguous.file_ref,
+            )
+            target = unambiguous
         if target is None:
             unknown_refs.append(analysis.file_ref)
             continue

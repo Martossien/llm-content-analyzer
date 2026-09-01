@@ -79,15 +79,38 @@ def _identity() -> tuple[str, str]:
     return user, host
 
 
-def iter_local_files(paths: Iterable[Path]) -> Iterator[Path]:
+def _walk_files(root: Path, on_error: Callable[[OSError], None] | None) -> list[Path]:
+    """Fichiers d'un dossier, en profondeur, **sans avaler les dossiers refusés**.
+
+    `Path.rglob` ignore silencieusement une `PermissionError` : sur un partage
+    cloisonné (`\\\\srv\\partage\\Compta` avec un compte sans droits sur un
+    sous-dossier), les fichiers concernés disparaissaient de l'audit sans être
+    ni comptés ni signalés. `os.walk(..., onerror=…)` rend la main sur chaque
+    échec d'énumération, qui part alors dans `on_error`.
+    """
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
+        dirnames.sort()
+        base = Path(dirpath)
+        found += [base / name for name in filenames if (base / name).is_file()]
+    return sorted(found)
+
+
+def iter_local_files(
+    paths: Iterable[Path], *, on_error: Callable[[OSError], None] | None = None
+) -> Iterator[Path]:
     """Fichiers désignés : un fichier tel quel, un dossier parcouru récursivement.
 
     Les doublons (même chemin donné deux fois, ou fichier contenu dans un dossier
     également listé) ne sortent qu'une fois.
+
+    Args:
+        on_error: Rappel reçu pour chaque dossier dont l'énumération échoue
+            (permissions, montage cassé) — `exc.filename` porte le dossier.
     """
     seen: set[str] = set()
     for raw in paths:
-        candidates = sorted(p for p in raw.rglob("*") if p.is_file()) if raw.is_dir() else [raw]
+        candidates = _walk_files(raw, on_error) if raw.is_dir() else [raw]
         for candidate in candidates:
             key = path_key(candidate)
             if key in seen:
@@ -97,16 +120,32 @@ def iter_local_files(paths: Iterable[Path]) -> Iterator[Path]:
 
 
 def csv_rows_from_paths(
-    paths: Iterable[Path], *, unreadable: list[str] | None = None
+    paths: Iterable[Path],
+    *,
+    unreadable: list[str] | None = None,
+    denied_dirs: list[str] | None = None,
 ) -> Iterator[SmbeagleRow]:
     """Rend une `SmbeagleRow` par fichier lisible (mêmes règles que `csv_from_dir.py`).
 
     Args:
         paths: Fichiers ou dossiers (parcourus récursivement).
         unreadable: Liste alimentée avec les chemins illisibles (comptés, ignorés).
+        denied_dirs: Liste alimentée avec les dossiers dont l'énumération est
+            refusée. Pour un outil d'audit, « manquant sans le dire » est la pire
+            des sorties : ces dossiers sont comptés et affichés (`as_lines`).
+            À défaut, ils retombent dans `unreadable` — aucun appelant ne doit
+            pouvoir les perdre par simple omission d'un argument.
     """
+
+    def dir_failed(exc: OSError) -> None:
+        target = str(exc.filename or exc)
+        logger.warning("quick : dossier illisible ignoré (%s) : %s", type(exc).__name__, target)
+        sink = denied_dirs if denied_dirs is not None else unreadable
+        if sink is not None:
+            sink.append(target)
+
     user, host = _identity()
-    for path in iter_local_files(paths):
+    for path in iter_local_files(paths, on_error=dir_failed):
         try:
             stat = path.stat()
             digest = fast_hash(path)
@@ -170,6 +209,10 @@ class QuickReport:
     excluded: int = 0
     errors: int = 0
     unreadable: int = 0
+    denied_dirs: int = 0
+    """Dossiers dont l'énumération a été refusée : leur contenu n'a **pas** été
+    audité. Compté et affiché à part — un audit de conformité qui saute un dossier
+    sans le dire ment sur son périmètre."""
     duration_s: float = 0.0
     db_path: str = ""
     kept_db: bool = False
@@ -182,6 +225,15 @@ class QuickReport:
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
 
+    def _denied_lines(self) -> list[str]:
+        """L'avertissement sur les dossiers refusés, ou rien s'il n'y en a pas."""
+        if not self.denied_dirs:
+            return []
+        return [
+            f"ATTENTION : {self.denied_dirs} dossier(s) refusé(s) (permissions) — "
+            "leur contenu n'a pas été analysé"
+        ]
+
     def as_lines(self) -> list[str]:
         """Tableau texte lisible (≤ 120 colonnes)."""
         if not self.ok:
@@ -190,7 +242,8 @@ class QuickReport:
             return [
                 f"extraction seule (sans LLM) : {self.requested} fichier(s) demandés, "
                 f"{self.blocks_built} bloc(s) construits, {self.extraction_errors} en erreur, "
-                f"{self.excluded} exclus — {self.duration_s:.1f} s"
+                f"{self.excluded} exclus — {self.duration_s:.1f} s",
+                *self._denied_lines(),
             ]
         header = _row(("fichier", "sécu", "RGPD", "finance", "juridique", "conserv.", "résumé"))
         lines = [header, "-" * min(SUMMARY_WIDTH, len(header))]
@@ -215,6 +268,7 @@ class QuickReport:
             f"{self.requested} fichier(s) : {self.analyzed} analysé(s), {self.excluded} exclu(s), "
             f"{self.errors} en erreur, {self.unreadable} illisible(s) — {self.duration_s:.1f} s"
         )
+        lines.extend(self._denied_lines())
         if self.kept_db:
             lines.append(f"base conservée : {self.db_path}")
         lines.extend(f"  erreur : {error}" for error in self.llm_errors[:5])
@@ -279,13 +333,20 @@ def quick_analyze(
         return failed("chemin introuvable : " + ", ".join(missing[:5]))
 
     unreadable: list[str] = []
-    rows = list(csv_rows_from_paths([p.resolve() for p in paths], unreadable=unreadable))
+    denied: list[str] = []
+    rows = list(
+        csv_rows_from_paths([p.resolve() for p in paths], unreadable=unreadable, denied_dirs=denied)
+    )
     report.unreadable = len(unreadable)
+    report.denied_dirs = len(denied)
     report.requested = len(rows)
+    if denied:
+        say(f"{len(denied)} dossier(s) refusé(s) : {', '.join(denied[:3])}")
     if not rows:
         return failed(
-            f"aucun fichier lisible ({len(unreadable)} illisible(s))"
-            if unreadable
+            f"aucun fichier lisible ({len(unreadable)} illisible(s), "
+            f"{len(denied)} dossier(s) refusé(s))"
+            if unreadable or denied
             else "aucun fichier à analyser"
         )
     say(f"{len(rows)} fichier(s) repéré(s)")

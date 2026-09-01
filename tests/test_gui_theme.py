@@ -9,11 +9,9 @@ import pytest
 from docia.gui import service_shim
 from docia.gui.helpers import (
     campaign_title,
-    eta_seconds,
     pretty_amounts,
     pretty_list,
     progress_fraction,
-    rate_per_hour,
 )
 from docia.gui.theme import (
     folder_of,
@@ -55,13 +53,11 @@ def test_formats() -> None:
     assert format_int(1234567) == "1 234 567"
 
 
-def test_progress_fraction_and_eta() -> None:
+def test_progress_fraction() -> None:
     counts = {"pending": 50, "queued": 0, "done": 40, "error": 10}
     assert progress_fraction(counts) == pytest.approx(0.5)
     assert progress_fraction({}) == 0.0
-    assert eta_seconds(done_delta=10, elapsed_s=100.0, remaining=20) == pytest.approx(200.0)
-    assert eta_seconds(0, 100.0, 20) is None
-    assert rate_per_hour(10, 3600.0) == pytest.approx(10.0)
+    assert progress_fraction({"done": 3}) == 1.0
 
 
 def test_campaign_title() -> None:

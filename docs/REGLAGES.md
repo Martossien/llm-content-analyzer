@@ -44,10 +44,11 @@ n'a rien à changer ; l'administrateur règle une fois l'adresse, le modèle et 
 | `block_tokens` (Tokens par bloc) | 32 000 | local | taille visée d'un bloc multi-fichiers : moins de requêtes vs échecs isolés (16–64 K raisonnable) — `blocks/builder.py` |
 | `margin` | 0.15 | local | marge ajoutée à l'estimation de tokens avant de remplir un bloc |
 | `tokenizer_engine` (Comptage des tokens) | `openai` | local | moteur d'**estimation** : `openai` (o200k, précis, embarqué), `mistral`, `approx` (octets/4, sous-estime Qwen de ~30 %) ; le comptage **exact** est de toute façon fait par le serveur avant envoi |
-| `batch_files` (Fichiers par lot DocFuse) | 200 | local | rythme de l'extraction : fichiers passés à DocFuse par appel |
+| `batch_files` (Fichiers par lot DocFuse) | 200 | local | rythme de l'extraction : fichiers passés à DocFuse par appel — **ne borne pas la mémoire** |
+| `batch_bytes` (Mémoire par lot DocFuse) | 64 Mio | local | **plafond mémoire** : le lot se ferme dès que le cumul des tailles source dépasse ce budget, même si `batch_files` n'est pas atteint (`blocks/builder.py:split_by_bytes`). Mesure du 01/09 sur 600 Mo de fichiers : pic de 2 135 Mo sans budget, **360 Mo** avec 64 Mio, à durée identique — le pic vaut ≈ 5× le budget. Un fichier plus gros que le budget est traité **seul**, jamais écarté. `0` = aucun plafond (déconseillé). Dans l'interface, le champ est en **mégaoctets**. |
 | `work_dir` | vide | local | dossier des blocs `.md` ; vide = `<campagne>.blocks/` |
 | `max_file_tokens` | 0 (auto) | local | seuil de découpage en segments d'un fichier seul ; 0 = calculé : (contexte − réserve de réponse) × sécurité (`pipeline.segment_budget`) |
-| `keep_blocks` | vrai | local | conserve les `.md` après le run (diagnostic, reprise) |
+| `keep_blocks` | vrai | local | conserve les `.md` après le run (diagnostic, reprise). **Ces `.md` contiennent le texte intégral des documents analysés, en clair** (voir le guide, §8 « Où est le texte des documents »). `false` = chaque bloc est effacé dès qu'il est traité. |
 
 ## `[filter]` — ce qui n'est pas analysé (exclu par règle, jamais par oubli)
 

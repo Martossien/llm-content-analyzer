@@ -17,7 +17,7 @@ from docia.db import Database
 from docia.filter import plan_files
 from docia.ingest.smbeagle_csv import import_csv
 from docia.models import FileStatus
-from docia.pipeline import run_pipeline
+from docia.pipeline import RunReport, run_pipeline
 from tests.fake_openai import FakeOpenAIServer
 
 HEADER = (
@@ -336,3 +336,156 @@ def test_pipeline_clamps_to_served_context(
         assert report.files_error == 0
     assert cfg.llm.max_context_tokens == 50_000
     assert any("la valeur du serveur fait foi" in line for line in lines)
+
+
+# ----------------------------------- sélection par identifiants, lot par lot (P1)
+
+
+def _selection_en_memoire(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rétablit l'ancien chemin : toute la campagne chargée en `FileRow` d'un coup.
+
+    `run_pipeline` prend la liste rendue par `select_pending_ids`, la tranche par
+    lots et passe chaque tranche à `files_by_ids`. En rendant les `FileRow` complets
+    d'un côté et l'identité de l'autre, le pipeline se comporte **exactement** comme
+    avant la correction — c'est ce qui permet de comparer les deux rapports.
+    """
+    monkeypatch.setattr(
+        type(db),
+        "select_pending_ids",
+        lambda self, limit, *, prompt_hash, model: self.select_pending(
+            limit, prompt_hash=prompt_hash, model=model
+        ),
+    )
+    monkeypatch.setattr(type(db), "files_by_ids", lambda _self, rows: list(rows))
+
+
+def _rapport_comparable(report: RunReport) -> dict[str, object]:
+    """Le rapport, sans `run_id` (il numérote la campagne, pas le travail fait)."""
+    return {k: v for k, v in report.as_dict().items() if k != "run_id"}
+
+
+def test_le_rapport_est_identique_avec_la_selection_par_identifiants(
+    tmp_path: Path, corpus: tuple[Path, Path], fake_server, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    """P1 — deux campagnes identiques, deux chemins de sélection, un seul rapport.
+
+    Le pipeline gardait les 700 797 `FileRow` d'une campagne (1 722 Mo mesurés) du
+    début à la fin d'un run de plusieurs heures. Il ne garde plus que les
+    identifiants (28 Mo) et recharge un lot de `blocks.batch_files` à la fois. Le
+    `RunReport` — compteurs, blocs, erreurs — doit être le même au caractère près.
+    """
+    _src, csv_path = corpus
+    rapports: list[dict[str, object]] = []
+    analyses: list[list[tuple[str, str]]] = []
+    for chemin in ("memoire", "identifiants"):
+        cfg = _config(
+            tmp_path / chemin, fake_server.base_url_vllm, block_tokens=1_200, batch_files=2
+        )
+        with Database(cfg.db_path) as db:
+            import_csv(db, csv_path)
+            plan_files(db, cfg.filter)
+            with monkeypatch.context() as patch:
+                if chemin == "memoire":
+                    _selection_en_memoire(db, patch)
+                rapports.append(_rapport_comparable(run_pipeline(db, cfg)))
+            analyses.append(
+                sorted(
+                    (str(r["name"]), str(r["security_classification"] or ""))
+                    for r in db.latest_analyses()
+                )
+            )
+    assert rapports[0] == rapports[1], "le rapport a changé de contenu"
+    assert rapports[0]["files_selected"] == 6
+    assert rapports[0]["files_done"] == 6
+    assert analyses[0] == analyses[1], "les analyses écrites diffèrent"
+
+
+def test_la_reprise_apres_interruption_ne_reanalyse_rien_deux_fois(
+    tmp_path: Path, corpus: tuple[Path, Path], fake_server
+) -> None:  # type: ignore[no-untyped-def]
+    """P1 — run coupé puis relancé : mêmes fichiers repris, aucune analyse en double.
+
+    Le run **écrit** dans `files` au fil des lots, sur la connexion qui a servi à
+    sélectionner. La liste d'identifiants est un instantané : elle reste exacte quoi
+    qu'il advienne des statuts pendant le run, et la reprise ne reprend que ce qui
+    reste à faire.
+    """
+    import threading
+
+    _src, csv_path = corpus
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=1_200, batch_files=2)
+    cancel = threading.Event()
+    cancel.set()  # annulation demandée d'entrée : rien n'est construit ni envoyé
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        coupe = run_pipeline(db, cfg, cancel=cancel)
+        assert coupe.files_selected == 6, "la sélection a bien eu lieu"
+        assert (coupe.files_done, coupe.blocks_built) == (0, 0)
+        assert db.counts()["pending"] == 6, "aucun fichier perdu par l'annulation"
+
+        appels_avant = len(fake_server.requests)
+        reprise = run_pipeline(db, cfg)
+        assert (reprise.files_selected, reprise.files_done, reprise.files_error) == (6, 6, 0)
+        assert db.counts()["analyses"] == 6
+        assert len(fake_server.requests) > appels_avant
+
+        # relance à vide : plus rien à faire, aucun appel de plus, aucun doublon
+        appels = len(fake_server.requests)
+        vide = run_pipeline(db, cfg)
+        assert (vide.files_selected, vide.blocks_built) == (0, 0)
+        assert len(fake_server.requests) == appels
+        assert db.counts()["analyses"] == 6
+        envois = db.query(
+            "SELECT file_id, COUNT(*) AS n FROM block_files GROUP BY file_id HAVING n > 1"
+        )
+        assert envois == [], "un fichier a été envoyé dans deux blocs"
+
+
+def test_la_limite_borne_la_selection_et_les_lots(
+    tmp_path: Path, corpus: tuple[Path, Path], fake_server
+) -> None:  # type: ignore[no-untyped-def]
+    """P1 — `--limit` : autant de fichiers analysés que demandé, les autres attendent."""
+    _src, csv_path = corpus
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=1_200, batch_files=2)
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        attendus = db.select_pending_ids(4, prompt_hash="x", model="y")
+
+        report = run_pipeline(db, cfg, limit=4)
+        assert (report.files_selected, report.files_done) == (4, 4)
+        assert db.counts()["done"] == 4
+        assert db.counts()["pending"] == 2
+        analyses = {int(r["file_id"]) for r in db.query("SELECT file_id FROM analyses")}
+        assert analyses == set(attendus), "ce ne sont pas les 4 premiers du plan"
+
+        reste = run_pipeline(db, cfg, limit=10)
+        assert (reste.files_selected, reste.files_done) == (2, 2)
+        assert db.counts()["done"] == 6
+
+
+def test_le_pipeline_ne_charge_quun_lot_de_fichiers_a_la_fois(
+    tmp_path: Path, corpus: tuple[Path, Path], fake_server
+) -> None:  # type: ignore[no-untyped-def]
+    """P1 — la mémoire du run suit la taille d'un lot, pas celle de la campagne."""
+    _src, csv_path = corpus
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=1_200, batch_files=2)
+    tailles: list[int] = []
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        vrai = Database.files_by_ids
+
+        def espion(self: Database, ids: object) -> list[object]:
+            rows = vrai(self, ids)  # type: ignore[arg-type]
+            tailles.append(len(rows))
+            return rows  # type: ignore[return-value]
+
+        Database.files_by_ids = espion  # type: ignore[assignment,method-assign]
+        try:
+            report = run_pipeline(db, cfg)
+        finally:
+            Database.files_by_ids = vrai  # type: ignore[method-assign]
+    assert report.files_done == 6
+    assert tailles == [2, 2, 2], f"lots chargés : {tailles}"

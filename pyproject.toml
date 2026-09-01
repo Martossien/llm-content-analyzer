@@ -85,3 +85,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q --tb=short"
 asyncio_mode = "auto"
+markers = [
+    # Tests qui construisent une vraie fenêtre : ignorés sauf DOCIA_GUI_SCREEN=1.
+    # Sur le poste : DISPLAY=:1 DOCIA_GUI_SCREEN=1 python -m pytest tests/test_gui_ecran.py
+    "screen: nécessite un écran (voir tests/test_gui_ecran.py)",
+]

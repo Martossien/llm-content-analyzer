@@ -335,3 +335,144 @@ def test_oversized_file_is_split_into_complete_segments(tmp_path: Path) -> None:
         assert f"## SOURCE: gros.txt [partie {b.files[0].segment_index}/{k}]" in text
         rebuilt += text.split("---\n", 3)[-1].rsplit("\n\n---", 1)[0].lstrip("\n")
     assert rebuilt.replace("\n", "") == big.read_text(encoding="utf-8").replace("\n", "")
+
+
+# -- découpage d'un très gros fichier : coût linéaire ---------------------
+
+
+def _split_probe(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Compte les caractères réellement tokenisés par `_split_text`."""
+    from docia.blocks import builder as builder_mod
+
+    real = builder_mod.estimate_tokens
+    counted: list[int] = []
+
+    def compter(text: str, margin: float = 0.15, engine: object = None):  # type: ignore[no-untyped-def]
+        counted.append(len(text))
+        return real(text, margin, engine)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builder_mod, "estimate_tokens", compter)
+    return counted
+
+
+def test_decoupage_est_lineaire_et_complet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Le texte complet n'est tokenisé qu'une fois : le total des caractères
+    comptés reste proportionnel à la taille du texte.
+
+    L'ancienne version recomptait tout le reste à chaque tour (croissance en
+    N²) : 53 s pour 2,6 M de caractères, ≈ 15 min extrapolées pour un fichier
+    de 10 Mo, avant le moindre envoi.
+    """
+    from docia.blocks.builder import _split_text
+
+    texte = ("Paragraphe de rapport administratif, montant 12 345 €. " * 12 + "\n\n") * 2_000
+    compteur = _split_probe(monkeypatch)
+
+    pieces = _split_text(texte, 8_000, 0.15, None)
+
+    assert "".join(pieces) == texte  # aucun caractère perdu ni dupliqué
+    assert len(pieces) > 20
+    total = sum(compteur)
+    assert total <= 5 * len(texte), (
+        f"{total} caractères tokenisés pour {len(texte)} caractères de texte : "
+        "le découpage recompte le reste (coût quadratique)"
+    )
+
+
+def test_decoupage_respecte_le_budget_et_les_frontieres() -> None:
+    from docfuse.core.context_counter import estimate_tokens
+
+    from docia.blocks.builder import _split_text
+
+    texte = ("Ligne de compte rendu du service, dossier 2026-114. " * 8 + "\n\n") * 400
+    pieces = _split_text(texte, 1_000, 0.15, None)
+
+    assert "".join(pieces) == texte
+    assert len(pieces) > 1
+    for piece in pieces:
+        assert estimate_tokens(piece, 0.15, None).tokens_with_margin <= 1_000
+
+
+def test_decoupage_texte_court_rend_un_seul_morceau() -> None:
+    from docia.blocks.builder import _split_text
+
+    assert _split_text("Court texte.", 8_000, 0.15, None) == ["Court texte."]
+    assert _split_text("", 8_000, 0.15, None) == [""]
+
+
+# ------------------------------------------------- budget mémoire du lot (batch_bytes)
+def test_split_by_bytes_ferme_le_sous_lot_au_budget() -> None:
+    """Le lot se ferme au cumul des tailles, pas au nombre de fichiers."""
+    from docia.blocks.builder import split_by_bytes
+
+    entrees = [(Path(f"f{i}.txt"), 40) for i in range(5)]
+
+    assert split_by_bytes(entrees, 100) == [
+        [Path("f0.txt"), Path("f1.txt")],
+        [Path("f2.txt"), Path("f3.txt")],
+        [Path("f4.txt")],
+    ]
+    assert split_by_bytes(entrees, 0) == [[p for p, _ in entrees]], "0 = aucun plafond"
+    assert split_by_bytes([], 100) == []
+
+
+def test_split_by_bytes_garde_seul_un_fichier_plus_gros_que_le_budget() -> None:
+    """Un fichier hors budget est traité **seul**, jamais écarté."""
+    from docia.blocks.builder import split_by_bytes
+
+    entrees = [(Path("petit.txt"), 10), (Path("enorme.txt"), 10_000), (Path("autre.txt"), 10)]
+
+    assert split_by_bytes(entrees, 100) == [
+        [Path("petit.txt")],
+        [Path("enorme.txt")],
+        [Path("autre.txt")],
+    ]
+
+
+def test_batch_bytes_decoupe_le_lot_sans_perdre_un_fichier(
+    corpus: list[Path], tmp_path: Path
+) -> None:
+    """Six fichiers de 1 500 o, budget 4 000 o : plusieurs appels DocFuse, aucun oubli.
+
+    Avant `batch_bytes`, tout le lot passait dans un seul `run_analysis` : la mémoire
+    n'était bornée que par `batch_files`.
+    """
+    cfg = BlocksConfig(block_tokens=100_000, batch_bytes=4_000)
+
+    result = build_blocks(_rows(corpus), cfg, tmp_path / "blocs", batch_label="lot")
+
+    assert result.failed == []
+    places = {bf.file_id for b in result.blocks for bf in b.files}
+    assert places == {1, 2, 3, 4, 5, 6}
+    assert len(result.blocks) >= 2, "le budget doit avoir fermé au moins un sous-lot"
+    noms = sorted(b.path.name for b in result.blocks)
+    assert len(set(noms)) == len(noms), f"noms de blocs en collision : {noms}"
+    assert all(n.startswith("lots") for n in noms), noms
+    for block in result.blocks:
+        for bf in block.files:
+            assert _source_lines(block.path).count(bf.file_ref) == 1
+
+
+def test_batch_bytes_genereux_ne_change_rien(corpus: list[Path], tmp_path: Path) -> None:
+    """Lot ordinaire sous le budget : un seul sous-lot, libellés inchangés."""
+    cfg = BlocksConfig(block_tokens=100_000, batch_bytes=256 * 1024 * 1024)
+
+    result = build_blocks(_rows(corpus), cfg, tmp_path / "blocs", batch_label="lot")
+
+    assert result.failed == []
+    assert [b.path.name for b in result.blocks] == ["lot_001.md"]
+
+
+def test_fichier_plus_gros_que_le_budget_est_analyse_quand_meme(tmp_path: Path) -> None:
+    """Un fichier de 20 Ko sous un budget de 1 Ko doit ressortir dans un bloc."""
+    gros = _write(tmp_path / "partage" / "gros.txt", "omega", size=20_000)
+
+    result = build_blocks(
+        [_row(9, gros)],
+        BlocksConfig(block_tokens=100_000, batch_bytes=1_000),
+        tmp_path / "blocs",
+        batch_label="lot",
+    )
+
+    assert result.failed == []
+    assert [bf.file_id for b in result.blocks for bf in b.files] == [9]

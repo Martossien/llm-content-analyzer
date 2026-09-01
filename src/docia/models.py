@@ -75,12 +75,34 @@ class SmbeagleRow:
     owner: str
     fast_hash: str
     file_signature: str
+    size_unreadable: bool = False
+    """Vrai si `FileSize` était illisible et que `file_size` est une valeur de repli
+    (0) et non la taille réelle — le fichier serait sinon exclu « trop petit » sans
+    que personne ne sache que sa taille n'a jamais été lue. Compté par `import_csv`
+    (`ImportReport.size_defaulted`)."""
 
     @property
     def path(self) -> str:
+        """Chemin complet (`UNCDirectory` + `Name`).
+
+        Un `Name` ou un `UNCDirectory` vide ne donne pas un chemin identifiant :
+        les deux vides donnent `"\\"`, et un dossier vide donne `"\\facture.pdf"`
+        pour tous les fichiers de ce nom, quel que soit leur dossier réel. Toutes
+        ces lignes fusionneraient sur la même `path_key`, en un seul enregistrement
+        compté « inchangé ». `identity_error` les rend visibles ; `parse_line` les
+        rejette (`CsvLineError`) au lieu de les fondre en silence.
+        """
         sep = "/" if "/" in self.unc_directory and "\\" not in self.unc_directory else "\\"
         directory = self.unc_directory.rstrip("\\/")
         return f"{directory}{sep}{self.name}"
+
+    def identity_error(self) -> str:
+        """Raison pour laquelle `path` n'identifie pas un fichier, sinon `""`."""
+        if not self.name.strip():
+            return "Name vide"
+        if not self.unc_directory.strip():
+            return "UNCDirectory vide"
+        return ""
 
 
 @dataclass(frozen=True)

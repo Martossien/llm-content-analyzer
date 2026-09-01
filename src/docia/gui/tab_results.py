@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from docia.db import Database
 from docia.gui.helpers import pretty_amounts, pretty_list, result_rows_v31
+from docia.gui.lazy import LazyScreen
 from docia.gui.theme import (
     ACCENT_OK,
     FONT_FAMILY,
@@ -71,15 +73,16 @@ _LIMIT = 1000
 TAB_NAME = "Résultats"
 
 
-class ResultsTab:
+class ResultsTab(LazyScreen):
+    TAB_NAME = "Résultats"
+
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
         self.ctk = app.ctk
         self._rows: list[dict[str, str]] = []
         self._selected_id: int | None = None
-        self._dirty = True
-        self._token = 0
+        self._lazy_setup()
 
     def build(self) -> None:
         ctk, p = self.ctk, self.parent
@@ -208,80 +211,68 @@ class ResultsTab:
         return var
 
     # ---- table
-    def refresh(self) -> None:
-        """Marque la liste à recharger ; le chargement n'a lieu que si l'écran est visible."""
-        self._dirty = True
-        self.refresh_if_needed()
+    def _current_review_filter(self) -> str | None:
+        return _REVIEW_FILTERS[self.review_var.get()]
 
     def refresh_if_needed(self) -> None:
         """Recharge la liste hors du thread Tk (une grande campagne demande des secondes)."""
-        if not self._dirty or self.app.current_tab() != TAB_NAME:
+        if not self._dirty or not self.visible():
             return
-        self._dirty = False
         if not self.app.db_path().exists():
+            self._rows = []
             self.table.set_rows([])
             self.count_label.configure(text="")
             self._clear_card()
+            self._dirty = False
             return
         self.count_label.configure(text="chargement…")
-        app = self.app
         sec = _SEC_FILTERS[self.sec_var.get()]
         rgpd = _RGPD_FILTERS[self.rgpd_var.get()]
-        rev = _REVIEW_FILTERS[self.review_var.get()]
-        search = self.search_var.get().strip().lower()
-        self._token += 1
-        token = self._token
+        rev = self._current_review_filter()
+        # Transmis tel quel : c'est `LIKE` qui replie la casse, et replier ici
+        # ferait perdre les majuscules accentuées que SQLite, lui, ne replie pas.
+        search = self.search_var.get().strip() or None
 
-        def keep(r: Any) -> bool:
-            if sec is not None and (r["security_classification"] or "") != sec:
-                return False
-            if rgpd is not None and (r["rgpd_risk_level"] or "") != rgpd:
-                return False
-            if rev is not None and (r["review_status"] or "") != rev:
-                return False
-            haystack = f"{r['path']} {r['resume'] or ''} {r['owner'] or ''}".lower()
-            return not (search and search not in haystack)
+        def compute(db: Database) -> tuple[list[dict[str, str]], list[list[str]], list[str], int]:
+            """Filtres, tri et limite en SQL — l'écran ne voit plus que ses 1 000 lignes.
 
-        def compute() -> tuple[list[dict[str, str]], list[list[str]], list[str], int]:
-            with app.open_db() as db:
-                rows = list(db.latest_analyses())
-            filtered = sorted((r for r in rows if keep(r)), key=_display_order)
-            shown = result_rows_v31(filtered, limit=_LIMIT)
+            Le tri SQL est **approché** (`LOWER()` de SQLite ignore les accents) :
+            les lignes rendues, au plus `_LIMIT`, sont re-triées ici avec la clé
+            exacte `_display_order`. Le prix de ce compromis : à la frontière de la
+            millième ligne, deux noms que seul un accent sépare peuvent s'échanger.
+            Les lignes affichées, elles, sont toujours dans l'ordre exact.
+            """
+            total = db.count_latest_analyses(security=sec, rgpd=rgpd, review=rev, search=search)
+            page = sorted(
+                db.latest_analyses(
+                    security=sec,
+                    rgpd=rgpd,
+                    review=rev,
+                    search=search,
+                    limit=_LIMIT,
+                    display_order=True,
+                ),
+                key=_display_order,
+            )
+            shown = result_rows_v31(page, limit=_LIMIT)
             table_rows: list[list[str]] = []
             tags: list[str] = []
             for row in shown:
-                table_rows.append(
-                    [
-                        row["nom"],
-                        shorten_path(folder_of(row["chemin"]), 48),
-                        STATUS_LABELS.get(row["sécu"], row["sécu"]),
-                        row["rgpd"],
-                        row["finance"],
-                        row["juridique"],
-                        row["conservation"],
-                        REVIEW_LABELS.get(row["revue"], row["revue"]),
-                        row["résumé"],
-                    ]
-                )
-                sec_value = row["sécu"]
-                tags.append(
-                    sec_value
-                    if sec_value in ("C3", "C2", "C1")
-                    else ("error" if sec_value == "error" else "ok")
-                )
-            return shown, table_rows, tags, len(filtered)
+                values, tag = _row_cells(row)
+                table_rows.append(values)
+                tags.append(tag)
+            return shown, table_rows, tags, total
 
         def apply(result: tuple[list[dict[str, str]], list[list[str]], list[str], int]) -> None:
-            if token != self._token:  # une demande plus récente a été faite
-                return
             self._rows, table_rows, tags, total = result
-            self.table.set_rows(table_rows, tags)
+            # `keys` : l'identité du fichier voyage avec la ligne, donc survit à un tri.
+            self.table.set_rows(table_rows, tags, keys=[int(r["id"] or 0) for r in self._rows])
             shown = min(total, _LIMIT)
             self.count_label.configure(
                 text=f"{total} fichier(s)" + (f" — {shown} affichés" if shown < total else "")
             )
 
-        app.run_background(compute, apply, name="résultats")
+        self._start(compute, apply, name="résultats")
 
     def _clear_card(self) -> None:
         self._selected_id = None
@@ -292,13 +283,21 @@ class ResultsTab:
         self.detail_label.configure(text="")
         self.card.subtitle.configure(text="sélectionne une ligne")
 
-    def _select(self, index: int) -> None:
-        row = self._rows[index]
-        with self.app.open_db() as db:
-            rec = next(iter(db.latest_analyses(file_id=int(row["id"]))), None)
+    def _select(self, file_id: int) -> None:
+        """`file_id` vient du tableau (`keys`) : l'identité de la ligne, jamais son rang.
+
+        Interroger la base avec cette identité supprime toute indirection par une liste
+        que la fenêtre garderait de son côté — la source d'un tri qui ouvrait la fiche
+        d'un autre fichier.
+        """
+        rec = self.app.service.latest_analysis(int(file_id))
         if rec is None:
             self._clear_card()
             return
+        self._show(rec)
+
+    def _show(self, rec: Any) -> None:
+        """Remplit la fiche depuis une ligne de `latest_analyses` déjà lue."""
         self._selected_id = int(rec["id"])
         self.card.subtitle.configure(text="")
         self.path_label.configure(text=str(rec["path"]))
@@ -362,15 +361,60 @@ class ResultsTab:
             self.correct_frame.pack_forget()
 
     def _save(self, status: str, **kwargs: Any) -> None:
+        """Enregistre la vérification, puis rafraîchit **la seule ligne concernée**.
+
+        `refresh()` relisait toute la campagne après chaque clic : un relecteur qui
+        validait cent fichiers payait cent fois les 9,3 s et les 950 Mo d'une
+        campagne de 934 028 lignes. Rien d'autre n'a changé en base — seule cette
+        ligne peut avoir changé d'aspect.
+
+        Seule exception : le filtre « Vérification » est actif et la ligne vient d'en
+        sortir (ou d'y entrer). La liste et le total ne seraient plus ceux du filtre
+        affiché : là, et là seulement, on recharge.
+        """
         if self._selected_id is None:
             self.app.log("sélectionne un fichier dans le tableau")
             return
-        with self.app.open_db() as db:
-            db.set_review(
-                self._selected_id, status, reviewer=self.reviewer_var.get().strip(), **kwargs
-            )
+        rec = self.app.service.set_review(
+            self._selected_id, status, reviewer=self.reviewer_var.get().strip(), **kwargs
+        )
         self.app.log(f"vérification « {REVIEW_LABELS.get(status, status)} » enregistrée")
-        self.refresh()
+        review_filter = self._current_review_filter()
+        if rec is None or (review_filter is not None and status != review_filter):
+            self.refresh()
+            return
+        self._replace_row(rec)
+        self._show(rec)
+
+    def _replace_row(self, rec: Any) -> None:
+        """Réécrit en place la ligne du tableau qui porte l'identité `rec["id"]`.
+
+        Le tableau porte l'identité de ses lignes (`Table.keys`) : on la retrouve
+        même après un tri par en-tête, et on n'écrit que la case concernée — la
+        sélection de l'utilisateur et son tri survivent.
+        """
+        file_id = int(rec["id"])
+        rows = result_rows_v31([rec], limit=1)
+        if not rows:
+            return
+        row = rows[0]
+        for index, known in enumerate(self._rows):
+            if int(known["id"] or 0) == file_id:
+                self._rows[index] = row
+                break
+        table = self.table
+        if file_id not in table.keys:
+            return  # ligne hors de la page affichée : rien à réécrire
+        index = table.keys.index(file_id)
+        values, tag = _row_cells(row)
+        table.rows[index] = values
+        table.row_tags[index] = tag
+        # Même écrêtage que `Table._render` : le tableau ne peint jamais plus long.
+        table.tree.item(
+            str(index),
+            values=[c if len(c) <= 200 else c[:197] + "…" for c in values],
+            tags=(tag,),
+        )
 
     def _validate(self) -> None:
         self._save("validated", comment=self.comment_var.get().strip())
@@ -388,6 +432,34 @@ class ResultsTab:
 
 
 _SEVERITY_ORDER = {"C3": 0, "C2": 1, "C1": 2, "C0": 3, "N/A": 4}
+
+
+def _row_cells(row: dict[str, str]) -> tuple[list[str], str]:
+    """(cellules du tableau, couleur de la ligne) pour une ligne de `result_rows_v31`.
+
+    Une seule définition : le rechargement complet et la réécriture d'une ligne
+    après validation peignent forcément la même chose.
+    """
+    sec_value = row["sécu"]
+    tag = (
+        sec_value
+        if sec_value in ("C3", "C2", "C1")
+        else ("error" if sec_value == "error" else "ok")
+    )
+    return (
+        [
+            row["nom"],
+            shorten_path(folder_of(row["chemin"]), 48),
+            STATUS_LABELS.get(sec_value, sec_value),
+            row["rgpd"],
+            row["finance"],
+            row["juridique"],
+            row["conservation"],
+            REVIEW_LABELS.get(row["revue"], row["revue"]),
+            row["résumé"],
+        ],
+        tag,
+    )
 
 
 def _display_order(r: Any) -> tuple[int, int, str]:

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
+import os
+import re
 import sqlite3
+import sys
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,9 +39,166 @@ BACKUP_DIR_SUFFIX = ".backups"
 logger = logging.getLogger(__name__)
 
 
+class MigrationBackupError(OSError):
+    """La sauvegarde d'avant migration a échoué : la base n'est **pas** ouverte.
+
+    Migrer sans filet, c'est risquer de perdre une campagne de plusieurs heures
+    pour un disque plein. Hérite d'`OSError` : les appelants qui traitent déjà
+    les échecs d'accès au fichier de base l'attrapent sans changement.
+    """
+
+
 def backup_dir_for(db_path: Path) -> Path:
     """Dossier de sauvegardes d'une base : `<base>.backups` (à côté du fichier)."""
     return db_path.with_name(db_path.name + BACKUP_DIR_SUFFIX)
+
+
+def _stamp() -> str:
+    """Horodatage local `AAAAMMJJTHHMMSS` pour nommer une sauvegarde."""
+    return datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - nom de fichier, heure locale
+
+
+def _free_path(directory: Path, base: str, suffix: str = ".sqlite") -> Path:
+    """Chemin libre `<directory>/<base>[_n]<suffix>` : n'écrase jamais un fichier."""
+    candidate = directory / f"{base}{suffix}"
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{base}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+def _split_sql_statements(script: str) -> list[str]:
+    """Découpe un script SQL en instructions, sur les `;` **hors littéraux**.
+
+    `sqlite3.Connection.executescript` ne convient pas aux migrations : il valide
+    implicitement la transaction en cours (comportement documenté de CPython),
+    donc chaque `ALTER`/`UPDATE`/`CREATE INDEX` serait validé séparément et une
+    interruption laisserait la base à mi-chemin. Les instructions sont donc
+    jouées une à une dans une transaction explicite, ce qui suppose de savoir
+    découper : un `;` dans une chaîne (`'a;b'`), un identifiant entre guillemets
+    ou un commentaire ne sépare rien.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    closing: str | None = None  # délimiteur de fin du littéral / identifiant courant
+    comment: str | None = None  # "--" (jusqu'à la fin de ligne) ou "/*"
+    index = 0
+    size = len(script)
+    while index < size:
+        char = script[index]
+        following = script[index + 1] if index + 1 < size else ""
+        if comment == "--":
+            if char == "\n":
+                comment = None
+                current.append(char)
+            index += 1
+            continue
+        if comment == "/*":
+            if char == "*" and following == "/":
+                comment = None
+                index += 2
+                continue
+            index += 1
+            continue
+        if closing is not None:
+            current.append(char)
+            index += 1
+            if char == closing:
+                if closing != "]" and following == closing:  # '' ou "" échappé
+                    current.append(following)
+                    index += 1
+                    continue
+                closing = None
+            continue
+        if char == "-" and following == "-":
+            comment = "--"
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            comment = "/*"
+            index += 2
+            continue
+        if char in "'\"`":
+            closing = char
+        elif char == "[":
+            closing = "]"
+        elif char == ";":
+            statements.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    statements.append("".join(current))
+    return [stripped for statement in statements if (stripped := statement.strip())]
+
+
+_ANALYZE_RE = re.compile(r"^ANALYZE\b", re.IGNORECASE)
+"""`ANALYZE` reconstruit `sqlite_stat1` : hors transaction de migration (long, et
+purement statistique — le rejouer plus tard ne change aucune donnée)."""
+
+_CREATE_INDEX_RE = re.compile(r"^\s*CREATE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS\b)", re.IGNORECASE)
+
+
+def _idempotent_create_index(sql: str) -> str:
+    """Ajoute `IF NOT EXISTS` à un `CREATE INDEX` qui n'en a pas.
+
+    `sqlite_master.sql` conserve le texte d'origine **sans** le `IF NOT EXISTS` :
+    rejouer tel quel un index déjà présent lèverait `index … already exists`.
+    """
+    return _CREATE_INDEX_RE.sub("CREATE INDEX IF NOT EXISTS ", sql, count=1)
+
+
+_UNIQUE_INDEX_RE = re.compile(r"^\s*CREATE\s+UNIQUE\s+INDEX\b", re.IGNORECASE)
+"""Un index **UNIQUE** est une contrainte de données, pas une aide au planificateur."""
+
+_IF_NOT_EXISTS_RE = re.compile(r"\bIF\s+NOT\s+EXISTS\s+", re.IGNORECASE)
+
+
+def normalize_index_sql(sql: str) -> str:
+    """Forme canonique d'un `CREATE INDEX`, pour comparer deux définitions.
+
+    `sqlite_master.sql` conserve le texte d'origine moins le `IF NOT EXISTS`, avec
+    ses espaces et sa casse : comparer les chaînes brutes est impossible, comparer
+    les seuls **noms** ne prouve rien (un index déclaré sur les mauvaises colonnes
+    porte le même nom). On ramène donc les deux formes à la même chaîne : casse
+    unifiée, `IF NOT EXISTS` retiré, espaces réduits, ponctuation resserrée.
+    """
+    text = _IF_NOT_EXISTS_RE.sub("", sql.strip().rstrip(";")).lower()
+    text = re.sub(r"\s+", " ", text)
+    return re.sub(r"\s*([(),])\s*", r"\1", text)
+
+
+def _process_alive(pid: int) -> bool:
+    """Vrai si le processus `pid` tourne encore sur cette machine.
+
+    Sous Windows, `os.kill(pid, 0)` **tue** la cible (`TerminateProcess`) : le
+    test passe donc par `OpenProcess` + `GetExitCodeProcess`.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":  # pragma: no cover - branche Windows
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return int(code.value) == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - processus d'un autre utilisateur
+        return True
+    return True
 
 
 def date_key_sql(column: str) -> str:
@@ -64,8 +223,15 @@ def date_key(value: str) -> str:
     Clé comparable lexicographiquement : c'est elle qui est stockée dans
     `files.access_key` / `files.write_key` pour que les vues d'ancienneté
     s'appuient sur un index au lieu de reformater chaque ligne.
+
+    Miroir exact de `date_key_sql` — y compris sur l'octet NUL, où `length()` de
+    SQLite s'arrête alors que `len()` de Python compte tout. Sans cette
+    précaution, une base **importée** et une base **migrée** portant les mêmes
+    données n'auraient pas les mêmes clés (un CSV corrompu suffit : l'import lit
+    en `errors="replace"`), et les statistiques d'ancienneté divergeraient en
+    silence.
     """
-    if len(value) >= 10:
+    if len(value.partition("\x00")[0]) >= 10:
         if value[2] == "/" and value[5] == "/":
             return value[6:10] + value[3:5] + value[0:2]
         if value[4] == "-":
@@ -82,6 +248,59 @@ def first_access_sql(prefix: str = "") -> str:
     si cette première observation manque.
     """
     return f"COALESCE(NULLIF({prefix}access_time_first, ''), {prefix}access_time)"
+
+
+def split_sql_statements(script: str) -> list[str]:
+    """Découpe un script SQL en instructions, en respectant les littéraux `'…'`.
+
+    Sert aux migrations : elles doivent être jouées instruction par instruction
+    dans une transaction explicite, `executescript()` validant implicitement au
+    passage (donc sans aucune atomicité). Les commentaires `--` sont ignorés ;
+    un `;` à l'intérieur d'une chaîne ne coupe pas.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    in_string = False
+    in_comment = False
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+                current.append(char)
+            index += 1
+            continue
+        if in_string:
+            current.append(char)
+            if char == "'":
+                # `''` à l'intérieur d'une chaîne est un apostrophe littéral.
+                if index + 1 < len(script) and script[index + 1] == "'":
+                    current.append("'")
+                    index += 2
+                    continue
+                in_string = False
+            index += 1
+            continue
+        if char == "'":
+            in_string = True
+            current.append(char)
+        elif char == "-" and script[index : index + 2] == "--":
+            in_comment = True
+            index += 2
+            continue
+        elif char == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement)
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    last = "".join(current).strip()
+    if last:
+        statements.append(last)
+    return statements
 
 
 def _now() -> str:
@@ -325,7 +544,199 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (6, _SCHEMA_V6),
 ]
 
+FILES_INDEXES: dict[str, str] = {
+    "idx_files_fast_hash": "CREATE INDEX IF NOT EXISTS idx_files_fast_hash ON files(fast_hash)",
+    "idx_files_priority": (
+        "CREATE INDEX IF NOT EXISTS idx_files_priority ON files(priority_score DESC, path)"
+    ),
+    "idx_files_hash_size": (
+        "CREATE INDEX IF NOT EXISTS idx_files_hash_size ON files(fast_hash, size_bytes)"
+    ),
+    "idx_files_access_time": (
+        "CREATE INDEX IF NOT EXISTS idx_files_access_time ON files(access_time)"
+    ),
+    "idx_files_last_write": (
+        "CREATE INDEX IF NOT EXISTS idx_files_last_write ON files(last_write_time)"
+    ),
+    "idx_files_access_key": (
+        "CREATE INDEX IF NOT EXISTS idx_files_access_key ON files(access_key, size_bytes)"
+    ),
+    "idx_files_write_key": (
+        "CREATE INDEX IF NOT EXISTS idx_files_write_key ON files(write_key, size_bytes)"
+    ),
+    "idx_files_extension_size": (
+        "CREATE INDEX IF NOT EXISTS idx_files_extension_size ON files(extension, size_bytes)"
+    ),
+    "idx_files_owner_size": (
+        "CREATE INDEX IF NOT EXISTS idx_files_owner_size ON files(owner, size_bytes)"
+    ),
+    "idx_files_share_size": (
+        "CREATE INDEX IF NOT EXISTS idx_files_share_size ON files(base, unc_directory, size_bytes)"
+    ),
+    "idx_files_status_size": (
+        "CREATE INDEX IF NOT EXISTS idx_files_status_size ON files(status, size_bytes)"
+    ),
+}
+"""Index secondaires de `files` attendus au schéma courant, avec leur définition.
+
+Miroir de ce que produisent les migrations (v1 + v4 + v6, moins ceux que la v6
+supprime) : `tests/test_db.py` compare ce dictionnaire aux index réellement
+présents dans une base neuve, il ne peut donc pas dériver en silence. Il sert de
+filet à l'ouverture (`_ensure_files_indexes`) quand un chargement en masse
+(`bulk_load`) a été interrompu avant d'avoir recréé les index.
+"""
+
+BULK_CACHE_PAGES = -262_144
+"""Cache SQLite pendant un chargement en masse : 256 Mo (valeur négative = kio)."""
+
+BULK_LOCK_KEY = "bulk_load_owner"
+"""Clé `meta` posée par `bulk_load` : `<pid>|<horodatage ISO UTC>`, validée en base.
+
+Une seconde connexion ouverte pendant l'import (la fenêtre rafraîchit un écran
+pendant qu'on charge un CSV) voit ce marqueur et **n'écrit pas** : sans lui,
+`_ensure_files_indexes` lançait des `CREATE INDEX` — donc une écriture — pendant
+que `bulk_load` tenait le verrou, et l'import mourait sur `database is locked`
+après plusieurs minutes de travail.
+"""
+
+BULK_LOCK_TTL_S = 6 * 3_600
+"""Durée au-delà de laquelle un marqueur `bulk_load` n'est plus cru.
+
+Le marqueur est retiré par le `finally` de `bulk_load` : il ne survit qu'à un
+processus **tué**, et le test « ce pid tourne-t-il encore ? » suffit alors à
+débloquer la reconstruction dès la réouverture suivante. Ce délai n'est que le
+dernier filet contre la réutilisation d'un numéro de processus (fréquente sous
+Windows) : six heures couvrent très largement le plus long import observé
+(quelques minutes pour 934 000 fichiers) sans immobiliser les index une journée.
+"""
+
+_TOUCH_FLUSH = 1_000
+"""Mises à jour « fichier inchangé » accumulées avant un `executemany`."""
+
+_TOUCH_SQL = (
+    "UPDATE files SET last_seen_scan_id=?, access_time=?, access_key=?, updated_at=? WHERE id=?"
+)
+"""Mise à jour d'un fichier revu inchangé : il n'a été *vu*, rien de son contenu ne change."""
+
 REVIEW_STATUSES = ("to_review", "validated", "corrected")
+
+ITER_FILES_BATCH = 10_000
+"""Fichiers lus par aller-retour SQLite dans `iter_files(ordered=False)`."""
+
+APPLY_PLAN_BATCH = 5_000
+"""Décisions de plan regroupées par `executemany` dans `apply_plan`."""
+
+_PLAN_EXCLUDE_SQL = (
+    "UPDATE files SET status='excluded', exclusion_reason=?, priority_score=?, updated_at=?"
+    " WHERE id=? AND status IN ('pending','excluded','queued')"
+)
+"""Décision « exclu » : ne rétrograde jamais un fichier `done` ou `error`."""
+
+_PENDING_WHERE = """
+ WHERE f.status='pending'
+   AND NOT EXISTS (SELECT 1 FROM analyses a WHERE a.file_id=f.id
+                   AND a.content_version=f.content_version
+                   AND a.prompt_hash=? AND a.model=?)"""
+"""Critère unique de « fichier à analyser », partagé par `select_pending`,
+`select_pending_ids` et `count_pending` : trois formulations, une seule définition —
+elles ne peuvent plus diverger. Attend deux paramètres : `prompt_hash`, `model`."""
+
+_LATEST_SELECT = """SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f.host, f.status,
+       f.exclusion_reason, f.content_version, a.model, a.prompt_hash, a.resume,
+       a.security_classification, a.security_confidence, a.security_justification,
+       a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
+       a.finance_document_type, a.finance_amounts, a.finance_confidence,
+       a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at,
+       a.segments, a.retention_required, a.retention_years, a.retention_basis,
+       a.retention_justification, a.retention_confidence,
+       r.status AS review_status, r.comment AS review_comment,
+       r.corrected_security, r.corrected_rgpd, r.corrected_retention_years,
+       r.reviewer, r.updated_at AS reviewed_at, f.id AS id"""
+"""Colonnes rendues par `latest_analyses` : le fichier, sa dernière analyse, sa revue."""
+
+_REVIEWS_JOIN = " LEFT JOIN reviews r ON r.file_id = f.id"
+
+_LATEST_JOINS = (
+    " LEFT JOIN analyses a ON a.id = (SELECT id FROM analyses WHERE file_id=f.id"
+    " ORDER BY created_at DESC, id DESC LIMIT 1)" + _REVIEWS_JOIN
+)
+"""Dernière analyse d'un fichier + sa revue. La sous-requête corrélée s'appuie sur
+`idx_analyses_file_latest (file_id, created_at, id)`."""
+
+_LATEST_FROM = " FROM files f" + _LATEST_JOINS
+
+_DISPLAY_ORDER_SQL = """
+    CASE WHEN COALESCE(a.security_classification,'') <> '' THEN 0
+         WHEN f.status='error' THEN 1
+         WHEN f.status='done' THEN 2
+         ELSE 3 END,
+    CASE COALESCE(a.security_classification,'')
+         WHEN '' THEN 0 WHEN 'C3' THEN 0 WHEN 'C2' THEN 1 WHEN 'C1' THEN 2
+         WHEN 'C0' THEN 3 WHEN 'N/A' THEN 4 ELSE 5 END,
+    LOWER(f.name)"""
+"""Ordre d'affichage de l'écran Résultats, en SQL — miroir de `gui.tab_results._display_order`.
+Approché sur le dernier critère : `LOWER()` de SQLite ignore les accents (voir
+`latest_analyses`). `''` en second rang vaut 0 : un fichier sans classification est
+déjà départagé par le premier rang, comme en Python."""
+
+
+def _like_escape(text: str) -> str:
+    """Rend littéraux `%`, `_` et `\\` dans un motif `LIKE … ESCAPE '\\'`.
+
+    Sans cela, chercher « 100% » ou « fichier_1 » dans l'écran Résultats ne
+    cherchait plus une sous-chaîne mais un motif : « % » ramenait la campagne
+    entière. Le filtrage Python qu'on remplace comparait, lui, des sous-chaînes.
+    """
+    for char in ("\\", "%", "_"):
+        text = text.replace(char, "\\" + char)
+    return text
+
+
+def _needs_analysis(security: str | None, rgpd: str | None, search: str | None) -> bool:
+    """Vrai si les filtres demandés lisent la dernière analyse (jointure coûteuse)."""
+    return security is not None or rgpd is not None or bool(search)
+
+
+def _latest_filters(
+    security: str | None, rgpd: str | None, review: str | None, search: str | None
+) -> tuple[str, list[object]]:
+    """(clause `WHERE`, paramètres) des filtres de l'écran Résultats.
+
+    Chaque filtre reproduit à l'identique le test Python qu'il remplace, `None`
+    valant « pas de filtre » et `''` un filtre sur la valeur vide (« non vérifié »).
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    if security is not None:
+        clauses.append("COALESCE(a.security_classification,'') = ?")
+        params.append(security)
+    if rgpd is not None:
+        clauses.append("COALESCE(a.rgpd_risk_level,'') = ?")
+        params.append(rgpd)
+    if review is not None:
+        clauses.append("COALESCE(r.status,'') = ?")
+        params.append(review)
+    if search:
+        # Même botte de foin qu'en Python : chemin, résumé, propriétaire, séparés par
+        # une espace. `LIKE` replie déjà la casse — mais **l'ASCII seulement**, des
+        # deux côtés : le motif n'est donc pas replié en Python avant d'arriver ici,
+        # sans quoi « Étude » deviendrait « étude » et ne retrouverait plus « Étude »
+        # dans une botte de foin que SQLite, lui, n'a pas repliée.
+        clauses.append(
+            "f.path || ' ' || COALESCE(a.resume,'') || ' ' || COALESCE(f.owner,'')"
+            " LIKE ? ESCAPE '\\'"
+        )
+        params.append(f"%{_like_escape(search)}%")
+    return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+_PLAN_KEEP_SQL = (
+    "UPDATE files SET"
+    " status=CASE WHEN status IN ('excluded','queued') THEN 'pending' ELSE status END,"
+    " exclusion_reason=CASE WHEN status='excluded' THEN NULL ELSE exclusion_reason END,"
+    " priority_score=?, updated_at=? WHERE id=?"
+)
+"""Décision « à analyser » : un fichier `done` ou `error` garde son statut, son score est rafraîchi."""
 
 
 class Database:
@@ -340,7 +751,15 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._migrate()
+        try:
+            self._migrate()
+            self._ensure_files_indexes()
+        except BaseException:
+            # Ouverture refusée (sauvegarde impossible, migration interrompue) : sans
+            # ce `close`, la connexion — et son verrou WAL — survivait à l'exception
+            # sans qu'aucun objet ne la référence.
+            self._conn.close()
+            raise
 
     # ------------------------------------------------------------------ infra
     def __enter__(self) -> Database:
@@ -359,7 +778,11 @@ class Database:
             yield self._conn
             self._conn.execute("COMMIT")
         except BaseException:
-            self._conn.execute("ROLLBACK")
+            # Le `ROLLBACK` peut lui-même échouer (plus de transaction active si le
+            # corps a validé, base verrouillée…). Son échec ne doit jamais remplacer
+            # l'exception d'origine : c'est elle qui dit ce qui s'est réellement passé.
+            with suppress(sqlite3.Error):
+                self._conn.execute("ROLLBACK")
             raise
 
     def query(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
@@ -402,8 +825,17 @@ class Database:
         """Copie la base telle quelle avant d'appliquer une migration de schéma.
 
         Ne fait rien pour une base neuve (aucune table) ni pour une base déjà à
-        jour. Une copie impossible (disque plein, droits) est journalisée sans
-        interrompre l'ouverture : la migration reste possible.
+        jour. Une copie impossible (disque plein, droits) **interrompt l'ouverture**
+        (`MigrationBackupError`) : une migration change le schéma d'une campagne de
+        plusieurs heures, et le seul cas où la sauvegarde échoue — le disque plein —
+        est précisément celui où la migration a le plus de chances de casser en
+        route. Mieux vaut un message clair (« libérez de la place ») qu'une base à
+        moitié migrée sans copie de secours.
+
+        Le nom est **horodaté** et n'écrase jamais un fichier existant : une
+        migration interrompue laissait autrefois une base à moitié migrée, et
+        chaque nouvelle tentative d'ouverture — le réflexe de l'utilisateur —
+        recopiait cette base cassée par-dessus la seule sauvegarde saine.
         """
         names = {
             str(r[0])
@@ -414,18 +846,43 @@ class Database:
         current = self.schema_version if "meta" in names else 0
         if current >= SCHEMA_VERSION:
             return
-        target = (
-            backup_dir_for(self.path) / f"{self.path.stem}_avant_migration_v{SCHEMA_VERSION}.sqlite"
-        )
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        base = f"{self.path.stem}_avant_migration_v{SCHEMA_VERSION}_{stamp}"
+        target = backup_dir_for(self.path) / f"{base}.sqlite"
+        suffix = 1
+        while target.exists():  # jamais deux sauvegardes dans le même fichier
+            target = backup_dir_for(self.path) / f"{base}_{suffix}.sqlite"
+            suffix += 1
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self.path, target)
-        except OSError as exc:  # pragma: no cover - dépend du système de fichiers
-            logger.warning("sauvegarde avant migration impossible (%s) : %s", target, exc)
-            return
+            # `backup_to` passe par l'API `sqlite3.Connection.backup`, qui inclut ce
+            # qui n'est encore que dans le journal WAL. Une simple copie du fichier
+            # principal perdait tout ce qui était validé mais pas encore reporté —
+            # c'est-à-dire précisément ce qu'une sauvegarde d'avant-migration doit
+            # protéger après un arrêt brutal.
+            self.backup_to(target)
+        except (OSError, sqlite3.Error) as exc:
+            with suppress(OSError):  # copie partielle : elle ne protège rien
+                target.unlink(missing_ok=True)
+            raise MigrationBackupError(
+                f"sauvegarde avant migration impossible ({target}) : {exc}. "
+                f"La base n'a pas été migrée en v{SCHEMA_VERSION} et reste utilisable "
+                "par la version précédente : libérez de la place (ou corrigez les droits) "
+                "sur ce dossier, puis rouvrez la campagne."
+            ) from exc
         logger.info("sauvegarde avant migration v%s → %s", SCHEMA_VERSION, target)
 
     def _migrate(self) -> None:
+        """Applique les migrations manquantes, **une transaction par version**.
+
+        `executescript()` valide implicitement la transaction en cours avant de
+        s'exécuter : encadré par `transaction()`, il n'apportait donc aucune
+        atomicité. Une interruption (coupure, disque plein) laissait la base à
+        moitié migrée — colonnes créées mais `schema_version` inchangé — et la
+        réouverture rejouait la migration depuis le début : `duplicate column
+        name`, base inouvrable, définitivement. Les instructions sont désormais
+        jouées une par une dans une vraie transaction : soit la version passe en
+        entier, soit la base reste exactement dans son état d'avant.
+        """
         self._backup_before_migration()
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -434,13 +891,185 @@ class Database:
         for version, sql in _MIGRATIONS:
             if version > current:
                 with self.transaction() as conn:
-                    conn.executescript(sql)
+                    for statement in split_sql_statements(sql):
+                        conn.execute(statement)
                     conn.execute(
                         "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         (str(version),),
                     )
                 current = version
+
+    # --------------------------------------------------------- chargement en masse
+    def _files_index_names(self) -> set[str]:
+        """Noms des index présents sur `files` (index UNIQUE implicites compris)."""
+        return {
+            str(r[0])
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='files'"
+            )
+        }
+
+    def _bulk_load_owner(self) -> int | None:
+        """Pid du chargement en masse en cours, ou None (aucun, périmé, ou mort).
+
+        Le marqueur `meta[BULK_LOCK_KEY]` vaut `<pid>|<horodatage ISO>`. Il n'est
+        cru que si les deux conditions tiennent : le processus qui l'a posé tourne
+        encore **et** le marqueur a moins de `BULK_LOCK_TTL_S` (garde-fou contre un
+        numéro de processus réattribué après un arrêt brutal).
+        """
+        row = self._conn.execute("SELECT value FROM meta WHERE key=?", (BULK_LOCK_KEY,)).fetchone()
+        if row is None:
+            return None
+        pid_text, _, stamp = str(row[0]).partition("|")
+        try:
+            pid = int(pid_text)
+            posed_at = datetime.fromisoformat(stamp)
+        except ValueError:
+            return None
+        if abs((datetime.now(UTC) - posed_at).total_seconds()) > BULK_LOCK_TTL_S:
+            return None
+        return pid if _process_alive(pid) else None
+
+    def _ensure_files_indexes(self) -> list[str]:
+        """Filet à l'ouverture : recrée les index secondaires de `files` qui manquent.
+
+        Un chargement en masse (`bulk_load`) travaille index supprimés. Son `finally`
+        les recrée, mais un processus tué (ou une coupure de courant) laisserait la
+        base sans eux : toutes les vues repasseraient en balayage complet sans que
+        personne ne le voie. La vérification coûte une lecture de `sqlite_master`
+        (moins d'une milliseconde) à chaque ouverture ; la reconstruction, elle, ne
+        se déclenche que si un index manque vraiment.
+
+        Elle **abdique** tant qu'un `bulk_load` est en cours (marqueur `meta`
+        vivant, cf. `_bulk_load_owner`). Ce n'est pas une optimisation : ouvrir une
+        seconde `Database` pendant un import n'a rien d'exceptionnel — la fenêtre le
+        fait d'elle-même quand un écran se rafraîchit (`gui.lazy.LazyScreen._start`)
+        — et un `CREATE INDEX` est une **écriture** : lancé pendant que l'import
+        tient le verrou, il faisait mourir sur `database is locked` un chargement de
+        plusieurs minutes. L'import recrée ses index lui-même en sortant ; si son
+        processus est tué, le marqueur ne survit ni à la mort du pid ni au délai, et
+        la reconstruction reprend à l'ouverture suivante.
+
+        Returns:
+            Les index recréés (vide dans le cas normal, et en cas d'abdication).
+        """
+        present = self._files_index_names()
+        missing = [name for name in FILES_INDEXES if name not in present]
+        if not missing:
+            return []
+        owner = self._bulk_load_owner()
+        if owner is not None:
+            logger.info(
+                "index manquants sur `files` : chargement en masse en cours (pid %s) —"
+                " reconstruction laissée à l'import",
+                owner,
+            )
+            return []
+        logger.warning(
+            "index manquants sur `files` (import interrompu ?) : %s — reconstruction",
+            ", ".join(missing),
+        )
+        for name in missing:
+            self._conn.execute(FILES_INDEXES[name])
+        self._conn.commit()
+        return missing
+
+    @contextmanager
+    def bulk_load(self, *, analyze: bool = True) -> Iterator[None]:
+        """Charge `files` en masse : index secondaires retirés le temps de l'écriture.
+
+        Maintenir onze index à chaque ligne insérée coûte plus cher que les
+        reconstruire d'un bloc à la fin (mesuré : ×5 sur un CSV de 250 Mo). L'index
+        UNIQUE implicite de `path_key` n'est **pas** touché : c'est lui qui rend le
+        `SELECT … WHERE path_key=?` de `upsert_files` immédiat.
+
+        Aucun index **UNIQUE** n'est retiré, implicite ou déclaré : un index unique
+        n'accélère pas, il *interdit*. Le supprimer le temps d'un import laisserait
+        entrer les doublons qu'il refuse, et le `CREATE UNIQUE INDEX` du `finally`
+        échouerait alors sur ces doublons — la contrainte disparue pour de bon, sans
+        que rien ne la réclame. Le filtre porte sur la définition SQL relue, donc il
+        couvre aussi un index unique qu'une migration future ajouterait.
+
+        Les définitions sont relues dans `sqlite_master` avant la suppression, donc
+        recréées à l'identique (y compris un index ajouté par une migration future).
+        `PRAGMA cache_size` et `temp_store` sont élargis pendant l'opération puis
+        remis à leur valeur d'origine.
+
+        Un marqueur `meta[BULK_LOCK_KEY]` (pid + horodatage) est **validé en base**
+        avant la suppression des index et retiré à la fin : toute autre connexion
+        ouverte pendant l'import le voit et renonce à reconstruire les index
+        (`_ensure_files_indexes`), au lieu d'écrire pendant que l'import tient le
+        verrou et de le tuer sur `database is locked`.
+
+        Le `finally` recrée les index même si le corps échoue ; un processus tué en
+        plein import échappe forcément à ce `finally`, d'où le filet de
+        `_ensure_files_indexes` à la réouverture de la base.
+
+        Compromis : pendant le chargement, toute lecture de `files` (vues,
+        statistiques) balaie la table. C'est sans conséquence — une campagne est
+        mono-poste et l'utilisateur attend la fin de son import.
+
+        Args:
+            analyze: rejoue `ANALYZE` après la reconstruction (statistiques du
+                planificateur). Inutile si l'appelant enchaîne sur `finish_scan`,
+                qui le fait déjà.
+        """
+        defs: list[tuple[str, str]] = []
+        for r in self._conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='files'"
+            " AND sql IS NOT NULL ORDER BY name"
+        ):
+            name, sql = str(r["name"]), str(r["sql"])
+            if _UNIQUE_INDEX_RE.match(sql):
+                continue  # contrainte de données : jamais retirée (voir la docstring)
+            defs.append((name, sql))
+        previous_cache = int(self._conn.execute("PRAGMA cache_size").fetchone()[0])
+        previous_temp = int(self._conn.execute("PRAGMA temp_store").fetchone()[0])
+        self._conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (BULK_LOCK_KEY, f"{os.getpid()}|{_now()}"),
+        )
+        self._conn.commit()  # visible des autres connexions AVANT la première écriture
+        for name, _sql in defs:
+            self._conn.execute(f'DROP INDEX IF EXISTS "{name}"')
+        self._conn.execute(f"PRAGMA cache_size={BULK_CACHE_PAGES}")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
+        self._conn.commit()
+        try:
+            yield
+        finally:
+            # SQLite retire le `IF NOT EXISTS` du DDL qu'il stocke : si un index est
+            # déjà revenu (une autre connexion l'a reconstruit entre-temps), le
+            # `CREATE` lève. Sans les gardes ci-dessous, cette exception **remplaçait**
+            # celle du corps — la vraie cause de l'échec d'import disparaissait — et
+            # la boucle s'arrêtait, laissant 4 index sur 11.
+            present = self._files_index_names()
+            for name, sql in defs:
+                if name in present:
+                    continue
+                try:
+                    self._conn.execute(sql)
+                except sqlite3.Error:
+                    logger.exception("reconstruction de l'index %s", name)
+            try:
+                if analyze:
+                    self._conn.execute("ANALYZE")
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.exception("fin de chargement en masse")
+            # Marqueur retiré une fois les index revenus, quoi qu'ait donné `ANALYZE` :
+            # une autre connexion qui ouvre ensuite la base n'a plus rien à
+            # reconstruire, et le marqueur ne survit qu'à un processus tué.
+            try:
+                self._conn.execute("DELETE FROM meta WHERE key=?", (BULK_LOCK_KEY,))
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.exception("retrait du marqueur de chargement en masse")
+            with suppress(sqlite3.Error):
+                self._conn.execute(f"PRAGMA cache_size={previous_cache}")
+                self._conn.execute(f"PRAGMA temp_store={previous_temp}")
 
     # ------------------------------------------------------------------ scans
     def start_scan(self, csv_path: str, *, kind: str = "import") -> int:
@@ -490,12 +1119,28 @@ class Database:
         elles doivent rester le reflet exact de `COALESCE(NULLIF(access_time_first,
         ''), access_time)` et de `last_write_time`.
 
+        Les fichiers inchangés (le cas de masse d'un rescan) ne sont pas mis à jour
+        un par un : leurs `UPDATE` sont accumulés puis joués en `executemany`. Ils
+        n'écrivent que des colonnes qu'aucun `SELECT` de la boucle ne relit, l'ordre
+        reste donc celui du fichier ; par prudence le tampon est vidé avant toute
+        écriture directe visant un fichier qui s'y trouve déjà (même chemin présent
+        deux fois dans le même lot).
+
         Returns:
             (nouveaux, modifiés, inchangés).
         """
         new = updated = unchanged = 0
         now = _now()
         with self.transaction() as conn:
+            touched: list[tuple[object, ...]] = []
+            touched_ids: set[int] = set()
+
+            def flush_touched() -> None:
+                if touched:
+                    conn.executemany(_TOUCH_SQL, touched)
+                    touched.clear()
+                    touched_ids.clear()
+
             for row in rows:
                 key = path_key(row.path)
                 existing = conn.execute(
@@ -550,6 +1195,8 @@ class Database:
                     or existing["last_write_time"] != row.last_write_time
                 )
                 if changed:
+                    if int(existing["id"]) in touched_ids:
+                        flush_touched()
                     new_status = (
                         existing["status"]
                         if existing["status"] == FileStatus.EXCLUDED
@@ -589,12 +1236,14 @@ class Database:
                     # `access_time_first` ne bouge pas : la clé d'accès ne retombe sur
                     # `access_time` que si la première observation manque.
                     first_access = str(existing["access_time_first"]) or row.access_time
-                    conn.execute(
-                        "UPDATE files SET last_seen_scan_id=?, access_time=?, access_key=?,"
-                        " updated_at=? WHERE id=?",
-                        (scan_id, row.access_time, date_key(first_access), now, existing["id"]),
+                    touched.append(
+                        (scan_id, row.access_time, date_key(first_access), now, existing["id"])
                     )
+                    touched_ids.add(int(existing["id"]))
                     unchanged += 1
+                    if len(touched) >= _TOUCH_FLUSH:
+                        flush_touched()
+            flush_touched()
         return new, updated, unchanged
 
     # ------------------------------------------------------------------ files
@@ -621,29 +1270,136 @@ class Database:
         r = self._conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
         return self._file_row(r) if r else None
 
-    def iter_files(self, status: FileStatus | None = None) -> Iterator[FileRow]:
-        sql = "SELECT * FROM files"
+    def iter_files(
+        self,
+        status: FileStatus | None = None,
+        *,
+        ordered: bool = True,
+        batch: int = ITER_FILES_BATCH,
+    ) -> Iterator[FileRow]:
+        """Parcourt les fichiers, éventuellement filtrés par statut.
+
+        `ordered` (défaut, comportement historique) trie par `priority_score DESC,
+        path` : l'ordre attendu de tout appelant qui présente les fichiers à un
+        humain. Ce tri oblige SQLite à matérialiser la table entière avant de
+        rendre la première ligne — plus d'une seconde et plusieurs centaines de
+        mégaoctets sur 934 000 fichiers, pour rien quand l'appelant les traite
+        *tous* sans se soucier de l'ordre (c'est le cas de `filter.plan_files`).
+
+        `ordered=False` parcourt donc par `id` croissant, **par tranches de
+        `batch` lignes** : aucun curseur de lecture ne reste ouvert entre deux
+        tranches, ce qui autorise l'appelant à écrire dans `files` pendant le
+        parcours (SQLite refuse un `COMMIT` tant qu'une lecture est en cours sur
+        la même connexion) sans jamais sauter ni revoir une ligne, les `id` étant
+        immuables.
+        """
         params: tuple[object, ...] = ()
+        where = ""
         if status is not None:
-            sql += " WHERE status=?"
+            where = " WHERE status=?"
             params = (str(status),)
-        sql += " ORDER BY priority_score DESC, path"
-        for r in self._conn.execute(sql, params):
-            yield self._file_row(r)
+        if ordered:
+            sql = f"SELECT * FROM files{where} ORDER BY priority_score DESC, path"  # noqa: S608
+            for r in self._conn.execute(sql, params):
+                yield self._file_row(r)
+            return
+        clause = f"{where} AND id > ?" if status is not None else " WHERE id > ?"
+        paged = f"SELECT * FROM files{clause} ORDER BY id LIMIT ?"  # noqa: S608
+        last = -1
+        while True:
+            rows = self._conn.execute(paged, (*params, last, batch)).fetchall()
+            if not rows:
+                return
+            for r in rows:
+                yield self._file_row(r)
+            last = int(rows[-1]["id"])
+            if len(rows) < batch:
+                return
 
     def select_pending(self, limit: int, *, prompt_hash: str, model: str) -> list[FileRow]:
         """Fichiers à analyser : `pending`, sans analyse pour leur version de contenu
-        courante avec ce prompt et ce modèle. Ordre : priorité, puis chemin."""
+        courante avec ce prompt et ce modèle. Ordre : priorité, puis chemin.
+
+        Charge **tout** en mémoire (1,7 Go pour 700 000 fichiers) : réservé aux
+        petites sélections. Le pipeline passe par `select_pending_ids` puis
+        `files_by_ids`.
+        """
         rows = self._conn.execute(
-            """SELECT f.* FROM files f
-               WHERE f.status='pending'
-                 AND NOT EXISTS (SELECT 1 FROM analyses a WHERE a.file_id=f.id
-                                 AND a.content_version=f.content_version
-                                 AND a.prompt_hash=? AND a.model=?)
-               ORDER BY f.priority_score DESC, f.path LIMIT ?""",
+            f"SELECT f.* FROM files f{_PENDING_WHERE}"
+            " ORDER BY f.priority_score DESC, f.path LIMIT ?",
             (prompt_hash, model, limit),
         ).fetchall()
         return [self._file_row(r) for r in rows]
+
+    def select_pending_ids(self, limit: int, *, prompt_hash: str, model: str) -> list[int]:
+        """Identifiants des fichiers à analyser, dans l'ordre de `select_pending`.
+
+        Même sélection, même tri, mais un entier par fichier au lieu d'une
+        `FileRow` : 28 Mo au lieu de 1 722 Mo pour 700 797 fichiers — et cette
+        liste est gardée du début à la fin d'un run qui dure des heures, sur un
+        serveur de 8 à 16 Go.
+
+        Pourquoi une liste et non un curseur ouvert : le run **écrit** dans `files`
+        (`queued`, `done`, `error`) au fil des lots, sur la même connexion. Un
+        curseur laissé ouvert empêcherait ces validations, et le simple fait de
+        changer les statuts déplacerait les lignes hors de la sélection — le
+        parcours sauterait des fichiers. La liste d'identifiants, elle, est un
+        instantané : elle reste exacte quoi qu'il advienne des statuts pendant le
+        run, exactement comme la liste de `FileRow` qu'elle remplace.
+
+        Le curseur est consommé au fil de l'eau, sans `fetchall()` et sans
+        `sqlite3.Row` : matérialiser d'abord les 700 797 lignes rendait au pic
+        113 Mo au lieu de 46 Mo, pour une liste d'entiers.
+        """
+        cursor = self._conn.cursor()
+        cursor.row_factory = None
+        try:
+            return [
+                int(r[0])
+                for r in cursor.execute(
+                    f"SELECT f.id FROM files f{_PENDING_WHERE}"
+                    " ORDER BY f.priority_score DESC, f.path LIMIT ?",
+                    (prompt_hash, model, limit),
+                )
+            ]
+        finally:
+            cursor.close()
+
+    def count_pending(self, *, prompt_hash: str, model: str, limit: int | None = None) -> int:
+        """Nombre de fichiers à analyser (mêmes critères que `select_pending`).
+
+        `limit` plafonne le compte comme la sélection le ferait, pour que le
+        compteur affiché corresponde à ce qui sera réellement traité.
+        """
+        if limit is not None:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM files f{_PENDING_WHERE} LIMIT ?)",
+                (prompt_hash, model, limit),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM files f{_PENDING_WHERE}", (prompt_hash, model)
+            ).fetchone()
+        return int(row[0])
+
+    def files_by_ids(self, file_ids: Sequence[int]) -> list[FileRow]:
+        """Fichiers désignés par leurs identifiants, **dans l'ordre demandé**.
+
+        Le pipeline s'en sert pour charger un lot (`blocks.batch_files`) à la fois
+        à partir de `select_pending_ids` : la mémoire d'un run ne dépend plus de la
+        taille de la campagne mais de celle d'un lot. Les identifiants sont envoyés
+        par paquets de 500 (limite raisonnable sur le nombre de paramètres SQLite) ;
+        un identifiant disparu de `files` est simplement absent du résultat.
+        """
+        if not file_ids:
+            return []
+        found: dict[int, FileRow] = {}
+        for start in range(0, len(file_ids), 500):
+            chunk = tuple(file_ids[start : start + 500])
+            marks = ",".join("?" for _ in chunk)
+            for r in self._conn.execute(f"SELECT * FROM files WHERE id IN ({marks})", chunk):
+                found[int(r["id"])] = self._file_row(r)
+        return [row for fid in file_ids if (row := found.get(int(fid))) is not None]
 
     def set_file_status(self, file_id: int, status: FileStatus, reason: str | None = None) -> None:
         self._conn.execute(
@@ -663,30 +1419,48 @@ class Database:
             )
 
     def apply_plan(
-        self, decisions: Iterable[tuple[int, FileStatus, str | None, int]]
+        self,
+        decisions: Iterable[tuple[int, FileStatus, str | None, int]],
+        *,
+        batch: int = APPLY_PLAN_BATCH,
     ) -> tuple[int, int]:
         """Applique les décisions du filtre : (file_id, statut, raison, score).
         Ne touche pas aux fichiers `done`/`error` sauf pour le score.
+
+        Les `UPDATE` sont regroupés par `executemany` — deux ordres SQL distincts
+        selon la décision (`_PLAN_EXCLUDE_SQL`, `_PLAN_KEEP_SQL`) — et envoyés par
+        tranches de `batch` : un aller-retour SQLite pour des milliers de lignes
+        au lieu d'un par fichier. `decisions` peut être un flux, rien n'est
+        accumulé au-delà d'une tranche. Chaque décision porte sur un `id`
+        distinct : regrouper ne change donc pas le résultat.
 
         Returns:
             (fichiers pending, fichiers exclus).
         """
         pending = excluded = 0
         now = _now()
+        exclude: list[tuple[object, ...]] = []
+        keep: list[tuple[object, ...]] = []
+
+        def flush(conn: sqlite3.Connection) -> None:
+            if exclude:
+                conn.executemany(_PLAN_EXCLUDE_SQL, exclude)
+                exclude.clear()
+            if keep:
+                conn.executemany(_PLAN_KEEP_SQL, keep)
+                keep.clear()
+
         with self.transaction() as conn:
             for file_id, status, reason, score in decisions:
                 if status == FileStatus.EXCLUDED:
-                    conn.execute(
-                        "UPDATE files SET status='excluded', exclusion_reason=?, priority_score=?, updated_at=? WHERE id=? AND status IN ('pending','excluded','queued')",
-                        (reason, score, now, file_id),
-                    )
+                    exclude.append((reason, score, now, file_id))
                     excluded += 1
                 else:
-                    conn.execute(
-                        "UPDATE files SET status=CASE WHEN status IN ('excluded','queued') THEN 'pending' ELSE status END, exclusion_reason=CASE WHEN status='excluded' THEN NULL ELSE exclusion_reason END, priority_score=?, updated_at=? WHERE id=?",
-                        (score, now, file_id),
-                    )
+                    keep.append((score, now, file_id))
                     pending += 1
+                if len(exclude) + len(keep) >= batch:
+                    flush(conn)
+            flush(conn)
         return pending, excluded
 
     def reset_errors(self) -> int:
@@ -810,14 +1584,50 @@ class Database:
             for r in rows
         ]
 
-    def file_attempts(self, file_id: int) -> int:
-        """Nombre de blocs dans lesquels ce fichier a déjà été envoyé (tentatives)."""
-        row = self._conn.execute(
-            """SELECT COUNT(*) FROM block_files bf JOIN blocks b ON b.id=bf.block_id
-               WHERE bf.file_id=? AND b.status IN ('sent','done','error')""",
-            (file_id,),
-        ).fetchone()
+    def file_attempts(
+        self, file_id: int, *, segment_index: int | None = None, segment_count: int | None = None
+    ) -> int:
+        """Nombre de blocs dans lesquels ce fichier a déjà été envoyé (tentatives).
+
+        `segment_index` / `segment_count` restreignent le compte à **un segment** d'un
+        fichier découpé. Sans cela un fichier en K parties comptait K tentatives dès le
+        premier run (une par bloc-segment) : au-delà de `MAX_FILE_ATTEMPTS`, un seul
+        segment refusé (un 503 pendant un redémarrage du serveur) condamnait tout le
+        fichier, y compris les K−1 segments déjà payés.
+        """
+        sql = """SELECT COUNT(*) FROM block_files bf JOIN blocks b ON b.id=bf.block_id
+                 WHERE bf.file_id=? AND b.status IN ('sent','done','error')"""
+        params: tuple[object, ...] = (file_id,)
+        if segment_index is not None and segment_count is not None:
+            sql += " AND bf.segment_index=? AND bf.segment_count=?"
+            params = (file_id, segment_index, segment_count)
+        row = self._conn.execute(sql, params).fetchone()
         return int(row[0])
+
+    def unfinished_files(
+        self, file_ids: Sequence[int], *, sample: int = 5
+    ) -> tuple[int, list[str]]:
+        """Parmi ces identifiants, ceux qui ne sont ni `done`, ni `error`, ni `excluded`.
+
+        Rend `(nombre, quelques noms)` sans jamais matérialiser de `FileRow` (une
+        campagne fait 700 000 fichiers). Le pipeline s'en sert en fin de run : un run
+        qui laisse des fichiers engagés dans un bloc sans résultat ni erreur ne doit
+        jamais être clos « done » — sinon plus rien ne signale qu'ils sont en plan.
+        """
+        total = 0
+        noms: list[str] = []
+        for start in range(0, len(file_ids), 500):
+            chunk = tuple(file_ids[start : start + 500])
+            marks = ",".join("?" for _ in chunk)
+            for row in self._conn.execute(
+                f"SELECT name FROM files WHERE id IN ({marks})"  # noqa: S608
+                " AND status NOT IN ('done','error','excluded')",
+                chunk,
+            ):
+                total += 1
+                if len(noms) < sample:
+                    noms.append(str(row["name"]))
+        return total, noms
 
     def set_block_file_outcome(self, block_id: int, file_id: int, outcome: str) -> None:
         self._conn.execute(
@@ -929,36 +1739,61 @@ class Database:
         raw: dict[str, object],
     ) -> None:
         """Analyse d'un segment d'un fichier découpé (le fichier reste `queued`
-        jusqu'à l'agrégation des K segments)."""
-        self._conn.execute(
-            """INSERT INTO segment_analyses(file_id, block_id, content_version, prompt_hash, model,
-               segment_index, segment_count, raw_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(file_id, content_version, prompt_hash, model, segment_index)
-               DO UPDATE SET block_id=excluded.block_id, raw_json=excluded.raw_json,
-               created_at=excluded.created_at""",
-            (
-                file_id,
-                block_id,
-                content_version,
-                prompt_hash,
-                model,
-                segment_index,
-                segment_count,
-                json.dumps(raw, ensure_ascii=False),
-                _now(),
-            ),
-        )
-        self._conn.commit()
+        jusqu'à l'agrégation des K segments).
+
+        Les segments d'un **autre** découpage du même contenu (K différent) sont
+        supprimés au passage : un run précédent, plus fin ou plus grossier, laissait
+        sinon des lignes périmées que le pipeline comptait comme faites — le fichier
+        était déclaré `done` avec 20 % de son contenu analysé.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                """DELETE FROM segment_analyses WHERE file_id=? AND content_version=?
+                   AND prompt_hash=? AND model=? AND segment_count<>?""",
+                (file_id, content_version, prompt_hash, model, segment_count),
+            )
+            conn.execute(
+                """INSERT INTO segment_analyses(file_id, block_id, content_version, prompt_hash,
+                   model, segment_index, segment_count, raw_json, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(file_id, content_version, prompt_hash, model, segment_index)
+                   DO UPDATE SET block_id=excluded.block_id, raw_json=excluded.raw_json,
+                   segment_count=excluded.segment_count, created_at=excluded.created_at""",
+                (
+                    file_id,
+                    block_id,
+                    content_version,
+                    prompt_hash,
+                    model,
+                    segment_index,
+                    segment_count,
+                    json.dumps(raw, ensure_ascii=False),
+                    _now(),
+                ),
+            )
 
     def segment_analyses(
-        self, file_id: int, content_version: int, *, prompt_hash: str, model: str
+        self,
+        file_id: int,
+        content_version: int,
+        *,
+        prompt_hash: str,
+        model: str,
+        segment_count: int | None = None,
     ) -> list[tuple[int, int, dict[str, object]]]:
-        """Segments déjà analysés : (index, count, JSON brut), triés par index."""
-        rows = self._conn.execute(
-            """SELECT segment_index, segment_count, raw_json FROM segment_analyses
-               WHERE file_id=? AND content_version=? AND prompt_hash=? AND model=? ORDER BY segment_index""",
-            (file_id, content_version, prompt_hash, model),
-        ).fetchall()
+        """Segments déjà analysés : (index, count, JSON brut), triés par index.
+
+        `segment_count` restreint au découpage demandé : sans lui, la méthode rend
+        **toutes** les lignes du couple (fichier, version, prompt, modèle), quel que
+        soit le découpage sous lequel elles ont été écrites.
+        """
+        sql = """SELECT segment_index, segment_count, raw_json FROM segment_analyses
+                 WHERE file_id=? AND content_version=? AND prompt_hash=? AND model=?"""
+        params: tuple[object, ...] = (file_id, content_version, prompt_hash, model)
+        if segment_count is not None:
+            sql += " AND segment_count=?"
+            params = (*params, segment_count)
+        rows = self._conn.execute(sql + " ORDER BY segment_index", params).fetchall()
         out: list[tuple[int, int, dict[str, object]]] = []
         for r in rows:
             raw = json.loads(r["raw_json"])
@@ -1036,34 +1871,100 @@ class Database:
                 deleted += int(cur.rowcount)
         return deleted
 
-    def latest_analyses(self, *, file_id: int | None = None) -> Iterator[sqlite3.Row]:
+    def latest_analyses(
+        self,
+        *,
+        file_id: int | None = None,
+        security: str | None = None,
+        rgpd: str | None = None,
+        review: str | None = None,
+        search: str | None = None,
+        limit: int | None = None,
+        display_order: bool = False,
+    ) -> Iterator[sqlite3.Row]:
         """Dernière analyse de chaque fichier (jointe au fichier), pour l'export.
+
+        Sans argument : toute la campagne, triée par chemin — c'est la forme
+        qu'attendent les exports, qui la consomment **en curseur**.
 
         `file_id` : une seule fiche. L'écran Résultats relisait toute la campagne à
         chaque clic sur une ligne (plusieurs secondes sur 200 000 fichiers).
+
+        Filtres et `limit` : ceux de l'écran Résultats, descendus en SQL. Il relisait
+        les 934 028 lignes d'une campagne pour en afficher 1 000 (9,3 s, 950 Mo) —
+        et recommençait à chaque changement de filtre comme après chaque validation.
+        Sémantique reprise telle quelle de l'écran :
+
+        * `security` / `rgpd` : égalité stricte sur la dernière analyse, `''`
+          désignant les fichiers sans analyse ;
+        * `review` : égalité stricte sur le statut de vérification, `''` = non vérifié
+          (aucune ligne dans `reviews`) ;
+        * `search` : sous-chaîne, insensible à la casse, cherchée dans
+          `chemin + résumé + propriétaire` ; `%`, `_` et `\\` y sont littéraux
+          (l'écran comparait des sous-chaînes, pas des motifs : « 100 % » ne doit
+          pas ramener la campagne entière).
+
+        `display_order` trie comme l'écran (analysés d'abord, du plus sensible au
+        moins sensible, puis `error`, `done`, le reste ; à égalité, nom en
+        minuscules). Compromis assumé : `LOWER()` de SQLite ne replie que l'ASCII —
+        « Étude » et « étude » ne se rangent pas ensemble comme le ferait `str.lower`
+        de Python. Le tri SQL n'est donc qu'**approché** ; l'appelant re-trie
+        exactement, en Python, les ≤ `limit` lignes rendues (`gui/tab_results.py`).
+        La même limite vaut pour `search` : `LIKE` replie la casse ASCII, pas les
+        lettres accentuées — « ETUDE » retrouve « etude », « étude » ne retrouve pas
+        « Étude ».
         """
-        where = "WHERE f.id = ? " if file_id is not None else ""
-        params: tuple[object, ...] = (file_id,) if file_id is not None else ()
+        if file_id is not None:
+            return iter(
+                self._conn.execute(
+                    f"{_LATEST_SELECT}{_LATEST_FROM} WHERE f.id = ? ORDER BY f.path", (file_id,)
+                )
+            )
+        where, params = _latest_filters(security, rgpd, review, search)
+        order = _DISPLAY_ORDER_SQL if display_order else "f.path"
+        if limit is None:
+            return iter(
+                self._conn.execute(
+                    f"{_LATEST_SELECT}{_LATEST_FROM}{where} ORDER BY {order}", tuple(params)
+                )
+            )
+        # Deux étages : le premier balaie la campagne mais ne trie que (clés, id) et
+        # s'arrête à `limit` lignes ; le second ne rapporte les 38 colonnes que pour
+        # celles-là. En un seul étage, SQLite trierait 934 028 lignes complètes.
         return iter(
             self._conn.execute(
-                f"""SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f.host, f.status, f.exclusion_reason,
-                          f.content_version, a.model, a.prompt_hash, a.resume,
-                          a.security_classification, a.security_confidence, a.security_justification,
-                          a.rgpd_risk_level, a.rgpd_data_types, a.rgpd_confidence,
-                          a.finance_document_type, a.finance_amounts, a.finance_confidence,
-                          a.legal_contract_type, a.legal_parties, a.legal_confidence, a.created_at,
-                          a.segments, a.retention_required, a.retention_years, a.retention_basis,
-                          a.retention_justification, a.retention_confidence,
-                          r.status AS review_status, r.comment AS review_comment,
-                          r.corrected_security, r.corrected_rgpd, r.corrected_retention_years,
-                          r.reviewer, r.updated_at AS reviewed_at, f.id AS id
-                   FROM files f LEFT JOIN analyses a ON a.id = (
-                        SELECT id FROM analyses WHERE file_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1)
-                   LEFT JOIN reviews r ON r.file_id = f.id
-                   {where}ORDER BY f.path""",
-                params,
+                f"{_LATEST_SELECT}"
+                f" FROM (SELECT f.id AS sel_id{_LATEST_FROM}{where}"
+                f"       ORDER BY {order} LIMIT ?) sel"
+                f" JOIN files f ON f.id = sel.sel_id{_LATEST_JOINS}"
+                f" ORDER BY {order}",
+                (*params, limit),
             )
         )
+
+    def count_latest_analyses(
+        self,
+        *,
+        security: str | None = None,
+        rgpd: str | None = None,
+        review: str | None = None,
+        search: str | None = None,
+    ) -> int:
+        """Nombre de fichiers retenus par les filtres de `latest_analyses`.
+
+        C'est le total affiché par l'écran Résultats à côté des 1 000 lignes rendues.
+        Sans aucun filtre, il se lit directement dans `files` ; un filtre qui ne porte
+        que sur la vérification humaine évite la jointure sur la dernière analyse —
+        c'est elle qui coûte (une sous-requête corrélée par fichier).
+        """
+        where, params = _latest_filters(security, rgpd, review, search)
+        if not where:
+            return int(self._conn.execute("SELECT COUNT(*) FROM files").fetchone()[0])
+        joins = _LATEST_JOINS if _needs_analysis(security, rgpd, search) else _REVIEWS_JOIN
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM files f{joins}{where}", tuple(params)
+        ).fetchone()
+        return int(row[0])
 
     # ------------------------------------------------------------------ prompts
     def save_prompt(self, name: str, text: str, *, activate: bool = False) -> int:

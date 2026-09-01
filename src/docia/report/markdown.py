@@ -1,4 +1,10 @@
-"""Rapport Markdown : même contenu que le HTML, collable dans un mail ou un ticket."""
+"""Rapport Markdown : mêmes chiffres que le HTML, collable dans un mail ou un ticket.
+
+Mêmes *chiffres* — les deux rendus lisent le même `ReportData` —, pas la même
+*forme* : ce Markdown n'a pas la section « Répartition RGPD par partage » du HTML,
+et ses numéros de sous-sections décalent donc d'une unité à partir de 3.3. C'est
+délibéré (voir `docia.report.data`).
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,7 @@ from datetime import date
 
 from docia import views
 from docia.db import Database
-from docia.report.data import ReportData, collect
+from docia.report.data import ReportData, collect, listing_of
 
 
 def _n(value: int) -> str:
@@ -18,8 +24,19 @@ def _b(value: int) -> str:
 
 
 def _cell(value: object) -> str:
-    """Échappe les barres verticales, qui casseraient le tableau."""
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    """Contenu sûr d'une cellule de tableau GFM.
+
+    Les barres verticales et les retours à la ligne casseraient le tableau. `&`,
+    `<` et `>` sont échappés comme le fait déjà `html._esc` : ce Markdown est
+    destiné « à un wiki ou à un mail », c'est-à-dire à des rendus qui laissent
+    passer le HTML brut (GitLab, Confluence, courrier au format HTML), et les
+    cellules contiennent des chemins du partage ainsi que le `resume` et les
+    justifications rendus par le modèle, sans contrainte de caractères. Les
+    accents graves sont neutralisés pour qu'un résumé n'ouvre pas de code en
+    ligne au milieu du tableau.
+    """
+    text = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return text.replace("`", "\\`").replace("|", "\\|").replace("\n", " ")
 
 
 def _table(headers: list[str], rows: list[list[str]], *, empty: str) -> list[str]:
@@ -29,6 +46,18 @@ def _table(headers: list[str], rows: list[list[str]], *, empty: str) -> list[str
     out += ["| " + " | ".join(_cell(c) for c in row) + " |" for row in rows]
     out.append("")
     return out
+
+
+def _cut(data: ReportData, name: str, shown: int) -> list[str]:
+    """Note « ce tableau est coupé », ou rien s'il ne l'est pas (voir `html._cut`)."""
+    hidden = data.hidden(name, shown)
+    if not hidden:
+        return []
+    return [
+        f"*Les {_n(shown)} premières lignes sur {_n(shown + hidden)} — "
+        f"les {_n(hidden)} autres sont dans {listing_of(name)}.*",
+        "",
+    ]
 
 
 def render_markdown(
@@ -101,6 +130,7 @@ def render_markdown(
         ],
         empty="Aucun doublon détecté.",
     )
+    lines += _cut(report, "duplicates", len(dup.families))
     lines += ["### 2.2 Ancienneté", ""]
     lines += _table(
         ["Seuil", "Antérieur au", "Non accédés", "Volume", "Non modifiés", "Volume"],
@@ -135,12 +165,14 @@ def render_markdown(
         [[g.label, _n(g.files), _b(g.bytes), f"{g.percent_bytes}"] for g in report.extensions],
         empty="Aucun fichier.",
     )
+    lines += _cut(report, "extensions", len(report.extensions))
     lines += ["### 2.5 Propriétaires", ""]
     lines += _table(
         ["Propriétaire", "Fichiers", "Volume", "% volume"],
         [[g.label, _n(g.files), _b(g.bytes), f"{g.percent_bytes}"] for g in report.owners],
         empty="Aucun fichier.",
     )
+    lines += _cut(report, "owners", len(report.owners))
     lines += ["### 2.6 Partages", ""]
     lines += _table(
         ["Partage", "Fichiers", "Volume", "% volume"],
@@ -156,6 +188,7 @@ def render_markdown(
         ],
         empty="Aucun répertoire.",
     )
+    lines += _cut(report, "directories", len(report.directories))
 
     matrix_headers = ["Partage", "Analysés", *views.SECURITY_CLASSES, "RGPD élevé/critique"]
     lines += ["## 3. Risque et conformité", "", "### 3.1 Classification par partage", ""]
@@ -180,6 +213,7 @@ def render_markdown(
         ],
         empty="Aucune analyse.",
     )
+    lines += _cut(report, "by_owner", len(report.by_owner))
     lines += ["### 3.3 Top des fichiers sensibles", ""]
     lines += _table(
         ["Sécurité", "RGPD", "Chemin", "Propriétaire", "Taille", "Résumé", "Revue"],
@@ -197,6 +231,7 @@ def render_markdown(
         ],
         empty="Aucun fichier sensible identifié.",
     )
+    lines += _cut(report, "sensitive", len(report.sensitive))
     plan = report.retention
     lines += [
         "### 3.4 Plan de conservation",
@@ -205,6 +240,13 @@ def render_markdown(
         f"dont {_n(plan.expired_files)} dont la durée est échue.",
         "",
     ]
+    if plan.undetermined_files:
+        lines += [
+            f"{_n(plan.undetermined_files)} fichier(s) sont déclarés à conserver **sans durée** "
+            "(0 an) : réponse incohérente du modèle, aucune fin de conservation n'est calculée "
+            "et ils ne sont **jamais** comptés comme échus. À trancher par un humain.",
+            "",
+        ]
     lines += _table(
         ["Fondement", "Fichiers", "Volume"],
         [[g.label, _n(g.files), _b(g.bytes)] for g in plan.by_basis],
@@ -216,7 +258,7 @@ def render_markdown(
             [
                 r.end_date.strftime("%d/%m/%Y") if r.end_date else "—",
                 views.RETENTION_BASIS_LABELS.get(r.basis, r.basis),
-                _n(r.years),
+                views.RETENTION_UNDETERMINED if r.undetermined else _n(r.years),
                 r.path,
                 _b(r.size_bytes),
                 "oui" if r.expired else "non",
@@ -225,6 +267,7 @@ def render_markdown(
         ],
         empty="Aucun fichier à conserver.",
     )
+    lines += _cut(report, "retention", len(plan.rows))
     cleanup = report.cleanup
     lines += [
         "### 3.5 Candidats au nettoyage",
@@ -239,6 +282,7 @@ def render_markdown(
         [[r.path, r.owner, _b(r.size_bytes), r.access_time, r.security] for r in cleanup.rows],
         empty="Aucun candidat.",
     )
+    lines += _cut(report, "cleanup", len(cleanup.rows))
 
     rev = report.reviews
     lines += [
@@ -263,6 +307,7 @@ def render_markdown(
         ],
         empty="Aucun écart entre la LLM et les corrections humaines.",
     )
+    lines += _cut(report, "discrepancies", len(rev.discrepancies))
 
     lines += ["## 5. Exécution", "", "### 5.1 Statuts des fichiers", ""]
     lines += _table(

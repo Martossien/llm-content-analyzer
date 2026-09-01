@@ -14,8 +14,11 @@ lecture des résultats, vérification humaine, FAQ.
 ## Installation sur un poste Windows (utilisateur)
 
 1. Copier dans un même dossier : **`Docia.exe`** (artefact `Docia-windows-x64` de la
-   [CI](../../actions)) et **`SMBeagle.exe`** (release
-   [smbeagle_enriched v4.2.0](https://github.com/Martossien/smbeagle_enriched/releases/tag/v4.2.0)).
+   [CI](../../actions)) et **`SMBeagle.exe`** (artefact `windows-x64` de la
+   [CI de smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched/actions) — prenez
+   celui du dernier commit de `main` : la dernière release publiée, **v4.2.0 du 30/08**, est
+   antérieure au correctif `fix(args)` du 31/08 et scanne encore le mauvais dossier quand le
+   chemin est mal formé, au lieu de le refuser en code 2. Vérifié le 01/09.)
 2. Lancer `Docia.exe` (double-clic = interface ; en console, `Docia.exe doctor` vérifie que tout
    est en place : DocFuse, pdfium, **OCR Tesseract embarqué** — rien d'autre à installer, ni .NET
    ni Tesseract). Le diagnostic fait un **vrai essai d'OCR** et affiche, en cas d'échec, le
@@ -25,7 +28,10 @@ lecture des résultats, vérification humaine, FAQ.
    serveur LLM, **Tester la connexion**, Enregistrer.
 
 Un fichier **`docia.log`** est tenu à côté de `Docia.exe` (rotation 4 Mo × 4) : la console garde
-une ligne par incident, le détail complet y est écrit. C'est le fichier à joindre en cas de souci.
+une ligne par incident, le détail complet — y compris ce que l'écran ne montre pas — y est écrit.
+C'est le fichier à joindre en cas de souci. Hors exécutable empaqueté (`pip install docia`), il est
+écrit à côté du `docia.toml` désigné par `--config`. Si une autre instance le tient ouvert, Doc-IA
+bascule sur `docia-<pid>.log` au même endroit plutôt que de perdre le journal.
 
 Le mode de scan standard est le **scan local Windows** : un lecteur réseau mappé (`P:\`) ou un
 dossier (`\\serveur\partage\Finance`), avec le compte de la session (droit de lecture suffisant).
@@ -57,6 +63,21 @@ SQLite (analyses, revues humaines) ──▶ GUI · rapport HTML · Excel · Pow
   date observée — l'audit lui-même (hachage, OCR, extraction) ne « rajeunit » pas les fichiers.
 - **Raisonnement (thinking)** activé par défaut, effort `medium`, budget **imposé** (6 000 tokens)
   — réglages mesurés sur banc, modifiables dans l'onglet Serveur.
+- **Mémoire bornée à l'extraction** : un lot est fermé au cumul des tailles (`blocks.batch_bytes`,
+  64 Mio par défaut), pas seulement au nombre de fichiers — 360 Mo de pic au lieu de 2 135 Mo sur
+  600 Mo de gros fichiers, à durée identique (mesure du 01/09).
+
+### Ce qui est écrit sur le disque du poste
+
+Pour interroger la LLM, Doc-IA écrit des **blocs** `.md` dans `<campagne>.blocks/` (à côté du
+`.sqlite` ; réglage `blocks.work_dir`). **Ces fichiers contiennent le texte intégral des documents
+analysés, en clair** — OCR compris, donc potentiellement des données de santé, des bulletins de
+paie ou des identifiants — avec les droits du dossier parent. Par défaut (`blocks.keep_blocks =
+true`) ils sont **conservés indéfiniment** : ils servent à reprendre une analyse interrompue sans
+tout réextraire et à vérifier ce qui a été soumis à la LLM. Pour ne pas les garder, mettre
+`keep_blocks = false` (chaque bloc est effacé dès qu'il est traité) ; pour les faire disparaître
+après coup, supprimer le dossier `<campagne>.blocks/` — les analyses, elles, sont dans le
+`.sqlite`. Détail et recommandation RSSI : [guide, §8](docs/GUIDE_UTILISATEUR.md#où-est-le-texte-des-documents--à-lire-avant-le-premier-audit).
 
 ## Ligne de commande
 
@@ -95,14 +116,16 @@ budget de raisonnement n'est pas relayé, seul le renvoi à budget doublé prot�
 
 ## Qualité
 
-- `scripts/check.sh` : ruff + mypy strict + pytest (234 tests), **VERDICT** explicite — rien n'est
-  poussé sans `VERDICT: OK`.
+- `scripts/check.sh` : ruff + mypy strict + pytest (516 tests), **VERDICT** explicite — rien n'est
+  poussé sans `VERDICT: OK`. Les tests qui exigent un vrai écran (`tests/test_gui_ecran.py`,
+  marque `screen`) sont en plus, joués à la main : `DISPLAY=:1 DOCIA_GUI_SCREEN=1 pytest
+  tests/test_gui_ecran.py`.
 - CI GitHub (Ubuntu + Windows) : lint/tests 3.11–3.13, build de `Docia.exe` (PyInstaller,
   bibliothèques des extracteurs et **Tesseract embarqués**), puis l'exe est **exécuté** sur le
   runner : `doctor`, extraction réelle de 11 formats bureautiques, **OCR d'un PDF scanné généré**
   (Tesseract retiré du PATH), ouverture/fermeture de l'interface.
 - `scripts/e2e_local.sh` : test complet sur la machine de développement (scanner → OCR → vLLM →
-  base → rapports, 28 vérifications automatiques — 28/28 au 30/08).
+  base → rapports, 28 vérifications automatiques — 28/28 au 01/09).
 
 Référence de tous les réglages : [`docs/REGLAGES.md`](docs/REGLAGES.md).
 Conception détaillée : [`docs/DESIGN_V3.md`](docs/DESIGN_V3.md) (§13 budget de raisonnement,

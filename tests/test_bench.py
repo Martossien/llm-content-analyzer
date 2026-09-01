@@ -135,3 +135,41 @@ def test_register_adds_bench_and_quick(tmp_path: Path, fake_server, capsys) -> N
     args = parser.parse_args(["quick", str(tmp_path)])
     assert args.paths == [tmp_path]
     assert args.keep_db is None
+
+
+def test_bench_survit_a_une_coupure_de_flux(tmp_path: Path, fake_server) -> None:  # type: ignore[no-untyped-def]
+    """Le serveur coupe en plein corps de réponse (`RemoteProtocolError`) :
+    `docia bench` doit rendre un rapport en échec, jamais une trace httpx."""
+    fake_server.mode = "cut_always"
+    cfg = _config(tmp_path, fake_server.base_url_vllm)
+    report = run_bench(cfg, blocks=2, block_tokens=600, files_per_block=1)
+
+    assert report.ok is False
+    assert report.json_valid == 0
+    assert len(report.errors) == 2
+    assert "tentatives en échec" in report.message
+    assert "ÉCHEC" in "\n".join(report.as_lines())
+
+
+def test_one_block_rattrape_une_erreur_httpx_nue(tmp_path: Path) -> None:
+    """Défense en profondeur : même une `httpx.HTTPError` qui remonterait du
+    client devient une erreur de bloc, pas une exception qui tue le banc."""
+    import asyncio
+
+    import httpx
+
+    from docia.bench import _one_block
+    from docia.models import BlockFile, BlockSpec
+
+    class _Casse:
+        async def analyze_block(self, spec: BlockSpec) -> None:  # noqa: ARG002
+            raise httpx.RemoteProtocolError("peer closed connection")
+
+    block = tmp_path / "b.md"
+    block.write_text("## SOURCE: a.txt\n\ntexte\n", encoding="utf-8")
+    spec = BlockSpec(
+        path=block, files=[BlockFile(1, "a.txt", 1)], tokens_estimated=5, tokens_with_margin=6
+    )
+    outcome = asyncio.run(_one_block(_Casse(), spec))  # type: ignore[arg-type]
+    assert outcome.ok is False
+    assert "RemoteProtocolError" in outcome.error

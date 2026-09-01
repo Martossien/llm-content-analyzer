@@ -72,6 +72,15 @@ class LLMResponseError(LLMError):
     """Réponse HTTP 200 mais inexploitable (structure ou contenu vide)."""
 
 
+class LLMEmptyContentError(LLMResponseError):
+    """`message.content` vide alors que le serveur a répondu 200.
+
+    Comportement connu et transitoire du modèle servi (Qwen3 : raisonnement
+    produit, puis rien après `</think>`). C'est donc un cas RENVOYABLE, traité
+    dans la boucle de `_analyze` ; il ne devient définitif qu'après épuisement
+    des tentatives."""
+
+
 def _is_retryable_status(status: int) -> bool:
     """429 et 5xx sont transitoires ; les autres 4xx sont des erreurs de requête."""
     return status == 429 or 500 <= status <= 599
@@ -224,7 +233,7 @@ class LLMClient:
                 json={"model": self.cfg.model, "prompt": text},
                 headers=self._headers(),
             )
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError):
+        except httpx.HTTPError:
             return None
         if response.status_code != 200:
             return None
@@ -248,8 +257,13 @@ class LLMClient:
         """Analyse un bloc ; sérialisé par le sémaphore `max_in_flight`.
 
         Une réponse coupée par `max_tokens` (`finish_reason == "length"`, JSON
-        incomplet) est renvoyée **une fois** avec un budget doublé ; sinon
-        `LLMResponseError` explicite — jamais un JSON illisible mystérieux.
+        incomplet) est renvoyée **une fois** avec un budget doublé — mais
+        seulement si ce budget AUGMENTE réellement une fois passé par
+        `clamp_to_context`. Quand le bloc occupe déjà tout le contexte, le
+        doublement est absorbé par le clamp : renvoyer coûterait une génération
+        complète pour rien, et le conseil « augmentez max_tokens_cap » serait
+        faux (c'est le clamp qui contraint). On échoue alors tout de suite avec
+        le vrai diagnostic.
         """
         async with self._semaphore:
             await self.check_fits(spec)
@@ -257,7 +271,9 @@ class LLMClient:
             if result.finish_reason != "length":
                 return result
             first_budget = self.max_tokens_for(spec)
-            doubled = min(first_budget * 2, max(self.cfg.max_tokens_cap * 2, first_budget * 2))
+            doubled = self.clamp_to_context(first_budget * 2, spec)
+            if doubled <= first_budget:
+                raise LLMResponseError(self._truncation_diagnosis(spec, first_budget))
             logger.warning(
                 "bloc %s : réponse tronquée à %d tokens (finish_reason=length) — renvoi avec %d",
                 spec.path.name,
@@ -272,18 +288,37 @@ class LLMClient:
                 )
             return result
 
+    def _truncation_diagnosis(self, spec: BlockSpec, budget: int) -> str:
+        """Message d'échec quand doubler le budget ne changerait rien (clamp saturé)."""
+        room = self.cfg.max_context_tokens - spec.tokens_with_margin - _SYSTEM_PROMPT_TOKENS
+        return (
+            f"réponse tronquée à {budget} tokens et le budget ne peut pas augmenter : le bloc "
+            f"occupe {spec.tokens_with_margin} des {self.cfg.max_context_tokens} tokens de "
+            f"contexte, il ne reste que {max(0, room)} tokens pour la réponse — réduisez "
+            "blocks.block_tokens (augmenter llm.max_tokens_cap n'y changerait rien)"
+        )
+
     async def _analyze(self, spec: BlockSpec, *, max_tokens: int | None = None) -> LLMResult:
         payload = self.build_payload(spec, max_tokens=max_tokens)
         url = self._url("chat/completions")
         label = spec.path.name
         attempts = self.cfg.max_retries + 1
+        extra_empty_attempt = 1
+        """Le contenu vide est transitoire : au moins un renvoi, même si `max_retries` vaut 0."""
         last_error: Exception | None = None
         started = time.monotonic()
 
-        for attempt in range(attempts):
+        attempt = -1
+        while attempt + 1 < attempts:
+            attempt += 1
             try:
                 response = await self._http.post(url, json=payload, headers=self._headers())
-            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            # `httpx.HTTPError` et non deux sous-classes : une coupure en plein corps de
+            # réponse lève `RemoteProtocolError` (vLLM tué par l'OOM-killer, service
+            # redémarré, reverse-proxy ou VPN qui lâche). Laisser passer une exception
+            # httpx ferait tomber le run entier, hors de portée du `except LLMError` du
+            # pipeline : tout échec de transport devient une `LLMError` renvoyable.
+            except httpx.HTTPError as exc:
                 last_error = exc
                 logger.warning(
                     "bloc %s : tentative %d/%d en échec réseau (%s)",
@@ -295,30 +330,52 @@ class LLMClient:
             else:
                 if response.status_code == 200:
                     latency_ms = int((time.monotonic() - started) * 1000)
-                    logger.info(
-                        "bloc %s : réponse en %d ms (%d fichiers, tentative %d)",
+                    try:
+                        result = self._to_result(response, latency_ms)
+                    except LLMEmptyContentError as exc:
+                        last_error = exc
+                        if attempts == 1 and extra_empty_attempt:
+                            attempts += 1
+                            extra_empty_attempt = 0
+                        logger.warning(
+                            "bloc %s : tentative %d/%d, contenu vide "
+                            "(le modèle n'a rendu que du raisonnement)",
+                            label,
+                            attempt + 1,
+                            attempts,
+                        )
+                    else:
+                        logger.info(
+                            "bloc %s : réponse en %d ms (%d fichiers, tentative %d)",
+                            label,
+                            latency_ms,
+                            len(spec.files),
+                            attempt + 1,
+                        )
+                        return result
+                else:
+                    body = response.text[:500]
+                    if not _is_retryable_status(response.status_code):
+                        logger.warning("bloc %s : HTTP %d définitif", label, response.status_code)
+                        raise LLMRequestError(response.status_code, _explain(response, body))
+                    last_error = LLMRequestError(response.status_code, body)
+                    logger.warning(
+                        "bloc %s : tentative %d/%d, HTTP %d",
                         label,
-                        latency_ms,
-                        len(spec.files),
                         attempt + 1,
+                        attempts,
+                        response.status_code,
                     )
-                    return self._to_result(response, latency_ms)
-                body = response.text[:500]
-                if not _is_retryable_status(response.status_code):
-                    logger.warning("bloc %s : HTTP %d définitif", label, response.status_code)
-                    raise LLMRequestError(response.status_code, body)
-                last_error = LLMRequestError(response.status_code, body)
-                logger.warning(
-                    "bloc %s : tentative %d/%d, HTTP %d",
-                    label,
-                    attempt + 1,
-                    attempts,
-                    response.status_code,
-                )
 
             if attempt + 1 < attempts:
                 await asyncio.sleep(_backoff_delay(attempt))
 
+        if isinstance(last_error, LLMEmptyContentError):
+            raise LLMResponseError(
+                f"bloc {label} : contenu de réponse vide sur les {attempts} tentative(s) — "
+                "le modèle n'a produit que du raisonnement ; imposez un "
+                "llm.thinking_budget_tokens (vLLM ≥ 0.11) ou désactivez llm.enable_thinking"
+            ) from last_error
         raise LLMTransportError(f"bloc {label} : {attempts} tentatives en échec ({last_error})")
 
     def _to_result(self, response: httpx.Response, latency_ms: int) -> LLMResult:
@@ -339,7 +396,7 @@ class LLMClient:
         message = first.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise LLMResponseError("contenu de réponse vide")
+            raise LLMEmptyContentError("contenu de réponse vide")
 
         usage_raw = data.get("usage")
         usage_dict: dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
@@ -371,7 +428,7 @@ class LLMClient:
             return None
         try:
             response = await self._http.get(self._url("models"), headers=self._headers())
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError):
+        except httpx.HTTPError:
             return None
         if response.status_code != 200:
             return None
@@ -398,11 +455,31 @@ class LLMClient:
 
 
 def _as_int(value: object) -> int:
-    """Compteur de tokens absent ou farfelu → 0."""
+    """Compteur de tokens absent ou farfelu → 0.
+
+    Un compteur négatif (serveur bogué, proxy qui recopie mal) serait sommé dans
+    `report.prompt_tokens` puis écrit en base : on le borne à 0 comme les types
+    non numériques."""
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
-        return value
+        return max(0, value)
     if isinstance(value, float):
-        return int(value)
+        return max(0, int(value)) if value == value and abs(value) != float("inf") else 0
     return 0
+
+
+def _explain(response: httpx.Response, body: str) -> str:
+    """Complète le corps d'une réponse définitive quand le code seul n'est pas parlant.
+
+    httpx ne suit pas les redirections par défaut : une 30x (reverse-proxy qui
+    ajoute une barre oblique finale, bascule http→https) tomberait sinon dans le
+    même sac que les 4xx, avec un corps généralement vide."""
+    status = response.status_code
+    if 300 <= status < 400:
+        target = response.headers.get("location", "destination non indiquée")
+        return (
+            f"redirection non suivie vers « {target} » — corrigez llm.base_url "
+            f"(barre oblique finale, http/https, préfixe /v1) ; corps : {body or '(vide)'}"
+        )
+    return body

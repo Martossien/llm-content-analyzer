@@ -99,10 +99,16 @@ class PromptTab:
         self.test_output.pack(fill="x", padx=10, pady=(0, 10))
 
         self.app.on_refresh(self.refresh)
-        self.app.on_busy(
-            lambda busy: self.test_button.configure(state="disabled" if busy else "normal")
-        )
+        self.app.on_busy(self._busy)
         self._set_editor(load_system_prompt(None))
+
+    def _busy(self, busy: bool) -> None:
+        self.test_button.configure(state="disabled" if busy else "normal")
+
+    def dispose(self) -> None:
+        """Retire les rappels avant que l'onglet soit détruit (mode administrateur coupé)."""
+        self.app.off_busy(self._busy)
+        self.app.off_refresh(self.refresh)
 
     # ---- état
     def _set_editor(self, text: str) -> None:
@@ -243,12 +249,12 @@ class PromptTab:
 
                 cfg_test = replace(cfg, prompt_path=str(prompt_file))
                 rep = quick_analyze(cfg_test, [target], progress=app.log, cancel=app.cancel)
-            lines = rep.as_lines()
             payload = rep.as_dict()
-            self.test_output.set(
-                "\n".join(lines)
+            text = (
+                "\n".join(rep.as_lines())
                 + "\n\n"
                 + json.dumps(payload.get("files", payload), ensure_ascii=False, indent=2)[:6000]
             )
+            app.ui(lambda: self.test_output.set(text))  # écrire dans un widget = thread Tk
 
         app.run_in_thread(work, "test du prompt")

@@ -10,9 +10,7 @@ from docia.gui.helpers import (
     config_to_toml,
     estimate_prompt_tokens,
     parse_int,
-    result_rows,
     result_rows_v31,
-    status_lines,
 )
 
 
@@ -30,7 +28,5 @@ __all__ = [
     "estimate_prompt_tokens",
     "launch",
     "parse_int",
-    "result_rows",
     "result_rows_v31",
-    "status_lines",
 ]

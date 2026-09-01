@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from docia.db import Database
+from docia.db import FILES_INDEXES, Database
 from docia.ingest.smbeagle_csv import (
     CsvLineError,
+    ImportProgress,
     import_csv,
     parse_line,
     parse_smbeagle_datetime,
@@ -146,16 +147,35 @@ def test_validate_header_colonnes_manquantes() -> None:
     assert errors == ["en-tête : 3 colonnes au lieu de 19"]
 
 
-def test_header_invalide_stoppe_la_lecture_en_strict(tmp_path: Path) -> None:
+def test_header_invalide_stoppe_la_lecture_dans_les_deux_modes(tmp_path: Path) -> None:
+    """Le mode tolérant l'est pour les lignes, jamais pour la structure."""
     csv = tmp_path / "mauvais.csv"
     csv.write_text("a,b,c\n" + REAL_LINE + "\n", encoding="utf-8")
-    items = list(read_smbeagle_csv(csv, strict=True))
-    assert len(items) == 1
-    assert isinstance(items[0], CsvLineError)
-    assert items[0].line_number == 1
-    items_tolerants = list(read_smbeagle_csv(csv, strict=False))
-    assert len(items_tolerants) == 2
-    assert isinstance(items_tolerants[1], SmbeagleRow)
+    for strict in (True, False):
+        items = list(read_smbeagle_csv(csv, strict=strict))
+        assert len(items) == 1
+        assert isinstance(items[0], CsvLineError)
+        assert items[0].line_number == 1
+
+
+def test_entete_decale_arrete_l_import_tolerant(tmp_path: Path) -> None:
+    """MOYEN 11b : deux colonnes interverties ne doivent pas être lues « au mieux ».
+
+    Avant : l'import tolérant (défaut de la fenêtre et de `docia scan`) continuait
+    avec les colonnes aux mauvaises positions — `AccessTime` lu comme `FileSize`,
+    donc toutes les tailles à 0 et toutes les dates dans les tailles, pour le seul
+    signal d'« une ligne invalide » noyée dans le journal.
+    """
+    decale = HEADER_LINE.replace("FileSize,AccessTime", "AccessTime,FileSize")
+    ligne = quoted_line('"a.pdf"').replace(",802,15/08/2022 10:28:52,", ",15/08/2022 10:28:52,802,")
+    csv = tmp_path / "decale.csv"
+    csv.write_text(decale + "\n" + ligne + "\n" + ligne + "\n", encoding="utf-8")
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+    assert report.total == 0  # aucune ligne lue avec des colonnes décalées
+    assert report.invalid == 1
+    assert "colonne 13" in report.errors[0].reason
+    assert report.errors[0].line_number == 1
 
 
 # ------------------------------------------------------------------- lecture
@@ -258,3 +278,237 @@ def test_fast_hash_modifie_incremente_content_version(tmp_path: Path) -> None:
         assert apres.content_version == 2
         assert apres.status == FileStatus.PENDING
         assert apres.fast_hash == "0000000000000000"
+
+
+# ---------------------------------------------------- progression et index
+
+
+def test_import_appelle_le_rappel_de_progression(tmp_path: Path) -> None:
+    """Le rappel reçoit des valeurs croissantes et finit sur le total du rapport."""
+    vus: list[ImportProgress] = []
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, FIXTURE, progress=vus.append, progress_every=1)
+
+    assert len(vus) >= 2  # au moins le démarrage et la fin
+    assert [p.rows for p in vus] == sorted(p.rows for p in vus)
+    assert [p.bytes_read for p in vus] == sorted(p.bytes_read for p in vus)
+    assert vus[0].rows == 0
+    assert vus[-1].rows == report.total
+    assert vus[-1].total_bytes == FIXTURE.stat().st_size
+    assert vus[-1].percent == 100.0
+    assert all(0.0 <= p.percent <= 100.0 for p in vus)
+    assert all(p.elapsed_s >= 0.0 for p in vus)
+
+
+def test_progression_par_lots(tmp_path: Path) -> None:
+    """Un gros CSV donne plusieurs points d'avancement, pas un seul à la fin."""
+    gros = tmp_path / "gros.csv"
+    lignes = FIXTURE.read_text(encoding="utf-8").splitlines()
+    entete, donnees = lignes[0], lignes[1:]
+    with gros.open("w", encoding="utf-8") as fh:
+        fh.write(entete + "\n")
+        for i in range(300):  # ~18 900 lignes, chemins distincts
+            for ligne in donnees:
+                fh.write(ligne.replace("\\admin$\\", f"\\admin$\\copie{i}\\", 1) + "\n")
+
+    vus: list[ImportProgress] = []
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, gros, strict=False, progress=vus.append, progress_every=2)
+    assert report.new + report.unchanged == report.total
+    assert len(vus) >= 5
+    assert 0.0 < vus[len(vus) // 2].percent < 100.0
+    assert vus[-1].rows == report.total
+
+
+def test_import_laisse_tous_les_index_en_place(tmp_path: Path) -> None:
+    """Après l'import, `files` a retrouvé ses index secondaires (chargement en masse)."""
+    with Database(tmp_path / "docia.sqlite") as db:
+        import_csv(db, FIXTURE)
+        noms = {
+            str(r[0])
+            for r in db.query_values(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='files'"
+                " AND sql IS NOT NULL"
+            )
+        }
+        assert noms == set(FILES_INDEXES)
+
+
+def test_import_interrompu_puis_reouverture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Import interrompu en plein vol : la base rouverte a de nouveau tous ses index."""
+    path = tmp_path / "docia.sqlite"
+    reel = Database.upsert_files
+
+    def explose(*_args: object, **_kwargs: object) -> tuple[int, int, int]:
+        """Le processus est tué au premier lot écrit."""
+        raise KeyboardInterrupt("import interrompu")
+
+    with Database(path) as db:
+        monkeypatch.setattr(Database, "upsert_files", explose)
+        with pytest.raises(KeyboardInterrupt):
+            import_csv(db, FIXTURE)
+    monkeypatch.setattr(Database, "upsert_files", reel)
+
+    with Database(path) as db:  # le filet d'ouverture a reconstruit ce qui manquait
+        noms = {
+            str(r[0])
+            for r in db.query_values(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='files'"
+                " AND sql IS NOT NULL"
+            )
+        }
+        assert noms == set(FILES_INDEXES)
+
+
+def test_rescan_garde_les_memes_compteurs(tmp_path: Path) -> None:
+    """Trois imports d'affilée : les compteurs et le contenu ne bougent plus."""
+    with Database(tmp_path / "docia.sqlite") as db:
+        premier = import_csv(db, FIXTURE)
+        deuxieme = import_csv(db, FIXTURE)
+        troisieme = import_csv(db, FIXTURE)
+        assert (premier.new, premier.updated, premier.unchanged) == (63, 0, 0)
+        assert (deuxieme.new, deuxieme.updated, deuxieme.unchanged) == (0, 0, 63)
+        assert (troisieme.new, troisieme.updated, troisieme.unchanged) == (0, 0, 63)
+        versions = {int(r[0]) for r in db.query_values("SELECT content_version FROM files")}
+        assert versions == {1}
+        assert db.counts()["files"] == 63
+
+
+def test_rappel_de_progression_defaillant_ne_casse_pas_l_import(tmp_path: Path) -> None:
+    """Un tube fermé ou une fenêtre détruite ne doit pas faire perdre l'import.
+
+    Avant, l'exception du rappel remontait : la base restait à moitié remplie et la
+    ligne `scans` orpheline, `finish_scan` n'étant jamais atteint.
+    """
+    appels = 0
+
+    def rappel(_progress: object) -> None:
+        nonlocal appels
+        appels += 1
+        raise BrokenPipeError("console fermée")
+
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, FIXTURE, progress=rappel)
+        assert appels >= 1, "le rappel doit bien avoir été tenté"
+        assert (report.total, report.new, report.invalid) == (63, 63, 0)
+        assert db.counts()["files"] == 63
+        scans = db.query_values("SELECT rows_total FROM scans")
+        assert [int(r[0]) for r in scans] == [63], "le scan doit être clôturé, pas orphelin"
+
+
+# ------------------------------------------- robustesse : une ligne ne fait pas tomber le million
+
+
+def test_filesize_hors_plage_sqlite(tmp_path: Path) -> None:
+    """GRAVE 2 : un `FileSize` non stockable est refusé à la lecture, pas à l'écriture.
+
+    `int()` n'avait aucune borne : la valeur remontait intacte jusqu'à `sqlite3`,
+    qui levait `OverflowError` en écrivant le **lot** — donc très loin de la ligne
+    fautive, en emportant l'import entier.
+    """
+    enorme = quoted_line('"enorme.pdf"', file_size=str(2**63))
+    with pytest.raises(ValueError, match="FileSize"):
+        parse_line(enorme, 2, strict=True)
+    ligne = parse_line(enorme, 2)
+    assert (ligne.file_size, ligne.size_unreadable) == (0, True)
+
+    csv = tmp_path / "overflow.csv"
+    saines = [quoted_line(f'"bon{i}.pdf"') for i in range(4)]
+    csv.write_text(
+        HEADER_LINE + "\n" + "\n".join([*saines[:2], enorme, *saines[2:]]) + "\n", encoding="utf-8"
+    )
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=True)
+        assert report.total == 4, "les lignes saines ne doivent pas partir avec la fautive"
+        assert report.invalid == 1
+        assert "FileSize" in report.errors[0].reason
+        assert db.counts()["files"] == 4
+        scans = db.query_values("SELECT rows_total, rows_invalid FROM scans")
+        assert [tuple(int(v) for v in r) for r in scans] == [(4, 1)]
+
+
+def test_lot_refuse_par_la_base_est_rejoue_ligne_a_ligne(tmp_path: Path) -> None:
+    """GRAVE 2 (2ᵉ moitié) : un lot refusé ne doit plus annuler tout l'import.
+
+    Le refus est simulé au niveau d'`upsert_files` — n'importe quelle valeur qu'une
+    version future de SQLite refuserait produirait le même effet qu'un `FileSize`
+    démesuré : la transaction du lot est annulée et les lignes saines perdues.
+    """
+    csv = tmp_path / "piege.csv"
+    noms = ["a.pdf", "b.pdf", "poison.pdf", "c.pdf", "d.pdf"]
+    csv.write_text(
+        HEADER_LINE + "\n" + "\n".join(quoted_line(f'"{n}"') for n in noms) + "\n",
+        encoding="utf-8",
+    )
+    with Database(tmp_path / "docia.sqlite") as db:
+        vrai_upsert = db.upsert_files
+
+        def piege(rows: list[SmbeagleRow], scan_id: int) -> tuple[int, int, int]:
+            if any(row.name == "poison.pdf" for row in rows):
+                raise OverflowError("Python int too large to convert to SQLite INTEGER")
+            return vrai_upsert(rows, scan_id)
+
+        db.upsert_files = piege  # type: ignore[method-assign]
+        report = import_csv(db, csv, strict=False)
+        assert report.total == 4, "les 4 lignes saines doivent être conservées"
+        assert report.new == 4
+        assert report.invalid == 1
+        assert "écriture refusée" in report.errors[0].reason
+        assert "poison.pdf" in report.errors[0].raw
+        db.upsert_files = vrai_upsert  # type: ignore[method-assign]
+        assert db.counts()["files"] == 4
+        scans = db.query_values("SELECT rows_total, rows_invalid FROM scans")
+        assert [tuple(int(v) for v in r) for r in scans] == [(4, 1)]
+
+
+def test_taille_illisible_comptee_dans_le_bilan(tmp_path: Path) -> None:
+    """MOYEN 11a : une taille illisible ramenée à 0 laisse une trace chiffrée.
+
+    Sans ce compteur, le fichier était simplement exclu « trop petit » : un fichier
+    dont le scanner n'a pas pu lire la taille sortait de l'audit sans un mot.
+    """
+    csv = tmp_path / "tailles.csv"
+    csv.write_text(
+        HEADER_LINE
+        + "\n"
+        + "\n".join(
+            [
+                quoted_line('"bon.pdf"'),
+                quoted_line('"cassee.pdf"', file_size="n/a"),
+                quoted_line('"absente.pdf"', file_size=""),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+    assert (report.total, report.invalid) == (3, 0)
+    assert report.size_defaulted == 2
+
+
+def test_ligne_sans_nom_ni_dossier_est_rejetee(tmp_path: Path) -> None:
+    """MINEUR 14 : `Name` et `UNCDirectory` vides donnaient tous le chemin `\\`.
+
+    Ces lignes fusionnaient en un seul enregistrement, comptées « inchangées » et
+    `invalid=0` — un fichier fantôme, et la fusion de deux vrais fichiers de même
+    nom dès qu'un `UNCDirectory` manque (erreur d'ACL).
+    """
+    vide = "," * 18
+    with pytest.raises(ValueError, match="Name vide"):
+        parse_line(vide, 2)
+    with pytest.raises(ValueError, match="UNCDirectory vide"):
+        parse_line(REAL_LINE.replace(r"\\192.168.1.72\admin$\addins", ""), 2)
+
+    csv = tmp_path / "fantome.csv"
+    csv.write_text(
+        HEADER_LINE + "\n" + "\n".join([quoted_line('"vrai.pdf"'), vide, vide, vide]) + "\n",
+        encoding="utf-8",
+    )
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+        assert (report.total, report.new, report.unchanged) == (1, 1, 0)
+        assert report.invalid == 3
+        assert db.counts()["files"] == 1

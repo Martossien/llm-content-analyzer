@@ -9,11 +9,36 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_NAME = "docia.toml"
+
+DEFAULT_BATCH_BYTES = 64 * 1024 * 1024
+"""Budget mémoire par défaut d'un lot d'extraction, en octets de fichiers source (64 Mio).
+
+Le nombre de fichiers seul (`blocks.batch_files`) ne borne **rien** en mémoire :
+`filter.max_size_bytes` laisse passer des fichiers de 100 Mo, et DocFuse garde le texte
+extrait de *tout* le lot avant le découpage.
+
+Mesuré le 01/09 sur ce dépôt — `build_blocks`, 12 fichiers texte de 50 Mo (600 Mo au
+total), `tokenizer_engine = "approx"`, pic de RSS du processus :
+
+| `batch_bytes`      | pic RSS | durée   |
+|--------------------|---------|---------|
+| 0 (avant, aucun)   | 2 135 Mo| 285 s   |
+| 256 Mio            | 1 311 Mo| 285 s   |
+| **64 Mio (défaut)**| **360 Mo** | 284 s |
+
+Le pic vaut environ **cinq fois** la taille du sous-lot : c'est ce facteur, et non le
+cumul du lot, qu'il faut multiplier. 64 Mio tiennent donc dans ~360 Mo sur un serveur
+Windows de 8 Go partagé, et le découpage ne coûte **rien** en temps (285 s dans les
+trois cas). Un lot ordinaire de documents bureautiques (200 fichiers de ~200 Ko = 40 Mo)
+passe d'un seul tenant : le budget ne mord que sur les gros fichiers.
+
+Un fichier isolé plus gros que ce budget est traité **seul**, jamais écarté."""
 
 
 @dataclass
@@ -69,7 +94,17 @@ class BlocksConfig:
     (octets/4). Défaut `openai` depuis le banc du 30/08 : `approx` sous-estime Qwen de
     ~30 % sur du texte français chiffré et faisait dépasser le contexte aux segments."""
     batch_files: int = 200
-    """Fichiers passés à DocFuse par appel (extraction parallèle interne)."""
+    """Fichiers passés à DocFuse par appel (extraction parallèle interne). **Plafond
+    de rythme, pas de mémoire** : c'est `batch_bytes` qui borne la RAM."""
+    batch_bytes: int = DEFAULT_BATCH_BYTES
+    """Budget mémoire d'un lot d'extraction, en octets **de fichiers source** cumulés.
+
+    Le lot se ferme dès que le cumul dépasse ce budget, même si `batch_files` n'est
+    pas atteint : le builder appelle alors DocFuse une fois par sous-lot et libère le
+    texte extrait entre deux. Un fichier seul plus gros que le budget forme son propre
+    sous-lot — il est traité, jamais écarté. Voir `DEFAULT_BATCH_BYTES` pour la mesure
+    qui fixe le défaut. `0` = aucun plafond (comportement d'avant le 01/09, déconseillé
+    dès que `filter.max_size_bytes` laisse passer de gros fichiers)."""
     work_dir: str = ""
     """Dossier des blocs `.md` ; vide = `<db>.blocks/` à côté de la base."""
     max_file_tokens: int = 0
@@ -77,6 +112,23 @@ class BlocksConfig:
     segments. 0 = dérivé du pipeline : `llm.max_context_tokens` moins une réserve
     pour le prompt et la réponse."""
     keep_blocks: bool = True
+    """Conserve les blocs `.md` après le run — **ils contiennent le texte intégral
+    des documents analysés**, en clair, sur le disque du poste.
+
+    À lire avant de laisser le défaut : un bloc est la concaténation du texte extrait
+    (OCR compris) des fichiers du partage. Un bulletin de paie, un compte rendu
+    médical, un fichier de mots de passe scanné : leur contenu est recopié tel quel
+    dans `work_dir` (vide = `<db>.blocks/`, à côté du fichier de campagne), sans
+    chiffrement, et **y reste** tant que personne n'efface le dossier. Les droits du
+    dossier sont ceux de son parent : quiconque lit la campagne lit les documents.
+
+    `true` (défaut) sert la reprise et le diagnostic : après une interruption, un bloc
+    déjà envoyé est relu au lieu d'être reconstruit, et on peut vérifier ce qui a
+    réellement été soumis à la LLM quand une classification surprend. `false` efface
+    le `.md` de chaque bloc dès qu'il est `done`/`error` (jamais un bloc resté `built`,
+    qui bloquerait la reprise) : à préférer dès que le partage audité contient des
+    données sensibles et que la campagne vit ailleurs que sur un poste d'administrateur.
+    Le dossier reste à supprimer à la main à la fin de l'audit dans les deux cas."""
 
 
 @dataclass
@@ -187,6 +239,11 @@ class Config:
             errors.append(f"blocks.tokenizer_engine inconnu : {self.blocks.tokenizer_engine}")
         if self.blocks.batch_files < 1:
             errors.append("blocks.batch_files doit être >= 1")
+        if self.blocks.batch_bytes < 0:
+            errors.append(
+                "blocks.batch_bytes doit être >= 0 (0 = aucun plafond mémoire) "
+                f"(valeur: {self.blocks.batch_bytes})"
+            )
         if self.llm.thinking_budget_tokens < 0:
             errors.append("llm.thinking_budget_tokens doit être >= 0")
         if self.llm.reasoning_effort not in ("", "low", "medium", "xhigh"):
@@ -196,6 +253,37 @@ class Config:
                 "llm.max_context_tokens doit être >= blocks.block_tokens "
                 f"({self.llm.max_context_tokens} < {self.blocks.block_tokens})"
             )
+        if self.llm.max_retries < 0:
+            errors.append(f"llm.max_retries doit être >= 0 (valeur: {self.llm.max_retries})")
+        if self.llm.max_tokens_per_file < 1:
+            errors.append(
+                f"llm.max_tokens_per_file doit être >= 1 (valeur: {self.llm.max_tokens_per_file})"
+            )
+        # `[filter]` n'était pas validé du tout : `docia plan` excluait les 60 000
+        # fichiers en annonçant « 0 à analyser » sans que rien ne pointe la config,
+        # que `docia.toml` soit édité à la main ou produit par `docia init`.
+        if self.filter.min_size_bytes < 0:
+            errors.append(
+                f"filter.min_size_bytes doit être >= 0 (valeur: {self.filter.min_size_bytes})"
+            )
+        if self.filter.max_size_bytes < 1:
+            errors.append(
+                f"filter.max_size_bytes doit être >= 1 (valeur: {self.filter.max_size_bytes})"
+            )
+        if self.filter.min_size_bytes > self.filter.max_size_bytes:
+            errors.append(
+                "filter.min_size_bytes doit être <= filter.max_size_bytes "
+                f"({self.filter.min_size_bytes} > {self.filter.max_size_bytes})"
+            )
+        for name, values in (
+            ("filter.excluded_extensions", self.filter.excluded_extensions),
+            ("filter.excluded_dir_markers", self.filter.excluded_dir_markers),
+        ):
+            wrong = [v for v in values if not isinstance(v, str)]
+            if wrong:
+                errors.append(f"{name} ne doit contenir que du texte (valeur : {wrong[0]!r})")
+        if not self.db_path.strip():
+            errors.append("db_path ne peut pas être vide")
         return errors
 
     def work_dir(self) -> Path:
@@ -211,12 +299,16 @@ def _merge(target: Any, data: dict[str, Any], section: str) -> None:
         if key not in known:
             raise ValueError(f"[{section}] clé inconnue : {key}")
         current = getattr(target, key)
+        # `bool` est une sous-classe de `int` : sans le rejet explicite,
+        # `max_in_flight = true` passait pour l'entier 1, en silence.
         if isinstance(current, bool):
             if not isinstance(value, bool):
                 raise ValueError(f"[{section}] {key} doit être un booléen")
-        elif isinstance(current, int) and not isinstance(value, int):
+        elif isinstance(current, int) and (isinstance(value, bool) or not isinstance(value, int)):
             raise ValueError(f"[{section}] {key} doit être un entier")
-        elif isinstance(current, float) and not isinstance(value, int | float):
+        elif isinstance(current, float) and (
+            isinstance(value, bool) or not isinstance(value, int | float)
+        ):
             raise ValueError(f"[{section}] {key} doit être un nombre")
         elif isinstance(current, str) and not isinstance(value, str):
             raise ValueError(f"[{section}] {key} doit être une chaîne")
@@ -225,8 +317,15 @@ def _merge(target: Any, data: dict[str, Any], section: str) -> None:
         setattr(target, key, float(value) if isinstance(current, float) else value)
 
 
-def load_config(path: Path | None) -> Config:
+def load_config(path: Path | None, *, on_missing: Callable[[str], None] | None = None) -> Config:
     """Charge `docia.toml` ; `None` ou fichier absent → défauts.
+
+    Args:
+        on_missing: appelé avec un message en clair quand `path` est donné mais
+            n'existe pas. Sans lui, une faute de frappe dans `--config` faisait
+            tourner toute la campagne sur les réglages par défaut sans un mot —
+            base, seuils de taille et modèle compris. Le message nomme le fichier
+            absent ; le chargement se poursuit sur les défauts, comme avant.
 
     Raises:
         ValueError: clé inconnue ou type invalide (on ne dégrade pas en silence :
@@ -234,7 +333,15 @@ def load_config(path: Path | None) -> Config:
             partir).
     """
     config = Config()
-    if path is None or not path.exists():
+    if path is None:
+        return config
+    if not path.exists():
+        if on_missing is not None:
+            on_missing(
+                f"configuration absente : {path} — réglages par défaut appliqués "
+                f"(base « {config.db_path} », taille {config.filter.min_size_bytes}"
+                f"–{config.filter.max_size_bytes} o, modèle « {config.llm.model} »)"
+            )
         return config
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     for section_name, target in (
@@ -275,9 +382,10 @@ reasoning_effort = "medium"        # low | medium | xhigh — Qwen3.8 (xhigh : s
 block_tokens = 32000               # 16–64K recommandé
 margin = 0.15
 tokenizer_engine = "openai"        # openai (o200k, précis) | mistral | approx (octets/4, sous-estime ~30 %)
-batch_files = 200
+batch_files = 200                  # rythme d'extraction (nombre de fichiers par appel DocFuse)
+batch_bytes = 67108864             # 64 Mio : plafond MÉMOIRE d'un lot (cumul des tailles source ; pic ≈ 5× ce budget) ; 0 = aucun
 work_dir = ""                      # vide = <db>.blocks/
-keep_blocks = true
+keep_blocks = true                 # ATTENTION : les blocs .md contiennent le TEXTE INTÉGRAL des documents, en clair, dans work_dir — false les efface au fil du run
 
 [filter]
 min_size_bytes = 100

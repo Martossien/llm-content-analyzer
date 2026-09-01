@@ -32,6 +32,11 @@ MODES = (
     "slow",
     "extra_ref",
     "bad_enum",
+    "cut_once",
+    "cut_always",
+    "empty_once",
+    "empty_always",
+    "redirect",
 )
 
 SLOW_DELAY_S = 2.0
@@ -225,12 +230,52 @@ class _Handler(BaseHTTPRequestHandler):
             with state.lock:
                 state.in_flight -= 1
 
+    def _cut_stream(self) -> None:
+        """Annonce un corps long puis coupe la connexion en plein flux.
+
+        Reproduit vLLM tué par l'OOM-killer, un service redémarré ou un
+        reverse-proxy/VPN qui lâche : httpx lève alors `RemoteProtocolError`."""
+        self.wfile.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Content-Length: 100000\r\n\r\n"
+            b'{"choices": [{"index": 0, "message": {"role"'
+        )
+        self.wfile.flush()
+        self.close_connection = True
+
     def _respond(self, payload: dict[str, Any], state: FakeOpenAIServer, attempt: int) -> None:
         mode = state.mode
         if state.handler_delay:
             time.sleep(state.handler_delay)
         if mode == "http400":
             self._send_text(400, "requête invalide : modèle inconnu")
+            return
+        if mode == "redirect":
+            body = b""
+            self.send_response(307)
+            self.send_header("Location", "http://127.0.0.1:1/v1/chat/completions/")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if mode == "cut_always" or (mode == "cut_once" and attempt == 1):
+            self._cut_stream()
+            return
+        if mode == "empty_always" or (mode == "empty_once" and attempt == 1):
+            # Qwen3 sans budget de raisonnement imposé : `reasoning` rempli, `content` vide.
+            self._send_json(
+                200,
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "", "reasoning": "hmm…"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+                },
+            )
             return
         if mode == "http500_then_ok" and attempt == 1:
             self._send_text(500, "erreur interne")

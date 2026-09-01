@@ -8,6 +8,7 @@ import os
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,13 @@ def test_build_command_local_and_smb(tmp_path: Path) -> None:
     local = ScanProfile(local_paths=["D:\\partage", "E:\\autre"])
     cmd = build_command(exe, local, tmp_path / "scan.csv", manifest_out=tmp_path / "m.json")
     assert cmd[:4] == [str(exe), "-c", str(tmp_path / "scan.csv"), "-q"]
-    assert cmd.count("--local-path") == 2
+    # Une seule fois l'option, ses valeurs à la suite : SMBeagle déclare `--local-path`
+    # en séquence CommandLineParser et refuse l'option répétée (code 2).
+    assert cmd.count("--local-path") == 1
+    assert cmd[cmd.index("--local-path") + 1 : cmd.index("--local-path") + 3] == [
+        "D:\\partage",
+        "E:\\autre",
+    ]
     assert all(flag in cmd for flag in ENRICHMENT_FLAGS)
     assert "--preserve-access-time" in cmd
     assert "--progress-json" in cmd
@@ -60,12 +67,27 @@ def test_build_command_local_and_smb(tmp_path: Path) -> None:
     assert "s3cret" not in redact(cmd)
     assert "••••" in redact(cmd)
 
+    multi = ScanProfile(hosts=["srv1", "srv2"], shares=["a", "b"], exclude_shares=["x", "y"])
+    multi_cmd = build_command(exe, multi, tmp_path / "scan.csv")
+    for option in ("-h", "-s", "-S"):
+        assert multi_cmd.count(option) == 1, f"{option} répété : CommandLineParser le refuse"
+
 
 def test_profile_validation() -> None:
     assert ScanProfile().validate()
-    assert ScanProfile(local_paths=["x"], hosts=["h"]).validate()
+    assert ScanProfile(local_paths=["D:\\x"], hosts=["h"]).validate()
     assert ScanProfile(hosts=["h"], username="u").validate()
-    assert ScanProfile(local_paths=["x"]).validate() == []
+    assert ScanProfile(local_paths=["D:\\x"]).validate() == []
+
+
+def test_profile_refuses_relative_paths() -> None:
+    """Un chemin relatif serait résolu contre le répertoire courant du scanner —
+    donc un autre dossier que celui voulu, sans que rien ne le signale."""
+    for absolu in ("D:\\partage", "\\\\serveur\\partage", "/mnt/partage", "C:/data"):
+        assert ScanProfile(local_paths=[absolu]).validate() == [], absolu
+    for relatif in ("fichiers", "..\\partage", "./data", "", "   ", "partage\\sous"):
+        errors = ScanProfile(local_paths=[relatif]).validate()
+        assert any("non absolu" in e for e in errors), relatif
 
 
 def test_parse_progress_line() -> None:
@@ -230,3 +252,119 @@ def test_first_access_time_survives_rescan(tmp_path: Path) -> None:
         row = db.query("SELECT access_time_first, content_version FROM files")[0]
         assert row["access_time_first"].startswith("30/08/2026")
         assert row["content_version"] == 2
+
+
+# ------------------------------------------------ robustesse : ne jamais perdre un scan en cours
+
+
+def _script_scanner(tmp_path: Path, corps: str, nom: str) -> Path:
+    """Faux scanner au comportement choisi ; `args` et `csv_out` sont déjà en place."""
+    script = tmp_path / f"{nom}.py"
+    script.write_text(
+        "import json, sys, time\nargs = sys.argv[1:]\ncsv_out = args[args.index('-c') + 1]\n"
+        + corps,
+        encoding="utf-8",
+    )
+    launcher = tmp_path / (f"{nom}.cmd" if os.name == "nt" else nom)
+    if os.name == "nt":
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\n', encoding="utf-8")
+    else:
+        launcher.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
+        )
+        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+    return launcher
+
+
+def test_parse_progress_line_malformee_est_une_ligne_de_texte() -> None:
+    """GRAVE 5 : le contrat du scanner (C#, versionné à part) n'est pas verrouillé.
+
+    Un `files` rendu par `ToString("N0")`, un `elapsed_s` en durée ou un flottant
+    infini faisaient remonter `ValueError` / `OverflowError` hors du `try` : le
+    sous-processus était tué et un scan de plusieurs heures perdu sur une trace.
+    """
+    for ligne in (
+        '{"event":"scan","files":"beaucoup"}',
+        '{"event":"scan","files":"1 234"}',
+        '{"event":"scan","files":1e400}',
+        '{"event":"scan","elapsed_s":"00:01:23"}',
+        '{"event":"scan","hosts":{"srv":1}}',
+    ):
+        assert parse_progress_line(ligne) is None, ligne
+
+
+def test_run_scan_consulte_cancel_pendant_un_scanner_silencieux(tmp_path: Path) -> None:
+    """MOYEN 6 : SMBeagle est lancé avec `-q` — le silence est le cas normal.
+
+    `cancel` n'était consulté qu'après réception d'une ligne, or `for raw in
+    proc.stdout:` bloque : « Arrêter » restait sans effet pendant l'énumération
+    d'un gros partage ou le délai TCP d'un hôte injoignable.
+    """
+    exe = _script_scanner(
+        tmp_path,
+        f"open(csv_out, 'w', encoding='utf-8').write({HEADER!r} + '\\n')\n"
+        "print(json.dumps({'event': 'scan', 'stage': 'hosts', 'files': 0}), flush=True)\n"
+        "time.sleep(20)\n",
+        "muet",
+    )
+    cancel = threading.Event()
+    lignes: list[str] = []
+    threading.Timer(0.5, cancel.set).start()
+    debut = time.monotonic()
+    result = run_scan(
+        ScanProfile(local_paths=[str(tmp_path)]),
+        tmp_path / "scan.csv",
+        exe=exe,
+        cancel=cancel,
+        on_line=lignes.append,
+    )
+    duree = time.monotonic() - debut
+    assert duree < 8, f"l'annulation a mis {duree:.1f} s (le scanner se taisait 20 s)"
+    assert any("arrêt demandé" in ligne for ligne in lignes), "l'arrêt doit être signalé"
+    assert result.csv_path.is_file(), "le CSV partiel reste conservé"
+
+
+def test_run_scan_refuse_un_csv_vide_annonce_plein(tmp_path: Path) -> None:
+    """MOYEN 10 : le chiffre de la progression n'est pas un décompte de lignes.
+
+    Disque plein en fin de scan, écriture coupée sur un partage, scanner tombé
+    après avoir vidé ses compteurs : `files = count_csv_rows(...) or last_files`
+    annonçait « scan terminé : 42 000 fichiers » sur un CSV de 0 octet.
+    """
+    exe = _script_scanner(
+        tmp_path,
+        "open(csv_out, 'w', encoding='utf-8').close()\n"
+        "print(json.dumps({'event': 'scan', 'files': 42000}), flush=True)\n",
+        "csv_vide",
+    )
+    with pytest.raises(ScanError, match="42000"):
+        run_scan(ScanProfile(local_paths=[str(tmp_path)]), tmp_path / "scan.csv", exe=exe)
+
+
+def test_run_scan_survit_a_des_rappels_defaillants(tmp_path: Path) -> None:
+    """MOYEN 12 : un `on_event` qui lève (fenêtre détruite) ne doit pas tuer le scan."""
+
+    def boum(_payload: object) -> None:
+        raise RuntimeError("fenêtre détruite (TclError)")
+
+    exe = _fake_scanner(tmp_path, rows=3)
+    result = run_scan(
+        ScanProfile(local_paths=[str(tmp_path)]),
+        tmp_path / "scan.csv",
+        exe=exe,
+        on_event=boum,
+        on_line=boum,
+    )
+    assert result.files == 3
+
+
+def test_scan_result_ne_conserve_pas_le_mot_de_passe(tmp_path: Path) -> None:
+    """MINEUR 21 : `command` est stockée déjà masquée, pas seulement affichée."""
+    exe = _fake_scanner(tmp_path, rows=1)
+    result = run_scan(
+        ScanProfile(hosts=["srv1"], username="dom\\u", password="s3cret"),
+        tmp_path / "scan.csv",
+        exe=exe,
+    )
+    assert "s3cret" not in " ".join(result.command)
+    assert "••••" in result.command

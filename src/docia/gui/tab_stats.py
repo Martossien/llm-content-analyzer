@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from docia.db import Database
+from docia.gui.lazy import LazyScreen
 from docia.gui.theme import (
     ACCENT,
     ACCENT_OK,
@@ -113,18 +115,28 @@ class _Section:
         self.set_table(data.cols, data.rows, data.summary, data.tags)
 
     def waiting(self) -> None:
-        """Indique que le calcul est lancé — la fenêtre reste utilisable."""
-        self.summary.configure(text=_WAIT)
+        """Vide la section et annonce le calcul — la fenêtre reste utilisable.
+
+        Vider est le point important : ne changer que la ligne de résumé laissait les
+        tuiles et le tableau afficher les chiffres de la campagne précédente, sans
+        rien qui le signale.
+        """
+        self.apply(SectionData(summary=_WAIT))
 
 
-class StatsTab:
+class StatsTab(LazyScreen):
+    TAB_NAME = "Statistiques"
+
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
         self.ctk = app.ctk
-        self._dirty = True
-        self._shown_key: tuple[str, str, int] | None = None
-        self._token = 0
+        # Une clé de fraîcheur **par section** (vue, seuil, campagne) : une clé unique
+        # pour les quatre faisait tout recalculer à chaque aller-retour, et l'absence
+        # du chemin de campagne laissait les sections non rouvertes sur l'ancienne.
+        self._shown_key: dict[str, tuple[str, int, str]] = {}
+        self._shown_db = ""
+        self._lazy_setup()
 
     def build(self) -> None:
         ctk, p = self.ctk, self.parent
@@ -145,7 +157,7 @@ class StatsTab:
         self.sub = ctk.CTkTabview(p, anchor="w", command=self.refresh_if_needed)
         self.sub.pack(fill="both", expand=True, padx=8, pady=(0, 6))
         self.sections: dict[str, _Section] = {}
-        self.hygiene = self.sections["Hygiène"] = _Section(
+        self.sections["Hygiène"] = _Section(
             ctk,
             self.sub.add("Hygiène"),
             tiles=[
@@ -156,7 +168,7 @@ class StatsTab:
             views=_HYGIENE_VIEWS,
             on_view=self.refresh,
         )
-        self.risk = self.sections["Risque"] = _Section(
+        self.sections["Risque"] = _Section(
             ctk,
             self.sub.add("Risque"),
             tiles=[
@@ -167,7 +179,7 @@ class StatsTab:
             views=_RISK_VIEWS,
             on_view=self.refresh,
         )
-        self.retention = self.sections["Conservation"] = _Section(
+        self.sections["Conservation"] = _Section(
             ctk,
             self.sub.add("Conservation"),
             tiles=[
@@ -177,7 +189,7 @@ class StatsTab:
             views=_RETENTION_VIEWS,
             on_view=self.refresh,
         )
-        self.review = self.sections["Vérification"] = _Section(
+        self.sections["Vérification"] = _Section(
             ctk,
             self.sub.add("Vérification"),
             tiles=[
@@ -199,51 +211,51 @@ class StatsTab:
         name = str(self.sub.get())
         return name if name in self.sections else "Hygiène"
 
-    def refresh(self) -> None:
-        """Marque l'écran à recalculer ; le calcul n'a lieu que s'il est visible."""
-        self._dirty = True
-        self.refresh_if_needed()
-
     def refresh_if_needed(self) -> None:
-        """Recalcule le sous-onglet affiché si nécessaire (changement d'onglet, de vue…)."""
-        if self.app.current_tab() != TAB_NAME:
+        """Recalcule le sous-onglet affiché si nécessaire (changement d'onglet, de vue…).
+
+        Un changement de campagne vide les **quatre** sections : sinon, un sous-onglet
+        qu'on n'a pas rouvert continue d'afficher, sans le dire, les chiffres de la
+        campagne précédente.
+        """
+        if not self.visible():
             return
+        db_path = str(self.app.db_path())
+        if db_path != self._shown_db:
+            self._shown_db = db_path
+            self._shown_key.clear()
+            for s in self.sections.values():
+                s.waiting()
         section = self._section_name()
-        key = (section, self.sections[section].view_var.get(), self._years())
-        if not self._dirty and key == self._shown_key:
+        key = (self.sections[section].view_var.get(), self._years(), db_path)
+        if not self._dirty and self._shown_key.get(section) == key:
             return
         self._compute(section, key)
 
-    def _compute(self, section: str, key: tuple[str, str, int]) -> None:
+    def _compute(self, section: str, key: tuple[str, int, str]) -> None:
         if not self.app.db_path().exists():
             for s in self.sections.values():
                 s.apply(SectionData(summary="aucune campagne ouverte"))
             self._dirty = False
-            self._shown_key = None
+            self._shown_key.clear()
             return
         self.sections[section].waiting()
-        self._token += 1
-        token = self._token
-        app, view_name, years = self.app, key[1], key[2]
+        view_name, years = key[0], key[1]
 
-        def compute() -> SectionData:
+        def compute(db: Database) -> SectionData:
             from docia import views
 
-            with app.open_db() as db:
-                return _COMPUTE[section](views, db, view_name, years)
+            return _COMPUTE[section](views, db, view_name, years)
 
         def apply(data: SectionData) -> None:
-            if token != self._token:  # un calcul plus récent a été demandé
-                return
             self.sections[section].apply(data)
-            self._dirty = False
-            self._shown_key = key
+            self._shown_key[section] = key
 
-        app.run_background(compute, apply, name="statistiques")
+        self._start(compute, apply, name="statistiques")
 
     def _html_report(self) -> None:
         """Produit le rapport HTML (mêmes chiffres que cet écran) et l'ouvre."""
-        from docia.gui.service_shim import produce_document
+        from docia.gui.dialogs import produce_document
 
         produce_document(self.app, "html", "report")
 

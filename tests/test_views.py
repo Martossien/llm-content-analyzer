@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
 from dataclasses import fields, is_dataclass
 from datetime import date
@@ -64,11 +65,15 @@ def _analysis(
     retention: bool = False,
     years: int = 0,
     basis: str = "none",
+    resume: str | None = None,
+    justification: str = "parce que",
 ) -> FileAnalysis:
+    """Analyse de démonstration. `resume` et `justification` sont paramétrables :
+    ce sont les deux textes que la LLM rend sans contrainte de caractères."""
     return FileAnalysis(
         file_ref=ref,
-        resume=f"résumé de {ref}",
-        security=DomainAnalysis(security, 80, {"justification": "parce que"}),
+        resume=resume if resume is not None else f"résumé de {ref}",
+        security=DomainAnalysis(security, 80, {"justification": justification}),
         rgpd=DomainAnalysis(rgpd, 70, {"data_types": ["identite"]}),
         finance=DomainAnalysis("none", 90, {"amounts": []}),
         legal=DomainAnalysis("none", 90, {"parties": []}),
@@ -429,8 +434,60 @@ DIRECTORIES: tuple[tuple[str, str], ...] = (
     ("\\\\srv\\part\\", "\\\\srv\\part\\a"),
     ("autre", "\\\\srv\\part\\a\\b\\c"),
     ("autre", "\\\\srv\\part\\a\\b\\cc"),
+    # Séparateurs vides : c'est là que compter les antislashs bruts décalait le
+    # préfixe mémoïsé et fusionnait deux partages distincts sous une seule étiquette.
+    ("", "\\\\\\srv\\part\\a"),
+    ("", "\\\\\\srv\\AUTRE\\b"),
+    ("", "\\\\srv\\\\part\\a"),
+    ("", "\\\\srv\\\\AUTRE\\b"),
+    ("", "\\\\srv\\part\\\\a\\b"),
+    ("", "\\\\srv\\part\\\\a\\bb"),
+    ("", "//srv//part//a//b"),
+    ("", "//srv//AUTRE//a//b"),
 )
 """Répertoires piégeux : profondeurs, séparateurs, casse, espaces, `base` vide ou non."""
+
+
+def _generated_directories(count: int, seed: int = 11) -> list[tuple[str, str]]:
+    """Chemins engendrés : séparateurs doublés ou manquants, slashs, espaces, casse mêlée.
+
+    Les 19 cas choisis à la main ne suffisaient pas : le défaut ne se déclenche que
+    sur un séparateur vide, forme qu'aucun d'eux ne portait.
+    """
+    import random
+
+    rng = random.Random(seed)
+    serveurs = ["srv", "SRV", "srv-fichiers", "192.168.1.72"]
+    partages = ["part", "PART", "partage 1", "part,age", "admin$", "AUTRE"]
+    niveaux = ["a", "b", "dossier 1", "Direction Générale", "sous dossier", "x", ""]
+    out: list[tuple[str, str]] = []
+    for _ in range(count):
+        head = rng.choice(["\\\\", "\\\\\\", "//", "\\", ""])
+        sep = rng.choice(["\\", "\\\\", "/"])
+        parts = [rng.choice(serveurs), rng.choice(partages)]
+        parts += [rng.choice(niveaux) for _ in range(rng.randint(0, 5))]
+        directory = head + sep.join(parts)
+        if rng.random() < 0.15:
+            directory += rng.choice(["\\", "/", " "])
+        base = rng.choice(["", "", "", f"\\\\{parts[0]}\\{parts[1]}", parts[1], "X"])
+        out.append((base, directory))
+    return out
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2, 3, 5])
+def test_axis_labeller_matches_generated_labels(depth: int) -> None:
+    """Propriété : sur 2 000 chemins engendrés, la mémoïsation ne change aucune étiquette.
+
+    Un préfixe trop court réutilisait l'étiquette précédente et **additionnait des
+    fichiers de partages différents** sur une même ligne de statistiques.
+    """
+    rows = sorted(_generated_directories(2_000))
+    for axis, expected in (
+        ("share", [views.share_label(base, path) for base, path in rows]),
+        ("directory", [views.directory_label(base, path, depth) for base, path in rows]),
+    ):
+        label_of = views._axis_labeller(axis, depth)  # noqa: SLF001
+        assert [label_of(row) for row in rows] == expected
 
 
 @pytest.mark.parametrize("depth", [1, 2, 3, 5])
@@ -461,6 +518,27 @@ def test_shift_years_handles_29_february() -> None:
     assert views.shift_years(date(2024, 2, 29), 4) == date(2028, 2, 29)
 
 
+@pytest.mark.parametrize(
+    ("depart", "annees", "attendu"),
+    [
+        (date(9999, 1, 1), 10, date.max),  # DateTime.MaxValue + conservation légale
+        (date(9999, 12, 31), 1, date.max),
+        (date(9999, 2, 28), 100, date.max),  # durée maximale acceptée par le parseur
+        (date(1, 1, 1), -1, date.min),  # FILETIME nul, décalé vers le passé
+        (date(2026, 6, 30), -5, date(2021, 6, 30)),  # cas courant : inchangé
+    ],
+)
+def test_shift_years_borne_les_dates_hors_plage(depart: date, annees: int, attendu: date) -> None:
+    """Une date aberrante ne doit jamais coûter le rapport.
+
+    `date.replace(year=10009)` lève `ValueError: year 10009 is out of range` :
+    un seul fichier daté 9999 (FILETIME saturé, `DateTime.MaxValue` de .NET) avec
+    une conservation légale rendait `html`, `markdown`, `powerbi` et `xlsx`
+    impossibles pour la campagne entière.
+    """
+    assert views.shift_years(depart, annees) == attendu
+
+
 def test_format_helpers() -> None:
     assert views.format_bytes(512) == "512 o"
     assert views.format_bytes(1536) == "1,5 Ko"
@@ -476,3 +554,322 @@ def test_empty_database_is_safe(tmp_path: Path) -> None:
         assert views.top_sensitive(empty) == []
         assert views.retention_plan(empty, today=TODAY).total_files == 0
         assert views.overview(empty, today=TODAY).total_files == 0
+
+
+# ------------------------------- D1 : « à conserver 0 an » n'est pas « échu »
+
+
+def _base_conservation(path: Path, *, years: int, written: str = "01/01/2010 08:00:00") -> Database:
+    """Un fichier « à conserver » pendant `years` années, écrit il y a longtemps."""
+    database = Database(path)
+    scan = database.start_scan("scan.csv")
+    database.upsert_files([_row("dossier.pdf", lwt=written, access=written)], scan)
+    database.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+    for file_row in database.iter_files():
+        database.store_analysis(
+            file_row.id,
+            None,
+            1,
+            prompt_hash="p",
+            model="m",
+            analysis=_analysis(
+                file_row.name, retention=True, years=years, basis="legal", security="C1"
+            ),
+        )
+    return database
+
+
+def test_conservation_sans_duree_nest_jamais_echue(tmp_path: Path) -> None:
+    """`retention_required=1` avec `years=0` : durée non déterminée, pas échéance immédiate.
+
+    Le schéma LLM autorise `years: 0` (`minimum: 0`) et l'analyseur l'accepte.
+    Calculée, la fin de conservation valait « dernière écriture + 0 an », donc la
+    date d'écriture elle-même : tout fichier écrit avant aujourd'hui devenait
+    « échu : oui ». Sur une base réelle de 280 208 fichiers, 155 218 étaient ainsi
+    déclarés échus à tort — et « échu » est l'indicateur sur lequel un agent
+    décide de supprimer.
+    """
+    with _base_conservation(tmp_path / "zero.sqlite", years=0) as database:
+        plan = views.retention_plan(database, today=TODAY)
+    ligne = plan.rows[0]
+    assert ligne.years == 0
+    assert ligne.undetermined is True
+    assert ligne.end_date is None
+    assert ligne.expired is False
+    assert plan.expired_files == 0
+    assert plan.undetermined_files == 1
+
+
+def test_conservation_avec_duree_reste_echue_quand_elle_lest(tmp_path: Path) -> None:
+    """Le correctif ne doit pas éteindre l'indicateur : une durée réelle échue le reste."""
+    with _base_conservation(tmp_path / "cinq.sqlite", years=5) as database:
+        plan = views.retention_plan(database, today=TODAY)
+    ligne = plan.rows[0]
+    assert (ligne.years, ligne.undetermined) == (5, False)
+    assert ligne.end_date == date(2015, 1, 1)
+    assert ligne.expired is True
+    assert (plan.expired_files, plan.undetermined_files) == (1, 0)
+
+
+# ------------------------- un fichier sensible n'est jamais candidat au nettoyage
+
+
+@pytest.mark.parametrize("classe", ["C2", "C3", "N/A", ""])
+def test_un_fichier_sensible_ou_non_classe_nest_jamais_candidat_au_nettoyage(
+    tmp_path: Path, classe: str
+) -> None:
+    """Seules C0 et C1 peuvent entrer dans la liste des candidats à la suppression.
+
+    Ajouter les C2 à `_CLEANUP_WHERE` passait la suite complète : rien ne
+    vérifiait la seule garantie de sûreté de cette vue. Un fichier non classé
+    (`N/A`, ou vide parce que l'analyse a échoué) ne doit pas y entrer non plus :
+    la clause est une liste blanche, pas une liste noire.
+    """
+    with Database(tmp_path / f"nettoyage_{classe or 'vide'}.sqlite") as database:
+        scan = database.start_scan("scan.csv")
+        database.upsert_files(
+            [_row("ancien.pdf", lwt="01/01/2010 08:00:00", access="01/01/2010 08:00:00")], scan
+        )
+        database.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+        file_id = next(iter(database.iter_files())).id
+        database.store_analysis(
+            file_id,
+            None,
+            1,
+            prompt_hash="p",
+            model="m",
+            analysis=_analysis("ancien.pdf", security="C1", rgpd="none"),
+        )
+        # la classification est écrasée directement : `C1` seul est un candidat
+        database.query("SELECT 1")
+        database._conn.execute(  # noqa: SLF001
+            "UPDATE analyses SET security_classification=?", (classe,)
+        )
+        database._conn.commit()  # noqa: SLF001
+
+        rapport = views.cleanup_candidates(database, years=1, today=TODAY)
+        assert rapport.rows == []
+        assert (rapport.total_files, rapport.total_bytes) == (0, 0)
+        assert views.overview(database, today=TODAY, stale_years=1).cleanup_files == 0
+
+        # preuve que la base était bien candidate avec une classe autorisée
+        database._conn.execute("UPDATE analyses SET security_classification='C1'")  # noqa: SLF001
+        database._conn.commit()  # noqa: SLF001
+        assert views.cleanup_candidates(database, years=1, today=TODAY).total_files == 1
+
+
+# --------------------- la règle « dernière analyse » n'existe qu'à un seul endroit
+
+
+def _sql_normalise(text: str) -> str:
+    """Texte SQL comparable : blancs ôtés (`file_id=f.id` ≡ `file_id = f.id`)."""
+    return "".join(text.split())
+
+
+def test_la_regle_derniere_analyse_est_la_meme_partout() -> None:
+    """Les trois formulations de « la dernière analyse » doivent rester identiques.
+
+    Elle décide quelle analyse fait foi : classification, RGPD, conservation,
+    candidats au nettoyage. Elle vivait en trois exemplaires — `docia.views`,
+    `docia.db` et `docia.report.powerbi` — sans qu'aucun test ne les compare : le
+    rapport, l'écran Résultats et l'export Power BI pouvaient diverger sans que
+    rien n'échoue.
+    """
+    from docia import db as db_module
+    from docia.report import powerbi
+
+    attendu_a = _sql_normalise(views.latest_analysis_sql("a.file_id"))
+    attendu_f = _sql_normalise(views.latest_analysis_sql("f.id"))
+
+    assert attendu_a in _sql_normalise(views._IS_LATEST)  # noqa: SLF001
+    assert attendu_f in _sql_normalise(powerbi._LATEST_ANALYSIS_JOIN)  # noqa: SLF001
+    # `docia.db` ne peut pas importer `docia.views` (le cycle est dans l'autre sens) :
+    # sa copie est comparée mot à mot, en attendant qu'elle descende dans `docia.db`.
+    assert attendu_f in _sql_normalise(db_module._LATEST_JOINS)  # noqa: SLF001
+
+
+def test_les_vues_le_journal_et_lexport_designent_la_meme_derniere_analyse(
+    tmp_path: Path,
+) -> None:
+    """Trois analyses du même fichier : les trois chemins de lecture doivent choisir la même.
+
+    Les deux départages sont couverts : `created_at` d'abord, puis `id` décroissant
+    à horodatage égal (réanalyse dans la même seconde).
+    """
+    from docia.report import powerbi
+
+    with Database(tmp_path / "derniere.sqlite") as database:
+        scan = database.start_scan("scan.csv")
+        database.upsert_files([_row("doc.pdf")], scan)
+        database.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+        file_id = next(iter(database.iter_files())).id
+        for version, (classe, horodatage) in enumerate(
+            (
+                ("C0", "2026-01-01T08:00:00+00:00"),  # la plus ancienne
+                ("C3", "2026-03-01T08:00:00+00:00"),  # la plus récente : celle qui fait foi
+                ("C1", "2026-01-01T08:00:00+00:00"),  # id plus grand, mais horodatage ancien
+            ),
+            start=1,
+        ):
+            database.store_analysis(
+                file_id,
+                None,
+                version,
+                prompt_hash="p",
+                model="m",
+                analysis=_analysis("doc.pdf", security=classe, rgpd="critical"),
+            )
+            database._conn.execute(  # noqa: SLF001
+                "UPDATE analyses SET created_at=? WHERE id=(SELECT MAX(id) FROM analyses)",
+                (horodatage,),
+            )
+            database._conn.commit()  # noqa: SLF001
+
+        assert [f.security for f in views.top_sensitive(database)] == ["C3"]
+        assert [r["security_classification"] for r in database.latest_analyses()] == ["C3"]
+        powerbi.export_powerbi(database, tmp_path / "pbi", today=TODAY)
+    lignes = (tmp_path / "pbi" / "analyses.csv").read_text(encoding="utf-8-sig").splitlines()
+    entetes = lignes[0].split(";")
+    assert lignes[1].split(";")[entetes.index("security_classification")] == "C3"
+
+
+# ------------------------------------------- coût mémoire et coût en requêtes
+
+
+def _taille_profonde(value: object, seen: set[int] | None = None) -> int:
+    """Octets réellement retenus par une structure imbriquée."""
+    seen = set() if seen is None else seen
+    if id(value) in seen:
+        return 0
+    seen.add(id(value))
+    total = sys.getsizeof(value)
+    if isinstance(value, dict):
+        total += sum(
+            _taille_profonde(k, seen) + _taille_profonde(v, seen) for k, v in value.items()
+        )
+    elif isinstance(value, list | tuple | set):
+        total += sum(_taille_profonde(item, seen) for item in value)
+    return total
+
+
+def test_le_repli_du_risque_ne_retient_pas_une_ligne_par_ligne_source() -> None:
+    """Ce que `_fold_risk` garde dépend du nombre d'étiquettes, jamais du nombre de lignes.
+
+    La version précédente empilait un tuple Python par ligne lue : 934 028 tuples
+    retenus pour rendre 5 862 lignes, soit 444 Mo, sur une campagne réelle.
+    """
+    ligne = ("cle", "C1", "low", 1)
+
+    def label_of(_row: tuple[object, ...]) -> str:
+        return "unique"
+
+    une = views._fold_risk([ligne], 1, label_of)  # noqa: SLF001
+    beaucoup = views._fold_risk([ligne] * 50_000, 1, label_of)  # noqa: SLF001
+
+    assert len(une) == len(beaucoup) == 1
+    # cinquante mille fois plus de lignes, et le repli ne grossit que de la taille
+    # des entiers cumulés — pas d'un objet par ligne (≈ 5 Mo dans l'ancienne version)
+    croissance = _taille_profonde(beaucoup) - _taille_profonde(une)
+    assert 0 <= croissance < 1024, croissance
+    # le résultat, lui, est bien cumulé
+    assert beaucoup["unique"][0]["C1"] == 50_000
+    assert beaucoup["unique"][1]["low"] == 50_000
+    assert beaucoup["unique"][2][0] == 50_000
+
+
+def _base_arborescente(path: Path, *, directories: int, base: str = "\\\\srv\\part") -> Database:
+    """Un fichier analysé par répertoire, tous sous le même partage."""
+    database = Database(path)
+    scan = database.start_scan("scan.csv")
+    database.upsert_files(
+        [
+            _row(f"f{i}.pdf", fast_hash=f"h{i}", base=base, directory=f"{base}\\niveau1\\d{i}")
+            for i in range(directories)
+        ],
+        scan,
+    )
+    database.finish_scan(
+        scan, total=directories, new=directories, updated=0, unchanged=0, invalid=0
+    )
+    for file_row in database.iter_files():
+        database.store_analysis(
+            file_row.id, None, 1, prompt_hash="p", model="m", analysis=_analysis(file_row.name)
+        )
+    return database
+
+
+def test_une_seule_base_vide_ne_fait_pas_basculer_laxe_partage(tmp_path: Path) -> None:
+    """Un enregistrement à `base` vide ne doit pas regrouper tout le parc par répertoire.
+
+    `share_label` ne lit `unc_directory` que si `base` est vide ; le regroupement
+    SQL en tenait compte, mais **globalement** : un seul enregistrement fautif et
+    l'axe entier passait d'un groupe par partage à un groupe par répertoire —
+    521 718 groupes au lieu de 6 sur une campagne de 934 028 fichiers, soit ×24
+    en mémoire. Le repli est désormais borné aux seules lignes à `base` vide.
+    """
+    with _base_arborescente(tmp_path / "partage.sqlite", directories=60) as database:
+        sain = views.classification_matrix(database, axis="share")
+        groupes_sains = len(views._axis_volumes(database, views._axis_group(database, "share")))  # noqa: SLF001
+
+        # un unique enregistrement dont la colonne `base` ne nomme rien
+        database._conn.execute(  # noqa: SLF001
+            "UPDATE files SET base='\\' WHERE id=(SELECT MIN(id) FROM files)"
+        )
+        database._conn.commit()  # noqa: SLF001
+        abime = views.classification_matrix(database, axis="share")
+        groupes_abimes = len(views._axis_volumes(database, views._axis_group(database, "share")))  # noqa: SLF001
+
+    assert groupes_sains == 1  # un seul partage, un seul groupe SQL
+    # l'enregistrement fautif fait son propre groupe ; les 59 autres restent groupés
+    # ensemble. Avant, l'axe entier retombait sur `unc_directory` : 60 groupes.
+    assert groupes_abimes == 2
+    # et le résultat rendu, lui, ne change pas d'un iota
+    assert {r.label for r in sain} == {"\\\\srv\\part"}
+    assert sain == abime
+
+
+def test_duplicates_ne_lance_pas_une_requete_par_famille(tmp_path: Path) -> None:
+    """Le détail des familles est lu par paquets, pas une famille à la fois.
+
+    Sans limite, c'était un `N+1` : 150 001 requêtes sur une campagne réelle —
+    et `report.powerbi` l'appelait ainsi, sans limite, à chaque export.
+    """
+    familles = 500
+    with Database(tmp_path / "doublons.sqlite") as database:
+        scan = database.start_scan("scan.csv")
+        database.upsert_files(
+            [
+                _row(
+                    f"f{i}.pdf", fast_hash=f"h{i // 2}", size=1000, directory=f"\\\\srv\\part\\d{i}"
+                )
+                for i in range(familles * 2)
+            ],
+            scan,
+        )
+        database.finish_scan(
+            scan, total=familles * 2, new=familles * 2, updated=0, unchanged=0, invalid=0
+        )
+
+        appels: list[str] = []
+        vraie = database.query_values
+
+        def espion(sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+            appels.append(sql)
+            return vraie(sql, params)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(database, "query_values", espion)
+            rapport = views.duplicates(database)
+            en_flux = list(views.iter_duplicate_families(database))
+
+    assert rapport.total_families == familles
+    assert rapport.total_copies == familles * 2
+    assert len(rapport.families) == familles
+    assert all(len(f.paths) == 2 and len(f.file_ids) == 2 for f in rapport.families)
+    # une requête d'agrégation + un paquet toutes les `MEMBER_BATCH` familles, deux fois
+    attendu = 2 * (1 + -(-familles // views.MEMBER_BATCH))
+    assert len(appels) == attendu, appels[:5]
+    assert attendu < familles  # et surtout : pas une requête par famille
+    # le flux rend exactement les mêmes familles, dans le même ordre
+    assert [f.family_id for f in en_flux] == [f.family_id for f in rapport.families]
+    assert [f.paths for f in en_flux] == [f.paths for f in rapport.families]

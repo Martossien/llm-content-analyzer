@@ -22,13 +22,13 @@ from pathlib import Path
 
 from docia.config import Config
 from docia.db import Database, backup_dir_for
-from docia.filter import PlanReport, plan_files
-from docia.ingest.smbeagle_csv import ImportReport, import_csv
+from docia.filter import PlanProgress, PlanReport, plan_files
+from docia.ingest.smbeagle_csv import ImportProgress, ImportReport, import_csv
 from docia.llm.schema import prompt_hash
 from docia.models import FileStatus
 from docia.pipeline import RunReport, resolve_system_prompt, run_pipeline
 from docia.scan import ScanError, ScanEvent, ScanProfile, ScanResult, run_scan
-from docia.views import RunStat, runs_summary
+from docia.views import RunStat, format_int, runs_summary
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ __all__ = [
     "RECENT_FILE",
     "WHERE_KEYS",
     "CampaignStatus",
+    "ImportProgress",
     "RecentCampaign",
     "RunEvent",
     "ServiceError",
@@ -53,7 +54,10 @@ __all__ = [
     "backup_dir_for",
     "campaign_status",
     "docia_home",
+    "format_import_progress",
+    "format_import_report",
     "forget_campaign",
+    "import_progress_logger",
     "import_scan",
     "list_backups",
     "plan",
@@ -211,17 +215,95 @@ def campaign_status(db: Database) -> CampaignStatus:
 # ------------------------------------------------------------------ ingestion
 
 
-def import_scan(db: Database, csv_path: Path, *, strict: bool = False) -> ImportReport:
+def format_import_progress(progress: ImportProgress) -> str:
+    """Ligne de journal d'un import en cours : lignes, pourcentage, durée.
+
+    Le pourcentage vient des octets lus (voir `ImportProgress`) : il est honnête
+    dès la première seconde, alors que le nombre total de lignes reste inconnu.
+    """
+    lines = format_int(progress.rows)
+    invalid = f" ({progress.invalid} invalides)" if progress.invalid else ""
+    return (
+        f"intégration : {lines} lignes{invalid} — "
+        f"{progress.percent:.0f} % — {progress.elapsed_s:.0f} s"
+    )
+
+
+def format_import_report(report: ImportReport, *, prefix: str = "import") -> str:
+    """Bilan d'un import terminé, en une ligne — la même pour tous les clients.
+
+    `prefix` porte le contexte : `docia ingest` annonce « scan 12 : … » (le
+    numéro de scan sert à `docia status`), l'interface et `docia scan` se
+    contentent de « import : … ». La ligne elle-même — total, nouveaux,
+    modifiés, inchangés, invalides — n'est écrite qu'ici : elle était recopiée à
+    trois endroits, et les trois avaient déjà divergé.
+    """
+    # Une taille illisible retombe à zéro, donc le fichier sera exclu « trop petit » :
+    # sans ce compteur, il sortait de l'audit sans que personne ne l'apprenne.
+    tailles = f" — {report.size_defaulted} taille(s) illisible(s)" if report.size_defaulted else ""
+    return (
+        f"{prefix} : {report.total} lignes — {report.new} nouveaux, "
+        f"{report.updated} modifiés, {report.unchanged} inchangés, "
+        f"{report.invalid} invalides{tailles}"
+    )
+
+
+def import_progress_logger(
+    log: Callable[[str], None], *, min_seconds: float = 2.0, min_rows: int = 50_000
+) -> Callable[[ImportProgress], None]:
+    """Rappel d'avancement d'import qui écrit dans `log` sans l'inonder.
+
+    Une ligne au démarrage, puis au plus une toutes les `min_seconds` secondes ou
+    tous les `min_rows` lignes, **et toujours une à la fin** : le dernier appel
+    porte `ImportProgress.final` et court-circuite l'étranglement. Sans cela, un
+    import de 934 028 lignes s'arrêtait sur « 900 000 lignes — 96 % » et un
+    import de trois lignes sur « 0 lignes — 0 % ». Partagé par la CLI,
+    l'interface et le futur serveur web : la même progression pour tout le monde.
+    """
+    last_rows = 0
+    last_at = 0.0
+    last_line = ""
+    started = False
+
+    def emit(progress: ImportProgress) -> None:
+        nonlocal last_rows, last_at, last_line, started
+        now = time.monotonic()
+        if (
+            not progress.final
+            and started
+            and progress.rows - last_rows < min_rows
+            and now - last_at < min_seconds
+        ):
+            return
+        line = format_import_progress(progress)
+        if progress.final and started and line == last_line:
+            return  # le dernier lot vient d'annoncer exactement la même chose
+        started, last_rows, last_at, last_line = True, progress.rows, now, line
+        log(line)
+
+    return emit
+
+
+def import_scan(
+    db: Database,
+    csv_path: Path,
+    *,
+    strict: bool = False,
+    progress: Callable[[ImportProgress], None] | None = None,
+) -> ImportReport:
     """Importe un CSV SMBeagle et mémorise la campagne dans les récentes.
 
     `strict=False` (défaut de l'interface) tolère les lignes invalides : elles
     sont comptées dans le rapport plutôt que d'interrompre l'import.
+
+    `progress` est le rappel d'avancement d'`import_csv` (voir
+    `import_progress_logger` pour la version « une ligne de journal »).
     """
     path = Path(csv_path)
     if not path.exists():
         raise ServiceError(f"fichier de scan introuvable : {path}")
     try:
-        report = import_csv(db, path, strict=strict)
+        report = import_csv(db, path, strict=strict, progress=progress)
     except OSError as exc:
         raise ServiceError(f"lecture impossible du scan {path} : {exc}") from exc
     logger.info(
@@ -244,6 +326,8 @@ def scan_campaign(
     csv_out: Path | None = None,
     on_event: Callable[[ScanEvent], None] | None = None,
     on_line: Callable[[str], None] | None = None,
+    on_import_progress: Callable[[ImportProgress], None] | None = None,
+    on_plan_progress: Callable[[PlanProgress], None] | None = None,
     cancel: threading.Event | None = None,
     password: str = "",
     do_plan: bool = True,
@@ -274,13 +358,15 @@ def scan_campaign(
         )
     except ScanError as exc:
         raise ServiceError(str(exc)) from exc
-    report = import_scan(db, result.csv_path, strict=False)
+    report = import_scan(db, result.csv_path, strict=False, progress=on_import_progress)
     db.annotate_scan(
         report.scan_id,
         manifest_json=json.dumps(result.manifest, ensure_ascii=False) if result.manifest else "",
         scanner_elapsed_s=result.elapsed_s,
     )
-    plan_report = plan(db, cfg) if do_plan else PlanReport(pending=0, excluded=0)
+    plan_report = (
+        plan(db, cfg, progress=on_plan_progress) if do_plan else PlanReport(pending=0, excluded=0)
+    )
     return result, report, plan_report
 
 
@@ -289,9 +375,15 @@ def scans_dir_for(db_path: Path) -> Path:
     return Path(str(db_path) + ".scans")
 
 
-def plan(db: Database, cfg: Config) -> PlanReport:
-    """Applique exclusions et scores de priorité à toute la base."""
-    report = plan_files(db, cfg.filter)
+def plan(
+    db: Database, cfg: Config, *, progress: Callable[[PlanProgress], None] | None = None
+) -> PlanReport:
+    """Applique exclusions et scores de priorité à toute la base.
+
+    `progress` : rappel d'avancement (voir `filter.plan_progress_logger`) — une
+    préparation d'un million de fichiers dure une minute, muette sans lui.
+    """
+    report = plan_files(db, cfg.filter, progress=progress)
     logger.info("plan : %s à analyser, %s exclus", report.pending, report.excluded)
     return report
 

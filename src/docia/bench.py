@@ -24,6 +24,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+import httpx
+
 from docia.config import Config, LLMConfig
 from docia.db import Database
 from docia.llm.client import LLMClient, LLMError
@@ -392,9 +394,12 @@ async def _one_block(client: LLMClient, spec: BlockSpec) -> BenchBlockResult:
     started = time.perf_counter()
     try:
         result = await client.analyze_block(spec)
-    except LLMError as exc:
+    # `httpx.HTTPError` en plus de `LLMError` : un serveur qui coupe en plein corps de
+    # réponse (OOM-killer, redémarrage, proxy) lève `RemoteProtocolError`. Le banc doit
+    # rendre un rapport en échec, jamais faire tomber `docia bench` par une trace httpx.
+    except (LLMError, httpx.HTTPError) as exc:
         outcome.latency_ms = int((time.perf_counter() - started) * 1000)
-        outcome.error = str(exc)
+        outcome.error = str(exc) if isinstance(exc, LLMError) else f"{type(exc).__name__} : {exc}"
         return outcome
     outcome.ok = True
     outcome.latency_ms = result.usage.latency_ms or int((time.perf_counter() - started) * 1000)

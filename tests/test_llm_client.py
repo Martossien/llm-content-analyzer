@@ -419,3 +419,158 @@ async def test_server_max_model_len(fake_server: FakeOpenAIServer) -> None:
         assert await client.server_max_model_len() == 262_144
     async with LLMClient(cfg_for(fake_server.base_url_vllm, transport="openwebui"), "s") as client:
         assert await client.server_max_model_len() is None
+
+
+# -- coupure de flux en plein corps de réponse (CRITIQUE 1) ---------------
+
+
+@pytest.mark.asyncio
+async def test_flux_coupe_est_rattrape_et_renvoye(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """Le serveur coupe en plein corps : `RemoteProtocolError` doit être traitée
+    comme un échec réseau renvoyable, pas traverser tout le programme."""
+    fake_server.mode = "cut_once"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=2)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        result = await client.analyze_block(spec)
+    assert json.loads(result.content)["files"]
+    assert fake_server.post_count == 2  # 1 coupée + 1 réussie
+
+
+@pytest.mark.asyncio
+async def test_flux_coupe_a_chaque_essai_devient_llm_error(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """Épuisement des tentatives : une `LLMError`, jamais une exception httpx —
+    sinon le `except LLMError` du pipeline ne la voit pas et le run entier tombe."""
+    from docia.llm.client import LLMError
+
+    fake_server.mode = "cut_always"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=1)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        with pytest.raises(LLMTransportError) as info:
+            await client.analyze_block(spec)
+    assert isinstance(info.value, LLMError)
+    assert not isinstance(info.value, httpx.HTTPError)
+    assert fake_server.post_count == 2
+
+
+# -- contenu vide : cas renvoyable (MOYEN 10) ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_contenu_vide_est_renvoye_puis_reussit(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """`reasoning` rempli et `content` vide est transitoire : on renvoie."""
+    fake_server.mode = "empty_once"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=2)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        result = await client.analyze_block(spec)
+    assert json.loads(result.content)["files"]
+    assert fake_server.post_count == 2
+
+
+@pytest.mark.asyncio
+async def test_contenu_vide_definitif_apres_epuisement(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    fake_server.mode = "empty_always"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=1)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        with pytest.raises(LLMResponseError, match="contenu de réponse vide"):
+            await client.analyze_block(spec)
+    assert fake_server.post_count == 2
+
+
+@pytest.mark.asyncio
+async def test_contenu_vide_renvoye_au_moins_une_fois_sans_retry_configure(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """`max_retries = 0` : le contenu vide vaut quand même un renvoi."""
+    fake_server.mode = "empty_once"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=0)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        result = await client.analyze_block(spec)
+    assert json.loads(result.content)["files"]
+    assert fake_server.post_count == 2
+
+
+# -- renvoi « length » inutile (MOYEN 9) ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pas_de_renvoi_quand_le_budget_ne_peut_pas_augmenter(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """Bloc qui sature le contexte : doubler le budget est absorbé par le clamp.
+    Renvoyer coûterait une génération complète pour rien."""
+    fake_server.mode = "length_always"
+    spec = make_block(tmp_path)
+    spec = BlockSpec(
+        path=spec.path, files=spec.files, tokens_estimated=37_000, tokens_with_margin=38_000
+    )
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=1, max_context_tokens=40_000)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        with pytest.raises(LLMResponseError) as info:
+            await client.analyze_block(spec)
+    assert fake_server.post_count == 1  # un seul envoi, pas deux
+    message = str(info.value)
+    assert "38000 des 40000" in message
+    assert "blocks.block_tokens" in message
+    assert "max_tokens_cap n'y changerait rien" in message
+
+
+# -- compteurs d'usage (MINEUR 13) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(-5_000_000, 0), (-1.5, 0), (42, 42), (42.9, 42), (True, 0), ("beaucoup", 0), (None, 0)],
+)
+def test_usage_aberrant_borne_a_zero(raw: object, expected: int) -> None:
+    from docia.llm.client import _as_int
+
+    assert _as_int(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_usage_negatif_nest_pas_ecrit_en_base() -> None:
+    cfg = cfg_for("http://127.0.0.1:1/v1")
+    client = LLMClient(cfg, SYSTEM_PROMPT)
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": '{"files": []}'}}],
+            "usage": {"prompt_tokens": -5_000_000, "completion_tokens": -1},
+        },
+        request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"),
+    )
+    usage = client._to_result(response, 12).usage
+    assert (usage.prompt_tokens, usage.completion_tokens) == (0, 0)
+
+
+# -- redirection non suivie ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_redirection_donne_un_message_parlant(
+    fake_server: FakeOpenAIServer, tmp_path: Path
+) -> None:
+    """httpx ne suit pas les 30x : le message doit désigner `llm.base_url`."""
+    fake_server.mode = "redirect"
+    spec = make_block(tmp_path)
+    cfg = cfg_for(fake_server.base_url_vllm, max_retries=1)
+    async with LLMClient(cfg, SYSTEM_PROMPT) as client:
+        with pytest.raises(LLMRequestError) as info:
+            await client.analyze_block(spec)
+    assert info.value.status == 307
+    assert "redirection non suivie" in str(info.value)
+    assert "llm.base_url" in str(info.value)
+    assert fake_server.post_count == 1  # définitif : pas de renvoi

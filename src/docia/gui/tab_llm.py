@@ -42,6 +42,8 @@ class LLMTab:
         self.block_tokens_var = ctk.StringVar(value=str(c.blocks.block_tokens))
         self.tokenizer_var = ctk.StringVar(value=c.blocks.tokenizer_engine)
         self.batch_var = ctk.StringVar(value=str(c.blocks.batch_files))
+        # Exposé en mégaoctets : personne ne saisit 268435456 dans un champ.
+        self.batch_mb_var = ctk.StringVar(value=str(c.blocks.batch_bytes // (1024 * 1024)))
 
         def cell(r: int, col: int, label: str, widget: Any) -> None:
             ctk.CTkLabel(grid, text=label).grid(
@@ -126,6 +128,12 @@ class LLMTab:
             "Fichiers par lot DocFuse",
             ctk.CTkEntry(grid, textvariable=self.batch_var, width=80),
         )
+        cell(
+            6,
+            1,
+            "Mémoire par lot DocFuse (Mo)",
+            ctk.CTkEntry(grid, textvariable=self.batch_mb_var, width=80),
+        )
 
         btns = ctk.CTkFrame(p, fg_color="transparent")
         btns.pack(fill="x", padx=10, pady=(0, 6))
@@ -167,6 +175,10 @@ class LLMTab:
         self.bench_button.configure(state=state)
         self.doctor_button.configure(state=state)
 
+    def dispose(self) -> None:
+        """Retire les rappels avant que l'onglet soit détruit (mode administrateur coupé)."""
+        self.app.off_busy(self._busy)
+
     def apply_to_config(self, cfg: Config) -> None:
         """Recopie les champs de l'onglet dans la config (appelé par `collect_config`)."""
         cfg.llm.transport = self.transport_var.get()
@@ -190,6 +202,11 @@ class LLMTab:
         )
         cfg.blocks.tokenizer_engine = self.tokenizer_var.get()
         cfg.blocks.batch_files = parse_int(self.batch_var.get(), cfg.blocks.batch_files)
+        cfg.blocks.batch_bytes = (
+            parse_int(self.batch_mb_var.get(), cfg.blocks.batch_bytes // (1024 * 1024), minimum=0)
+            * 1024
+            * 1024
+        )
 
     def _test(self) -> None:
         app = self.app
@@ -207,7 +224,7 @@ class LLMTab:
             ok = asyncio.run(probe())
             msg = f"connexion {cfg.llm.base_url} ({cfg.llm.transport}) : {'OK' if ok else 'ÉCHEC'}"
             app.log(msg)
-            self.output.set(msg)
+            app.ui(lambda: self.output.set(msg))  # écrire dans un widget = thread Tk
 
         app.run_in_thread(work, "test de connexion")
 
@@ -224,8 +241,8 @@ class LLMTab:
             from docia.cli_tools import doctor_report
 
             report = doctor_report(cfg)
-            lines = [f"{key:24} {value}" for key, value in report.items()]
-            self.output.set("\n".join(lines))
+            text = "\n".join(f"{key:24} {value}" for key, value in report.items())
+            app.ui(lambda: self.output.set(text))
             for key in ("ocr_essai", "tesseract", "smbeagle"):
                 if key in report:
                     app.log(f"{key} : {report[key]}")
@@ -245,7 +262,8 @@ class LLMTab:
 
             rep = run_bench(cfg, blocks=blocks, block_tokens=tokens, progress=app.log)
             lines = rep.as_lines()
-            self.output.set("\n".join(lines))
+            text = "\n".join(lines)
+            app.ui(lambda: self.output.set(text))
             for line in lines[:3]:
                 app.log(line)
 

@@ -7,7 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from docia.db import Database
 from docia.gui.helpers import parse_int, progress_fraction
+from docia.gui.lazy import LazyScreen
 from docia.gui.theme import (
     ACCENT,
     ACCENT_OK,
@@ -22,13 +24,16 @@ from docia.gui.theme import (
 from docia.gui.widgets import Card, KpiTile
 
 
-class HomeTab:
+class HomeTab(LazyScreen):
+    TAB_NAME = "Accueil"
+    FIRST_TAB = True  # affiché à l'ouverture, avant que `current_tab()` rende un nom
+
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
         self.ctk = app.ctk
         self._tiles: dict[str, KpiTile] = {}
-        self._dirty = True
+        self._lazy_setup()
 
     # ------------------------------------------------------------------ build
     def build(self) -> None:
@@ -195,7 +200,7 @@ class HomeTab:
         row = ctk.CTkFrame(card.body, fg_color="transparent")
         row.pack(fill="x")
         self.run_button = ctk.CTkButton(
-            row, text="▶  Lancer l'analyse", width=170, fg_color=ACCENT_OK, command=self._start
+            row, text="▶  Lancer l'analyse", width=170, fg_color=ACCENT_OK, command=self._start_run
         )
         self.run_button.pack(side="left")
         self.stop_button = ctk.CTkButton(
@@ -324,7 +329,13 @@ class HomeTab:
                 from docia import service
 
                 result, report, plan_report = service.scan_campaign(
-                    db, cfg, profile, on_event=on_event, on_line=app.log, cancel=app.cancel
+                    db,
+                    cfg,
+                    profile,
+                    on_event=on_event,
+                    on_line=app.log,
+                    on_import_progress=service.import_progress_logger(app.log),
+                    cancel=app.cancel,
                 )
             app.log(
                 f"scan terminé : {format_int(result.files)} fichiers en {format_duration(result.elapsed_s)} — "
@@ -414,7 +425,7 @@ class HomeTab:
 
         app.run_in_thread(work, "test de connexion")
 
-    def _start(self, *, dry_run: bool = False) -> None:
+    def _start_run(self, *, dry_run: bool = False) -> None:
         app = self.app
         cfg = app.collect_config()
         if cfg.validate():
@@ -472,7 +483,7 @@ class HomeTab:
             except Exception as exc:  # noqa: BLE001
                 app.log(f"relance impossible : {exc}")
                 return
-        self._start()
+        self._start_run()
 
     def _quick(self) -> None:
         target = Path(self.quick_var.get().strip())
@@ -531,28 +542,26 @@ class HomeTab:
             self.progress.set(0)
             self._dirty = False
             return
-        self._dirty = True
-        self.refresh_if_needed()
+        super().refresh()
 
     def refresh_if_needed(self) -> None:
         """Chiffres clés de la campagne, calculés hors du thread Tk.
 
         Sur une grande campagne, `views.overview` demande plusieurs secondes : le calculer
-        dans la fenêtre la gelait à chaque rafraîchissement.
+        dans la fenêtre la gelait à chaque rafraîchissement. `LazyScreen._start` s'occupe du jeton
+        (un calcul périmé n'écrase plus un calcul récent), de la capture du chemin de
+        campagne et de la remise de `_dirty`.
         """
-        if self._dirty is False or self.app.current_tab() not in ("", "Accueil"):
+        if not self._dirty or not self.visible():
             return
-        self._dirty = False
         self.source_status.configure(text="calcul des chiffres de la campagne…")
-        app = self.app
 
-        def compute() -> tuple[Any, dict[str, int]]:
+        def compute(db: Database) -> tuple[Any, dict[str, int]]:
             from docia import views
 
-            with app.open_db() as db:
-                return views.overview(db, stale_years=5), db.counts()
+            return views.overview(db, stale_years=5), db.counts()
 
-        app.run_background(compute, self._apply_overview, name="chiffres de la campagne")
+        self._start(compute, self._apply_overview, name="chiffres de la campagne")
 
     def _apply_overview(self, result: tuple[Any, dict[str, int]]) -> None:
         ov, counts = result

@@ -18,9 +18,10 @@ analysée, et la clé étrangère garantit le même ensemble de lignes.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from itertools import chain
 from typing import Any
 
 from docia.db import Database, first_access_sql
@@ -41,6 +42,13 @@ RETENTION_BASIS_LABELS: dict[str, str] = {
     "contractual": "contractuel",
     "N/A": "non déterminé",
 }
+
+RETENTION_UNDETERMINED = "non déterminée"
+"""Ce que porte la colonne « durée » quand le modèle exige la conservation sans durée.
+
+`retention_required=1` avec `retention_years=0` : voir `RetentionRow.undetermined`.
+Écrit une seule fois ici pour que le rapport, le classeur et le Markdown le disent
+tous de la même façon."""
 
 SIZE_BUCKETS: tuple[tuple[str, int, int], ...] = (
     ("0–10 Ko", 0, 10 * 1024),
@@ -65,10 +73,36 @@ existant (clé étrangère), l'ensemble des lignes est donc celui de
 `files f JOIN analyses a ON a.id = (dernière analyse de f)`, mais sans balayer
 les fichiers jamais analysés."""
 
-_IS_LATEST = (
-    "a.id = (SELECT id FROM analyses WHERE file_id = a.file_id"
-    " ORDER BY created_at DESC, id DESC LIMIT 1)"
-)
+
+def latest_analysis_sql(file_id: str, *, alias: str = "a") -> str:
+    """Condition SQL « `alias` est la **dernière analyse** du fichier `file_id` ».
+
+    Définition unique de la règle « dernière analyse » : la plus récente par
+    `created_at`, départagée par `id` décroissant quand deux analyses portent le
+    même horodatage (réanalyse dans la même seconde, ou horloge à la seconde).
+
+    Toutes les vues de risque en dépendent — classification, top sensible, plan de
+    conservation, candidats au nettoyage — et elle existait **en trois
+    exemplaires** que rien n'obligeait à rester d'accord : ici, dans
+    `docia.db._LATEST_JOINS` (écran Résultats, `latest_analyses`, donc l'export
+    CSV/JSON et l'onglet « Fichiers ») et dans
+    `docia.report.powerbi._analyses_rows` (`analyses.csv`). Trois copies, trois
+    façons possibles de désigner « l'analyse qui fait foi » : le rapport, le
+    classeur et l'export Power BI pouvaient montrer trois classifications
+    différentes du même fichier. `tests/test_views.py` verrouille les trois, par
+    le texte SQL **et** par le comportement.
+
+    `docia.db` ne peut pas l'importer (`views` importe déjà `db`) : sa copie est
+    donc comparée à celle-ci par un test, en attendant que la fonction descende
+    dans `docia.db` à côté de `first_access_sql`.
+    """
+    return (
+        f"{alias}.id = (SELECT id FROM analyses WHERE file_id = {file_id}"
+        " ORDER BY created_at DESC, id DESC LIMIT 1)"
+    )
+
+
+_IS_LATEST = latest_analysis_sql("a.file_id")
 """Ne retient que la dernière analyse d'un fichier (comme `Database.latest_analyses`)."""
 
 _SENSITIVE = "a.security_classification IN ('C2','C3')"
@@ -81,7 +115,13 @@ _CLEANUP_WHERE = (
     "a.retention_required=0 AND a.security_classification IN ('C0','C1')"
     " AND f.access_key <> '' AND f.access_key < ?"
 )
-"""Candidat au nettoyage : ni à conserver, ni sensible, ni accédé depuis le seuil."""
+"""Candidat au nettoyage : ni à conserver, ni sensible, ni accédé depuis le seuil.
+
+La liste blanche `IN ('C0','C1')` est **la** garantie de sûreté de cette vue : un
+fichier classé C2 ou C3 — comme un fichier non classé (`''`, `N/A`) — ne peut pas
+y entrer. Écrite en liste noire (`NOT IN ('C2','C3')`), la moindre classe
+nouvelle ou vide y serait tombée par défaut. `tests/test_views.py` interdit
+explicitement C2 et C3 dans les candidats, quelle que soit l'ancienneté."""
 
 
 # --------------------------------------------------------------------- helpers
@@ -92,11 +132,26 @@ FIRST_ACCESS_F = first_access_sql("f.")
 
 
 def shift_years(day: date, years: int) -> date:
-    """`day` décalé de `years` années (29 février → 28 février)."""
+    """`day` décalé de `years` années, **borné** aux dates représentables.
+
+    29 février → 28 février. Au-delà de l'an 9999 le résultat est `date.max`,
+    en deçà de l'an 1 `date.min` : `date.replace(year=10009)` lèverait sinon
+    `ValueError: year 10009 is out of range`, et un seul fichier daté de
+    `DateTime.MaxValue` (9999-12-31 — ce que rend un FILETIME corrompu ou saturé,
+    donc un fichier restauré d'une archive abîmée ou vu par un NAS à horloge
+    cassée) faisait échouer **tous** les rapports de la campagne : `html`,
+    `markdown`, `powerbi` et `xlsx` (via `retention_plan` et `powerbi._analyses_rows`).
+    Un fichier aberrant ne doit jamais coûter le rapport.
+    """
+    year = day.year + years
+    if year > date.max.year:
+        return date.max
+    if year < date.min.year:
+        return date.min
     try:
-        return day.replace(year=day.year + years)
+        return day.replace(year=year)
     except ValueError:
-        return day.replace(year=day.year + years, day=28)
+        return day.replace(year=year, day=28)
 
 
 def _key(day: date) -> str:
@@ -209,13 +264,17 @@ class StaleBucket:
 
 @dataclass(frozen=True)
 class TinyReport:
-    """Fichiers vides ou minuscules (bruit de stockage)."""
+    """Fichiers vides ou minuscules (bruit de stockage).
+
+    Pas d'échantillon de chemins : le champ `samples` existait, personne ne
+    l'affichait, et la requête qui le remplissait (`SELECT path … ORDER BY path
+    LIMIT 20`) était exécutée à chaque rapport, chaque classeur et chaque export.
+    """
 
     max_bytes: int
     files: int
     bytes: int
     empty_files: int
-    samples: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -265,7 +324,13 @@ class SensitiveFile:
 
 @dataclass(frozen=True)
 class RetentionRow:
-    """Un fichier à conserver, avec sa date de fin de conservation."""
+    """Un fichier à conserver, avec sa date de fin de conservation.
+
+    `end_date is None` signifie « fin de conservation non calculable » — durée non
+    déterminée (voir `undetermined`) ou date de dernière écriture illisible. Un
+    fichier sans date de fin n'est **jamais** `expired` : on ne propose pas à la
+    suppression un fichier dont on ne sait pas quand sa conservation s'achève.
+    """
 
     file_id: int
     path: str
@@ -278,6 +343,17 @@ class RetentionRow:
     end_date: date | None
     expired: bool
 
+    @property
+    def undetermined(self) -> bool:
+        """Conservation exigée mais **durée non déterminée** (`years == 0`).
+
+        Le modèle répond parfois « à conserver » avec une durée de zéro année —
+        le schéma l'autorise (`minimum: 0`) et l'analyseur l'accepte. La durée est
+        alors absente, pas nulle : c'est une réponse incohérente, pas une échéance
+        immédiate.
+        """
+        return self.years <= 0
+
 
 @dataclass(frozen=True)
 class RetentionPlan:
@@ -288,6 +364,10 @@ class RetentionPlan:
     total_bytes: int
     expired_files: int
     by_basis: list[GroupStat] = field(default_factory=list)
+    undetermined_files: int = 0
+    """Fichiers à conserver dont le modèle n'a pas donné de durée (`years == 0`).
+
+    À faire trancher par un humain : ils ne sont ni échus, ni datés."""
 
 
 @dataclass(frozen=True)
@@ -335,6 +415,8 @@ class ReviewProgress:
     not_reviewed: int
     analyzed: int
     discrepancies: list[Discrepancy] = field(default_factory=list)
+    total_discrepancies: int = 0
+    """Nombre réel d'écarts, avant la coupe éventuelle de `discrepancies`."""
 
     @property
     def reviewed(self) -> int:
@@ -397,40 +479,88 @@ class Overview:
 # ------------------------------------------------------------------ hygiène
 
 
-def duplicates(db: Database, *, min_copies: int = 2, limit: int | None = None) -> DuplicateReport:
-    """Familles de fichiers identiques (`fast_hash` + taille) et espace récupérable.
+MEMBER_BATCH = 200
+"""Familles dont les exemplaires sont lus **en une seule requête** (voir `_family_members`).
 
-    L'espace récupérable d'une famille vaut `taille × (exemplaires − 1)` : un
-    exemplaire est conservé. Les fichiers sans empreinte sont ignorés.
-    """
-    rows = db.query_values(
+Une requête par famille, c'était un `N+1` : sur un parc de 934 028 fichiers
+groupés en 155 672 familles, `duplicates()` sans limite lançait 155 673
+requêtes. Par paquets de 200 familles, il en lance 780.
+"""
+
+
+def _duplicate_groups(db: Database, min_copies: int) -> list[tuple[Any, ...]]:
+    """(empreinte, taille, exemplaires, octets récupérables) — plus gros gains d'abord."""
+    return db.query_values(
         "SELECT fast_hash, size_bytes, COUNT(*) AS copies,"
         " size_bytes*(COUNT(*)-1) AS reclaimable"
         " FROM files WHERE fast_hash <> '' GROUP BY fast_hash, size_bytes"
         " HAVING COUNT(*) >= ? ORDER BY reclaimable DESC, copies DESC, fast_hash",
         (min_copies,),
     )
-    total_families = len(rows)
-    total_copies = sum(int(r[2]) for r in rows)
-    total_reclaimable = sum(int(r[3]) for r in rows)
-    kept = rows if limit is None else rows[:limit]
-    families: list[DuplicateFamily] = []
-    for fast_hash, size_bytes, copies, reclaimable in kept:
-        members = db.query_values(
-            "SELECT id, path FROM files WHERE fast_hash=? AND size_bytes=? ORDER BY path",
-            (fast_hash, size_bytes),
-        )
-        families.append(
-            DuplicateFamily(
+
+
+def _family_members(
+    db: Database, batch: Sequence[tuple[Any, ...]]
+) -> dict[tuple[Any, Any], list[tuple[int, str]]]:
+    """Exemplaires de tout un paquet de familles, en une requête, triés par chemin."""
+    clause = " OR ".join(["(fast_hash=? AND size_bytes=?)"] * len(batch))
+    params = tuple(chain.from_iterable((group[0], group[1]) for group in batch))
+    members: dict[tuple[Any, Any], list[tuple[int, str]]] = {}
+    for file_id, path, fast_hash, size_bytes in db.query_values(
+        f"SELECT id, path, fast_hash, size_bytes FROM files WHERE {clause} ORDER BY path", params
+    ):
+        members.setdefault((fast_hash, size_bytes), []).append((int(file_id), str(path)))
+    return members
+
+
+def _duplicate_families(
+    db: Database, groups: Sequence[tuple[Any, ...]]
+) -> Iterator[DuplicateFamily]:
+    """Familles complètes (exemplaires compris), dans l'ordre de `groups`."""
+    for start in range(0, len(groups), MEMBER_BATCH):
+        batch = groups[start : start + MEMBER_BATCH]
+        members = _family_members(db, batch)
+        for fast_hash, size_bytes, copies, reclaimable in batch:
+            found = members.get((fast_hash, size_bytes), [])
+            yield DuplicateFamily(
                 family_id=f"{fast_hash}-{int(size_bytes)}",
                 fast_hash=str(fast_hash),
                 size_bytes=int(size_bytes),
                 copies=int(copies),
                 reclaimable_bytes=int(reclaimable),
-                paths=[str(member[1]) for member in members],
-                file_ids=[int(member[0]) for member in members],
+                paths=[path for _, path in found],
+                file_ids=[file_id for file_id, _ in found],
             )
-        )
+
+
+def iter_duplicate_families(db: Database, *, min_copies: int = 2) -> Iterator[DuplicateFamily]:
+    """Toutes les familles de doublons, **une par une**, sans les garder en mémoire.
+
+    Pour les sorties écrites au fil de l'eau (`duplicates.csv` de l'export
+    Power BI) : seul le résumé d'une famille par ligne (empreinte + trois
+    entiers) et le paquet d'exemplaires courant sont en mémoire, jamais la liste
+    des chemins de toute la campagne — ce que `duplicates()` doit, lui, construire
+    puisqu'il rend un `DuplicateReport` complet.
+    """
+    yield from _duplicate_families(db, _duplicate_groups(db, min_copies))
+
+
+def duplicates(db: Database, *, min_copies: int = 2, limit: int | None = None) -> DuplicateReport:
+    """Familles de fichiers identiques (`fast_hash` + taille) et espace récupérable.
+
+    L'espace récupérable d'une famille vaut `taille × (exemplaires − 1)` : un
+    exemplaire est conservé. Les fichiers sans empreinte sont ignorés.
+
+    Les totaux portent sur **toutes** les familles ; `limit` ne borne que les
+    familles détaillées. Les exemplaires sont lus par paquets de `MEMBER_BATCH`
+    familles (voir `iter_duplicate_families` pour la variante en flux).
+    """
+    groups = _duplicate_groups(db, min_copies)
+    total_families = len(groups)
+    total_copies = sum(int(g[2]) for g in groups)
+    total_reclaimable = sum(int(g[3]) for g in groups)
+    kept = groups if limit is None else groups[:limit]
+    families = list(_duplicate_families(db, kept))
     return DuplicateReport(families, total_families, total_copies, total_reclaimable)
 
 
@@ -571,22 +701,18 @@ def size_buckets(db: Database) -> list[GroupStat]:
     return stats
 
 
-def empty_or_tiny(db: Database, *, max_bytes: int = 100, samples: int = 20) -> TinyReport:
-    """Fichiers vides ou d'au plus `max_bytes` octets."""
+def empty_or_tiny(db: Database, *, max_bytes: int = 100) -> TinyReport:
+    """Fichiers vides ou d'au plus `max_bytes` octets (compteurs seuls)."""
     row = db.query(
         "SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS b,"
         " SUM(CASE WHEN size_bytes=0 THEN 1 ELSE 0 END) AS z FROM files WHERE size_bytes <= ?",
         (max_bytes,),
     )[0]
-    paths = db.query(
-        "SELECT path FROM files WHERE size_bytes <= ? ORDER BY path LIMIT ?", (max_bytes, samples)
-    )
     return TinyReport(
         max_bytes=max_bytes,
         files=int(row["n"] or 0),
         bytes=int(row["b"] or 0),
         empty_files=int(row["z"] or 0),
-        samples=[str(p["path"]) for p in paths],
     )
 
 
@@ -630,27 +756,46 @@ _SIMPLE_AXES: dict[str, tuple[str, str]] = {
 """Axes dont l'étiquette est la colonne SQL elle-même : (colonne, libellé si vide)."""
 
 
-def _share_named_by_base(db: Database) -> bool:
-    """Vrai si toutes les valeurs de `base` nomment déjà leur partage.
+_BASE_UNNAMED = "TRIM(TRIM(f.base), '\\/') = ''"
+"""`base` ne nomme pas son partage : vide, blancs ou séparateurs seuls.
+
+Transcription SQL de `share_from_base(base) == ''` : `TRIM` retire les blancs,
+le second retire les séparateurs. Rogner les deux bouts au lieu de la seule fin
+ne change pas le *test de vacuité* — seule une valeur réduite à des blancs et à
+des séparateurs est vide dans les deux cas."""
+
+
+def _all_shares_named(db: Database) -> bool:
+    """Vrai si toute valeur de `base` nomme déjà son partage.
 
     Dans ce cas — celui de tout scan SMBeagle — `share_label` ne regarde jamais
     `unc_directory` : le regroupement SQL peut l'ignorer et rendre un groupe par
-    partage au lieu d'un groupe par répertoire.
+    partage au lieu d'un groupe par répertoire. Test d'existence borné, et non
+    `SELECT DISTINCT base` : la réponse tient au premier enregistrement fautif.
     """
-    rows = db.query_values("SELECT DISTINCT base FROM files")
-    return all(share_from_base(str(r[0])) for r in rows)
+    return not db.query_values(f"SELECT 1 FROM files f WHERE {_BASE_UNNAMED} LIMIT 1")
 
 
 _FILLER = "''"
 """Clé d'axe inutilisée : garde la largeur des lignes sans peser sur le regroupement."""
+
+_SHARE_FALLBACK = f"CASE WHEN {_BASE_UNNAMED} THEN f.unc_directory ELSE '' END"
+"""Second niveau de regroupement de l'axe « partage », **seulement** quand `base` est vide.
+
+Un unique enregistrement à `base` vide suffisait à faire retomber tout l'axe sur
+`f.unc_directory` : le regroupement passait d'un groupe par partage à un groupe
+par répertoire — 6 groupes contre 521 718 sur un parc de 934 028 fichiers, soit
+19 Mo de mémoire contre 462 (× 24). Le repli est ici **borné aux seules lignes
+concernées** : les fichiers dont la `base` nomme le partage restent regroupés
+par partage, quoi qu'il arrive ailleurs dans la campagne."""
 
 
 def _axis_group(db: Database, axis: str) -> list[str]:
     """Expressions SQL identifiant un groupe pour cet axe, dans l'ordre des colonnes."""
     if axis in _SIMPLE_AXES:
         return [_SIMPLE_AXES[axis][0]]
-    if axis == "share" and _share_named_by_base(db):
-        return ["f.base", _FILLER]
+    if axis == "share":
+        return ["f.base", _FILLER if _all_shares_named(db) else _SHARE_FALLBACK]
     return ["f.base", "f.unc_directory"]
 
 
@@ -678,17 +823,30 @@ def _axis_risk(db: Database, keys: list[str]) -> list[tuple[Any, ...]]:
 
 
 def _run_prefix(text: str, segments: int) -> str:
-    """Préfixe de `text` couvrant ses `segments` premiers niveaux (`''` s'il en manque).
+    """Préfixe de `text` couvrant ses `segments` premiers niveaux **non vides**
+    (`''` s'il en manque).
 
-    Le préfixe s'arrête juste après le `segments`-ième antislash : deux chemins
-    qui le partagent ont exactement les mêmes premiers niveaux.
+    Les niveaux sont comptés comme `share_label` et `directory_label` les comptent :
+    les séparateurs vides ne comptent pas (`\\\\srv\\part` a deux niveaux, pas trois).
+    Compter les antislashs bruts décalait le compte dès qu'un chemin portait un
+    séparateur doublé, et le préfixe couvrait alors moins de niveaux que l'étiquette
+    n'en consomme : deux partages distincts se retrouvaient sous la même étiquette.
     """
+    seen = 0
     position = 0
-    for _ in range(segments):
-        position = text.find("\\", position) + 1
-        if position == 0:
+    length = len(text)
+    while position < length:
+        if text[position] == "\\":
+            position += 1
+            continue
+        end = text.find("\\", position)
+        if end == -1:
             return ""
-    return text[:position]
+        seen += 1
+        if seen == segments:
+            return text[: end + 1]
+        position = end + 1
+    return ""
 
 
 def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
@@ -709,7 +867,10 @@ def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
 
         return by_column
 
-    segments = 4 if axis == "share" else depth + 4
+    # Niveaux non vides dont dépend l'étiquette : `share_label` en lit deux,
+    # `directory_label` `depth` de plus. Le préfixe doit en couvrir au moins autant —
+    # trop long ne fait que recalculer inutilement, trop court fusionne deux partages.
+    segments = 2 if axis == "share" else depth + 2
     previous_base: Any = None
     prefix = ""
     label = ""
@@ -717,7 +878,10 @@ def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
     def by_path(row: tuple[Any, ...]) -> str:
         nonlocal previous_base, prefix, label
         base, directory = row[0], row[1]  # colonnes TEXT NOT NULL : toujours des chaînes
-        if base != previous_base or not prefix or not directory.startswith(prefix):
+        # Le préfixe est comparé sur le texte normalisé, celui-là même dont les
+        # étiquettes sont tirées : sinon `/` et `\` ne se comparent pas entre eux.
+        text = directory.replace("/", "\\").strip()
+        if base != previous_base or not prefix or not text.startswith(prefix):
             label = (
                 share_label(base, directory)
                 if axis == "share"
@@ -728,6 +892,46 @@ def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
         return label
 
     return by_path
+
+
+RiskTally = tuple[dict[str, int], dict[str, int], list[int]]
+"""Compteurs d'une étiquette d'axe : (sécurité, RGPD, [analysés])."""
+
+
+def _new_tally() -> RiskTally:
+    return (dict.fromkeys(SECURITY_CLASSES, 0), dict.fromkeys(RGPD_LEVELS, 0), [0])
+
+
+def _fold_risk(
+    rows: Iterable[tuple[Any, ...]], width: int, label_of: Callable[[tuple[Any, ...]], str]
+) -> dict[str, RiskTally]:
+    """Répartition sécurité/RGPD par étiquette, **cumulée au fil des lignes**.
+
+    Ce que retient ce repli ne dépend que du nombre d'**étiquettes**, jamais du
+    nombre de lignes lues : chaque ligne est ajoutée aux compteurs de son
+    étiquette puis oubliée. La version précédente empilait un tuple Python par
+    ligne source dans une liste par étiquette, pour les cumuler ensuite : sur une
+    campagne de 934 028 fichiers tous analysés, réduits à 5 862 étiquettes,
+    c'étaient 934 028 tuples retenus — 444 Mo — pour rendre exactement le même
+    résultat. `tests/test_views.py` mesure que la taille du repli ne bouge pas
+    quand le nombre de lignes est multiplié par cinquante mille.
+    """
+    tallies: dict[str, RiskTally] = {}
+    for row in rows:
+        classification = row[width]
+        if not classification:
+            continue
+        label = label_of(row)
+        entry = tallies.get(label)
+        if entry is None:
+            entry = _new_tally()
+            tallies[label] = entry
+        security, rgpd, analyzed = entry
+        number = int(row[width + 2])
+        security[classification] = security.get(classification, 0) + number
+        rgpd[row[width + 1]] = rgpd.get(row[width + 1], 0) + number
+        analyzed[0] += number
+    return tallies
 
 
 def classification_matrix(
@@ -745,39 +949,26 @@ def classification_matrix(
         raise ValueError(f"axe inconnu : {axis}")
     keys = _axis_group(db, axis)
     width = len(keys)
-    label_of = _axis_labeller(axis, depth)
-    risk: dict[str, list[tuple[str, str, int]]] = {}
-    for row in _axis_risk(db, keys):
-        classification = row[width]
-        if classification:
-            risk.setdefault(label_of(row), []).append(
-                (classification, row[width + 1], row[width + 2])
-            )
+    risk = _fold_risk(_axis_risk(db, keys), width, _axis_labeller(axis, depth))
     label_of = _axis_labeller(axis, depth)
     totals: dict[str, list[int]] = {}
     for row in _axis_volumes(db, keys):
         label = label_of(row)
-        entry = totals.get(label)
-        if entry is None:
+        entry_totals = totals.get(label)
+        if entry_totals is None:
             totals[label] = [row[width], row[width + 1]]
         else:
-            entry[0] += row[width]
-            entry[1] += row[width + 1]
+            entry_totals[0] += row[width]
+            entry_totals[1] += row[width + 1]
     out: list[AxisRow] = []
     for label, (count, size) in totals.items():
-        security = dict.fromkeys(SECURITY_CLASSES, 0)
-        rgpd = dict.fromkeys(RGPD_LEVELS, 0)
-        analyzed = 0
-        for classification, level, number in risk.get(label, ()):
-            analyzed += number
-            security[classification] = security.get(classification, 0) + number
-            rgpd[level] = rgpd.get(level, 0) + number
+        security, rgpd, analyzed = risk.get(label) or _new_tally()
         out.append(
             AxisRow(
                 label=label,
                 files=count,
                 bytes=size,
-                analyzed=analyzed,
+                analyzed=analyzed[0],
                 security=security,
                 rgpd=rgpd,
             )
@@ -793,8 +984,23 @@ def by_directory(db: Database, *, depth: int = 2, limit: int | None = None) -> l
     return rows if limit is None else rows[:limit]
 
 
-def top_sensitive(db: Database, *, limit: int = 50) -> list[SensitiveFile]:
-    """Fichiers les plus sensibles : C2/C3, ou RGPD `high`/`critical`."""
+def count_sensitive(db: Database) -> int:
+    """Nombre de fichiers que `top_sensitive` classerait, **sans la borne**.
+
+    Ce que le « top 50 » ne montre pas doit pouvoir être annoncé : un simple
+    `COUNT`, pas la liste.
+    """
+    return _count_latest(db, f"({_SENSITIVE} OR {_RGPD_AT_RISK})")
+
+
+def top_sensitive(db: Database, *, limit: int | None = 50) -> list[SensitiveFile]:
+    """Les `limit` fichiers les plus sensibles : C2/C3, ou RGPD `high`/`critical`.
+
+    C'est un **classement borné**, pas la liste exhaustive : `count_sensitive`
+    donne le total, l'onglet « Fichiers » du classeur et `analyses.csv` de
+    l'export Power BI donnent la totalité des analyses. `limit=None` lève la
+    borne (`LIMIT -1` : la convention SQLite pour « pas de limite »).
+    """
     rows = db.query(
         "SELECT f.id AS id, f.path AS path, f.owner AS owner, f.size_bytes AS size,"
         " a.security_classification AS sec, a.security_confidence AS secc,"
@@ -807,7 +1013,7 @@ def top_sensitive(db: Database, *, limit: int = 50) -> list[SensitiveFile]:
         " WHEN 'C1' THEN 2 WHEN 'C0' THEN 3 ELSE 4 END,"
         " CASE a.rgpd_risk_level WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2"
         " WHEN 'low' THEN 3 ELSE 4 END, f.size_bytes DESC, f.path LIMIT ?",
-        (limit,),
+        (-1 if limit is None else limit,),
     )
     return [
         SensitiveFile(
@@ -830,7 +1036,19 @@ def top_sensitive(db: Database, *, limit: int = 50) -> list[SensitiveFile]:
 def retention_plan(
     db: Database, *, today: date | None = None, limit: int | None = None
 ) -> RetentionPlan:
-    """Fichiers à conserver, avec la date de fin = dernière écriture + `years`."""
+    """Fichiers à conserver, avec la date de fin = dernière écriture + `years`.
+
+    **Une durée de zéro année n'est pas une échéance immédiate.** Le schéma LLM
+    accepte `retention.years = 0` (`llm/schema.py`, `minimum: 0`) et
+    `llm/parse.py` la laisse passer : « à conserver, pendant 0 an » est une
+    réponse *incohérente* du modèle, pas une durée. Calculée, elle donnait une fin
+    de conservation égale à la date d'écriture, donc « échu : oui » pour tout
+    fichier écrit avant aujourd'hui — 155 218 fichiers déclarés échus à tort sur
+    une base réelle de 280 208. Ces lignes sont désormais **sans date de fin et
+    jamais échues** (`RetentionRow.undetermined`), et comptées à part dans
+    `undetermined_files` : c'est une question posée à un agent, pas un feu vert à
+    la suppression.
+    """
     reference = _today(today)
     rows = db.query_values(
         "SELECT f.id, f.path, f.owner, f.size_bytes, f.last_write_time,"
@@ -842,10 +1060,15 @@ def retention_plan(
     by_basis_bytes: dict[str, int] = {}
     total_bytes = 0
     expired = 0
+    undetermined = 0
     for file_id, path, owner, size, written_at, retained, basis, justification in rows:
         years = int(retained or 0)
         written = parse_smbeagle_datetime(str(written_at))
-        end = shift_years(written.date(), years) if written is not None else None
+        if years <= 0:
+            undetermined += 1
+            end = None
+        else:
+            end = shift_years(written.date(), years) if written is not None else None
         is_expired = end is not None and end <= reference
         expired += int(is_expired)
         total_bytes += int(size)
@@ -883,6 +1106,7 @@ def retention_plan(
         total_bytes=total_bytes,
         expired_files=expired,
         by_basis=by_basis,
+        undetermined_files=undetermined,
     )
 
 
@@ -976,6 +1200,7 @@ def review_progress(db: Database, *, limit: int | None = None) -> ReviewProgress
         not_reviewed=max(analyzed - reviewed, 0),
         analyzed=analyzed,
         discrepancies=gaps if limit is None else gaps[:limit],
+        total_discrepancies=len(gaps),
     )
 
 

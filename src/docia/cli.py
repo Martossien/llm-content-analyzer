@@ -12,6 +12,9 @@ import contextlib
 import csv
 import json
 import logging
+import logging.handlers
+import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -147,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _load(args: argparse.Namespace) -> Config:
     try:
-        cfg = load_config(args.config if args.config.exists() else None)
+        cfg = load_config(args.config, on_missing=lambda line: print(line, file=sys.stderr))
     except (ValueError, OSError) as exc:
         print(f"config invalide ({args.config}) : {exc}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -174,30 +177,57 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
-    from docia.ingest.smbeagle_csv import import_csv
+    """`ingest` : importe un CSV SMBeagle **par la couche service**.
+
+    Passer par `service.import_scan` et non par `ingest.import_csv` en direct
+    n'est pas une élégance : c'est ce qui inscrit la campagne dans les récentes
+    (sans quoi `docia campaigns` répondait « aucune campagne récente » après un
+    import réussi en ligne de commande, alors que la fenêtre, elle, la retenait)
+    et ce qui traduit un `OSError` en message français au lieu d'une trace Python.
+    """
+    from docia.service import (
+        ServiceError,
+        format_import_report,
+        import_progress_logger,
+        import_scan,
+    )
 
     if not args.csv.exists():
         print(f"CSV introuvable : {args.csv}", file=sys.stderr)
         return 1
-    with Database(cfg.db_path) as db:
-        report = import_csv(db, args.csv, strict=not args.lenient)
-    print(
-        f"scan {report.scan_id} : {report.total} lignes — {report.new} nouveaux, "
-        f"{report.updated} modifiés, {report.unchanged} inchangés, {report.invalid} invalides"
-    )
+    # Progression sur stderr : un CSV de plusieurs centaines de Mo prend des minutes,
+    # la sortie standard reste réservée au bilan.
+    progress = import_progress_logger(lambda line: print(line, file=sys.stderr))
+    try:
+        with Database(cfg.db_path) as db:
+            report = import_scan(db, args.csv, strict=not args.lenient, progress=progress)
+    except ServiceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(format_import_report(report, prefix=f"scan {report.scan_id}"))
     for err in report.errors[:10]:
         print(f"  ligne {err.line_number} : {err.reason}", file=sys.stderr)
     return 0 if report.invalid == 0 else 2
 
 
 def cmd_plan(_args: argparse.Namespace, cfg: Config) -> int:
-    from docia.filter import plan_files
+    from docia.filter import plan_files, plan_progress_logger
 
+    # Progression sur stderr, comme `ingest` : une préparation d'un million de
+    # fichiers dure une minute, la sortie standard reste réservée au bilan.
+    progress = plan_progress_logger(lambda line: print(line, file=sys.stderr))
     with Database(cfg.db_path) as db:
-        report = plan_files(db, cfg.filter)
+        report = plan_files(db, cfg.filter, progress=progress)
     print(f"à analyser : {report.pending} — exclus : {report.excluded}")
-    for reason, n in sorted(report.by_reason.items(), key=lambda kv: -kv[1]):
+    # Bilan borné : les raisons sont stables (voir `filter.TOO_SMALL`), mais les
+    # marqueurs de dossier et les extensions d'un partage réel peuvent en faire
+    # des dizaines — la console n'est pas un export.
+    top = 20
+    reasons = sorted(report.by_reason.items(), key=lambda kv: (-kv[1], kv[0]))
+    for reason, n in reasons[:top]:
         print(f"  {n:>7}  {reason}")
+    if len(reasons) > top:
+        print(f"  … et {len(reasons) - top} autre(s) raison(s) — détail complet dans les exports")
     return 0
 
 
@@ -271,25 +301,61 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_export(args: argparse.Namespace, cfg: Config) -> int:
+    """`export` : dernière analyse de chaque fichier, écrite **au fil du curseur**.
+
+    Rien n'est accumulé en mémoire : ni la liste des lignes, ni la chaîne JSON
+    complète (plusieurs gigaoctets sur une campagne d'un million de fichiers).
+    Le CSV prend ses en-têtes sur la première ligne lue ; le tableau JSON est
+    écrit élément par élément (indentation de deux espaces, `ensure_ascii=False`).
+
+    **Le CSV passe par `report.tabular.csv_cell`.** Il est écrit en `utf-8-sig`
+    avec `;` pour être ouvert d'un double-clic dans Excel, c'est le bouton
+    « CSV des fichiers » de la fenêtre, et c'est le format vers lequel le message
+    de troncature du classeur (`report.excel`) renvoie l'utilisateur pour
+    récupérer ses données complètes. Excel évalue comme une **formule** toute
+    cellule texte commençant par `=`, `+`, `-`, `@`, une tabulation ou un retour
+    chariot : le nom d'un fichier du partage (`- copie.docx`), le `resume` et les
+    justifications rendus par le modèle (`=cmd|'/c calc.exe'!A1`,
+    `=HYPERLINK("http://…")`) y arrivaient tels quels. Le JSON, lui, n'est pas
+    concerné : aucun lecteur JSON n'évalue une chaîne — il est écrit inchangé.
+    """
     if args.format in ("xlsx", "powerbi"):
         return _cmd_export_workbook(args, cfg)
-    with Database(cfg.db_path) as db:
-        rows = [dict(r) for r in db.latest_analyses()]
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    if args.format == "json":
-        for r in rows:
-            for key in ("rgpd_data_types", "finance_amounts", "legal_parties"):
-                if r.get(key):
-                    r[key] = json.loads(r[key])
-        args.out.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    else:
-        with args.out.open("w", newline="", encoding="utf-8-sig") as fh:
-            writer = csv.DictWriter(
-                fh, fieldnames=list(rows[0].keys()) if rows else ["path"], delimiter=";"
-            )
-            writer.writeheader()
-            writer.writerows(rows)
-    print(f"{len(rows)} ligne(s) → {args.out}")
+    count = 0
+    with Database(cfg.db_path) as db:
+        records = db.latest_analyses()
+        if args.format == "json":
+            with args.out.open("w", encoding="utf-8") as fh:
+                fh.write("[")
+                for record in records:
+                    r = dict(record)
+                    for key in ("rgpd_data_types", "finance_amounts", "legal_parties"):
+                        if r.get(key):
+                            r[key] = json.loads(r[key])
+                    fh.write("\n" if count == 0 else ",\n")
+                    # `json.dumps` d'un tableau indente chaque objet de deux espaces
+                    # de plus : décaler toutes les lignes rend exactement le même texte.
+                    fh.write(
+                        "  " + json.dumps(r, ensure_ascii=False, indent=2).replace("\n", "\n  ")
+                    )
+                    count += 1
+                fh.write("\n]" if count else "]")
+        else:
+            from docia.report.tabular import csv_cell
+
+            with args.out.open("w", newline="", encoding="utf-8-sig") as fh:
+                writer: csv.DictWriter[str] | None = None
+                for record in records:
+                    r = dict(record)
+                    if writer is None:
+                        writer = csv.DictWriter(fh, fieldnames=list(r), delimiter=";")
+                        writer.writeheader()
+                    writer.writerow({key: csv_cell(value) for key, value in r.items()})
+                    count += 1
+                if writer is None:
+                    csv.DictWriter(fh, fieldnames=["path"], delimiter=";").writeheader()
+    print(f"{count} ligne(s) → {args.out}")
     return 0
 
 
@@ -574,8 +640,22 @@ class _ConsoleFormatter(logging.Formatter):
             record.exc_info, record.exc_text, record.stack_info = saved
 
 
+JOURNAL_ONLY = "journal_seul"
+"""Attribut d'enregistrement (`extra={JOURNAL_ONLY: True}`) qui réserve un message au
+fichier : le garde-fou de `main()` y dépose la pile complète, mais parle à
+l'utilisateur par un `print`, sans le préfixe `ERROR docia.cli :` ni doublon."""
+
+
 def _log_file(config_path: Path | None) -> Path:
-    """`docia.log` à côté du fichier de configuration (donc à côté de `Docia.exe`)."""
+    """Emplacement de `docia.log` : à côté de `Docia.exe`, sinon à côté du `--config`.
+
+    Le guide promet « `docia.log`, à côté de `Docia.exe` ». Dériver le chemin du
+    seul `--config` ne tenait pas cette promesse : sa valeur par défaut est le
+    **relatif** `docia.toml`, donc le journal atterrissait dans le répertoire
+    courant — celui d'où l'utilisateur a lancé l'exe, pas celui de l'exe.
+    """
+    if getattr(sys, "frozen", False):  # exécutable empaqueté (PyInstaller)
+        return Path(sys.executable).resolve().parent / "docia.log"
     base = Path(config_path).resolve().parent if config_path else Path.cwd()
     return base / "docia.log"
 
@@ -586,9 +666,92 @@ _JOURNAL: Path | None = None
 _LOGGING_CONFIGURED = False
 """Vrai dès que `_setup_logging` a posé ses gestionnaires."""
 
+_LOG_MAX_BYTES = 4_000_000
+"""Taille de `docia.log` au-delà de laquelle il est mis en rotation."""
+
+_LOG_BACKUPS = 3
+"""Sauvegardes de rotation conservées (`docia.log.1` … `docia.log.3`)."""
+
+NOISY_DEBUG_LOGGERS: tuple[str, ...] = (
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+    "asyncio",
+    "PIL",
+    "matplotlib",
+    "charset_normalizer",
+    "filelock",
+)
+"""Bibliothèques tierces muselées à `INFO` : en `DEBUG` elles écrivent une ligne
+par requête HTTP, par image ouverte ou par police chargée, et noieraient le
+journal — qui doit rester lisible pour diagnostiquer *notre* code."""
+
+
+class _RotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """`RotatingFileHandler` qui survit à une rotation impossible.
+
+    Sous Windows, un fichier ouvert par un autre processus ne peut pas être
+    renommé : deux `Docia.exe` (la fenêtre et un `scan` en parallèle, ou deux
+    sessions RDS) et `doRollover()` lève `PermissionError` à *chaque*
+    enregistrement une fois les 4 Mo atteints. Le gestionnaire standard déverse
+    alors une trace par message sur stderr — exactement ce que
+    `_ConsoleFormatter` a été écrit pour empêcher — et **perd** tous les
+    enregistrements suivants.
+
+    Ici, le premier échec est signalé une seule fois, la rotation est abandonnée
+    pour ce processus (`maxBytes = 0` : le journal continue de grossir, ce qui
+    vaut infiniment mieux que de ne plus rien écrire) et le flux est rouvert.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.rollover_failed = False
+
+    def doRollover(self) -> None:  # noqa: N802 - nom imposé par logging
+        try:
+            super().doRollover()
+        except OSError as exc:
+            self.maxBytes = 0  # plus de tentative : un journal trop gros > un journal muet
+            if self.stream is None:  # `doRollover` ferme avant de renommer
+                self.stream = self._open()
+            if not self.rollover_failed:
+                self.rollover_failed = True
+                logging.getLogger(__name__).warning(
+                    "rotation de %s impossible (%s) — journal poursuivi sans rotation "
+                    "(une autre instance de Docia le tient ouvert ?)",
+                    self.baseFilename,
+                    exc,
+                )
+
+
+def _open_journal(target: Path) -> _RotatingFileHandler | None:
+    """Ouvre `docia.log`, ou `docia-<pid>.log` si le premier est inaccessible.
+
+    Sous Windows, `docia.log` peut être verrouillé par une autre instance : plutôt
+    que de renoncer au journal, on en ouvre un par processus, au même endroit.
+    """
+    per_process = target.with_name(f"{target.stem}-{os.getpid()}{target.suffix}")
+    for candidate in (target, per_process):
+        try:
+            return _RotatingFileHandler(
+                candidate, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS, encoding="utf-8"
+            )
+        except OSError as exc:  # dossier en lecture seule, disque plein, fichier verrouillé
+            logging.getLogger(__name__).warning(
+                "journal sur disque impossible (%s) : %s", candidate, exc
+            )
+    return None
+
 
 def _setup_logging(args: argparse.Namespace) -> Path | None:
     """Console lisible + journal détaillé sur disque (traces complètes, rotation).
+
+    Les niveaux sont distincts, sans quoi le fichier ne contiendrait rien de plus
+    que l'écran alors qu'il s'annonce « journal détaillé » : la racine est en
+    `DEBUG` (elle laisse tout passer), la console filtre à `INFO` (`DEBUG` avec
+    `-v`) et le fichier prend tout. Les bibliothèques tierces bavardes sont
+    muselées nommément (`NOISY_DEBUG_LOGGERS`).
 
     Idempotent : la fenêtre rappelle `main()` pour produire ses documents, il ne faut
     ni doubler les messages ni rouvrir le journal.
@@ -598,34 +761,94 @@ def _setup_logging(args: argparse.Namespace) -> Path | None:
         return _JOURNAL
     _LOGGING_CONFIGURED = True
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    root.setLevel(logging.DEBUG)
     console = logging.StreamHandler(stream=sys.stderr)
     console.setLevel(logging.DEBUG if args.verbose else logging.INFO)
     console.setFormatter(_ConsoleFormatter("%(levelname)s %(name)s : %(message)s"))
+    console.addFilter(lambda record: not getattr(record, JOURNAL_ONLY, False))
     root.addHandler(console)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    target = _log_file(getattr(args, "config", None))
-    try:
-        from logging.handlers import RotatingFileHandler
-
-        journal = RotatingFileHandler(target, maxBytes=4_000_000, backupCount=3, encoding="utf-8")
-    except OSError as exc:  # dossier en lecture seule, disque plein : la console suffit
-        logging.getLogger(__name__).warning("journal sur disque impossible (%s) : %s", target, exc)
+    for name in NOISY_DEBUG_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING if name == "httpx" else logging.INFO)
+    journal = _open_journal(_log_file(getattr(args, "config", None)))
+    if journal is None:  # la console suffit : jamais de plantage pour un journal
         return None
     journal.setLevel(logging.DEBUG)
     journal.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root.addHandler(journal)
-    _JOURNAL = target
-    return target
+    _JOURNAL = Path(journal.baseFilename)
+    return _JOURNAL
+
+
+def _silence_third_party_warnings() -> None:
+    """Coupe les avertissements openpyxl sans conséquence (« Data Validation extension
+    is not supported »), qui inquiétaient l'utilisateur dans la console de l'exe.
+
+    DocFuse ne les filtre volontairement plus à l'import : une bibliothèque n'a pas à
+    modifier la politique d'avertissements de son hôte. C'est donc au point d'entrée
+    applicatif de le faire — ici, une fois, au démarrage.
+    """
+    try:
+        from docfuse.extractors.xlsx import silence_openpyxl_warnings
+    except (ImportError, AttributeError):  # DocFuse absent ou antérieur à cette API
+        return
+    with contextlib.suppress(Exception):
+        silence_openpyxl_warnings()
+
+
+def _expected_failure(exc: BaseException) -> bool:
+    """Vrai pour les pannes que l'utilisateur peut comprendre et corriger seul.
+
+    L'import de `docia.service` n'a lieu qu'ici, sur le chemin d'erreur : `docia
+    init` n'a pas à payer le chargement du pipeline pour un garde-fou.
+    """
+    from docia.service import ServiceError
+
+    return isinstance(exc, OSError | sqlite3.Error | ServiceError)
+
+
+def _report_failure(command: str, exc: BaseException) -> None:
+    """Une ligne pour l'utilisateur, la trace complète pour `docia.log` — et rien d'autre."""
+    logging.getLogger(__name__).error(
+        "échec de « docia %s »", command, exc_info=exc, extra={JOURNAL_ONLY: True}
+    )
+    detail = str(exc).strip().splitlines()
+    message = detail[0] if detail else type(exc).__name__
+    suffix = f" — détail dans {_JOURNAL}" if _JOURNAL is not None else ""
+    print(f"échec de « docia {command} » : {message}{suffix}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Point d'entrée de la CLI.
+
+    Garde-fou : une panne prévisible — base en lecture seule (`Docia.exe` posé
+    dans `C:\\Program Files`), base verrouillée, disque plein, fichier
+    inaccessible — sort en **une ligne** et en code 1 ; la trace complète part
+    dans `docia.log`. Sans lui, l'utilisateur recevait un
+    `sqlite3.OperationalError: attempt to write a readonly database` de vingt
+    lignes venu d'un `PRAGMA journal_mode=WAL`. Tout le reste (une vraie
+    anomalie) remonte intact : on ne masque pas ce qu'on ne comprend pas.
+    """
     _utf8_console()
+    _silence_third_party_warnings()
     parser = build_parser()
     args = parser.parse_args(argv)
     journal = _setup_logging(args)
     if journal is not None:
         logging.getLogger(__name__).info("journal détaillé : %s", journal)
+    try:
+        return _dispatch(args)
+    except KeyboardInterrupt:
+        print("interrompu", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        if not _expected_failure(exc):
+            raise
+        _report_failure(str(args.command), exc)
+        return 1
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    """Exécute la sous-commande demandée (voir `main` pour le garde-fou)."""
     if args.command == "init":
         return cmd_init(args)
     if args.command == "gui":

@@ -6,7 +6,9 @@ grande campagne. Ces tests s'exécutent sans écran : s'ils devaient importer Tk
 
 from __future__ import annotations
 
-import pytest
+import subprocess
+import sys
+from pathlib import Path
 
 from docia import views
 from docia.db import Database
@@ -30,7 +32,9 @@ def test_hygiene_doublons(db: Database) -> None:  # noqa: F811
 
 
 def test_hygiene_anciennete_et_nettoyage(db: Database) -> None:  # noqa: F811
-    stale = compute_hygiene(db=db, views=views, view_name="Ancienneté (non accédés)", years=5)
+    stale = compute_hygiene(
+        db=db, views=views, view_name="Ancienneté (non accédés / non modifiés)", years=5
+    )
     assert stale.cols[0] == "depuis (ans)"
     assert len(stale.rows) == len(views.stale_files(db))
     cleanup = compute_hygiene(views, db, "Candidats au nettoyage", 5)
@@ -95,12 +99,27 @@ def test_section_vide_par_defaut() -> None:
     assert data.tags is None
 
 
-@pytest.mark.parametrize(
-    "compute", [compute_hygiene, compute_risk, compute_retention, compute_review]
-)
-def test_aucun_appel_tk(compute: object) -> None:
-    """Les fonctions de calcul ne doivent dépendre d'aucun widget : elles ne reçoivent
-    que `views`, la base, le nom de la vue et le seuil d'ancienneté."""
-    from inspect import signature
+def test_aucun_appel_tk(tmp_path: Path) -> None:
+    """Les quatre `compute_*` tournent dans un thread de fond : **aucun** Tk.
 
-    assert list(signature(compute).parameters)[:2] == ["views", "db"]  # type: ignore[arg-type]
+    Vérifier le nom de leurs paramètres ne prouvait rien. On les exécute pour de vrai
+    dans un sous-processus et on regarde si `tkinter` s'est chargé en chemin — un
+    import de widget n'importe où dans la chaîne le trahirait.
+    """
+    db_path = tmp_path / "camp.sqlite"
+    Database(db_path).close()  # campagne vide : les calculs doivent tenir dessus aussi
+    code = (
+        "import sys\n"
+        "from docia import views\n"
+        "from docia.db import Database\n"
+        "from docia.gui.tab_stats import (compute_hygiene, compute_retention,\n"
+        "                                 compute_review, compute_risk)\n"
+        f"db = Database(r'{db_path}')\n"
+        "compute_hygiene(views, db, 'Doublons (espace récupérable)', 5)\n"
+        "compute_risk(views, db, 'Fichiers sensibles', 5)\n"
+        "compute_retention(views, db, 'Plan de conservation', 5)\n"
+        "compute_review(views, db, 'Runs', 5)\n"
+        "print('tkinter' in sys.modules or 'customtkinter' in sys.modules)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False", f"Tk importé par les calculs : {out.stdout}"

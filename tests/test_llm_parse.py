@@ -192,3 +192,97 @@ def test_retention_is_validated() -> None:
     parsed2 = parse_block_response(json.dumps({"files": [missing]}), files)
     assert parsed2.invalid
     assert "retention" in parsed2.invalid[0][1]
+
+
+# -- décodage incrémental : un caractère de trop ne coûte plus le bloc ----
+
+
+def test_cloture_markdown_ne_perd_pas_le_bloc() -> None:
+    """Le modèle referme une clôture ```…``` : le JSON reste exploitable."""
+    payload = wrap(make_entry("dossier/rapport.md"))
+    parsed = parse_block_response(f"```json\n{payload}\n```", block_files(["dossier/rapport.md"]))
+    assert sorted(parsed.analyses) == [1]
+    assert parsed.missing == []
+
+
+def test_bavardage_apres_le_json_ne_perd_pas_le_bloc() -> None:
+    payload = wrap(make_entry("dossier/rapport.md"))
+    parsed = parse_block_response(
+        f"Voici mon analyse :\n{payload}\n\nJ'espère que cela convient.",
+        block_files(["dossier/rapport.md"]),
+    )
+    assert sorted(parsed.analyses) == [1]
+
+
+def test_reponse_tronquee_reste_une_parse_error() -> None:
+    """Une coupure de flux ne doit PAS être rattrapée en silence : le bloc doit
+    repartir, pas être validé sur un fragment."""
+    payload = wrap(make_entry("dossier/rapport.md"), make_entry("dossier/contrat.txt"))
+    with pytest.raises(ParseError, match="illisible"):
+        parse_block_response(payload[: len(payload) // 2], block_files())
+
+
+def test_racine_tableau_diagnostiquee_comme_telle() -> None:
+    with pytest.raises(ParseError, match="objet attendu"):
+        parse_block_response(json.dumps([make_entry("dossier/rapport.md")]), block_files())
+
+
+# -- segment dont le suffixe « [partie i/K] » a été oublié ---------------
+
+
+def _segment_file() -> list[BlockFile]:
+    return [BlockFile(9, "gros/rapport.pdf [partie 2/7]", 1, segment_index=2, segment_count=7)]
+
+
+def test_segment_reference_sans_suffixe_de_partie() -> None:
+    """Un bloc de segment ne contient qu'un fichier : la référence nue lui revient."""
+    parsed = parse_block_response(wrap(make_entry("gros/rapport.pdf")), _segment_file())
+    assert sorted(parsed.analyses) == [9]
+    assert parsed.missing == []
+    assert parsed.unknown_refs == []
+
+
+def test_segment_reference_avec_suffixe_toujours_correlee() -> None:
+    parsed = parse_block_response(
+        wrap(make_entry("gros/rapport.pdf [partie 2/7]")), _segment_file()
+    )
+    assert sorted(parsed.analyses) == [9]
+
+
+def test_nom_de_base_sans_suffixe_dans_un_bloc_a_plusieurs_entrees() -> None:
+    """Deux entrées rendues pour un bloc d'un seul segment : la règle « un seul
+    fichier, une seule entrée » ne s'applique pas, mais le nom de base privé du
+    suffixe, lui, corrèle."""
+    parsed = parse_block_response(
+        wrap(make_entry("rapport.pdf"), make_entry("inconnu/autre.txt")), _segment_file()
+    )
+    assert sorted(parsed.analyses) == [9]
+    assert parsed.unknown_refs == ["inconnu/autre.txt"]
+
+
+def test_suffixe_de_partie_ne_desambiguise_pas_deux_fichiers_homonymes() -> None:
+    files = [BlockFile(1, "a/note.txt", 1), BlockFile(2, "b/note.txt", 1)]
+    parsed = parse_block_response(wrap(make_entry("note.txt"), make_entry("autre.txt")), files)
+    assert parsed.analyses == {}
+    assert parsed.unknown_refs == ["note.txt", "autre.txt"]
+
+
+# -- plafond de longueur des chaînes rendues -----------------------------
+
+
+def test_chaines_demesurees_sont_tronquees_pas_rejetees() -> None:
+    """Le schéma JSON ne borne aucune longueur de chaîne (contrainte xgrammar) :
+    le garde-fou est à la validation. `resume` ET `raw` partent en base."""
+    from docia.llm.parse import MAX_TEXT_CHARS
+
+    entry = make_entry("dossier/rapport.md")
+    entry["resume"] = "A" * 8_000_000
+    entry["security"]["justification"] = "B" * 100_000
+    entry["legal"]["parties"] = ["C" * 100_000]
+    parsed = parse_block_response(wrap(entry), block_files(["dossier/rapport.md"]))
+    analysis = parsed.analyses[1]
+    assert len(analysis.resume) == MAX_TEXT_CHARS
+    assert analysis.resume.endswith("tronqué]")
+    assert len(analysis.security.details["justification"]) == MAX_TEXT_CHARS  # type: ignore[arg-type]
+    assert len(analysis.legal.details["parties"][0]) == MAX_TEXT_CHARS  # type: ignore[index]
+    assert len(json.dumps(analysis.raw)) < 10 * MAX_TEXT_CHARS

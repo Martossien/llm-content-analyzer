@@ -6,7 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from docia.gui.service_shim import list_backups, produce_document
+from docia.gui.dialogs import produce_document
+from docia.gui.service_shim import list_backups
 from docia.gui.theme import FONT_FAMILY, FONT_SIZE_SMALL
 from docia.gui.widgets import Card
 
@@ -110,6 +111,11 @@ class ReportsTab:
         state = "disabled" if busy else "normal"
         for b in (*self._buttons, self.backup_button, self.restore_button):
             b.configure(state=state)
+
+    def dispose(self) -> None:
+        """Retire les rappels avant destruction (symétrie avec les onglets administrateur)."""
+        self.app.off_busy(self._busy)
+        self.app.off_refresh(self.refresh)
 
     def refresh(self) -> None:
         if not self.app.db_path().exists():

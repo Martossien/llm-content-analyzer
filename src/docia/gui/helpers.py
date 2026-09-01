@@ -1,5 +1,5 @@
 """Fonctions pures de l'interface (testables sans fenêtre) : sérialisation TOML,
-lignes d'état, parsing des champs, lignes du tableau de résultats, estimation de tokens.
+parsing des champs, lignes du tableau de résultats, avancement, estimation de tokens.
 """
 
 from __future__ import annotations
@@ -48,28 +48,6 @@ def config_to_toml(cfg: Config) -> str:
     return text
 
 
-def status_lines(counts: dict[str, int], classes: dict[str, dict[str, int]]) -> list[str]:
-    """Lignes du panneau de compteurs (pur)."""
-    lines = [
-        f"fichiers : {counts.get('files', 0)} — à analyser {counts.get('pending', 0)}, "
-        f"en cours {counts.get('queued', 0)}, analysés {counts.get('done', 0)}, "
-        f"exclus {counts.get('excluded', 0)}, en erreur {counts.get('error', 0)}",
-        f"blocs : construits {counts.get('blocks_built', 0)}, envoyés {counts.get('blocks_sent', 0)}, "
-        f"terminés {counts.get('blocks_done', 0)}, en erreur {counts.get('blocks_error', 0)} — "
-        f"analyses : {counts.get('analyses', 0)}",
-    ]
-    for domain, label in (
-        ("security", "sécurité"),
-        ("rgpd", "RGPD"),
-        ("finance", "finance"),
-        ("legal", "juridique"),
-    ):
-        dist = classes.get(domain) or {}
-        if dist:
-            lines.append(f"{label} : " + ", ".join(f"{k} {v}" for k, v in sorted(dist.items())))
-    return lines
-
-
 def parse_int(raw: str, fallback: int, *, minimum: int = 1) -> int:
     """Entier saisi dans un champ texte, sinon `fallback` (pur)."""
     try:
@@ -77,25 +55,6 @@ def parse_int(raw: str, fallback: int, *, minimum: int = 1) -> int:
     except ValueError:
         return fallback
     return v if v >= minimum else fallback
-
-
-def result_rows(rows: Iterable[Any], limit: int = 500) -> list[tuple[str, str, str, str, str, str]]:
-    """Lignes du tableau de résultats : (nom, sécurité, RGPD, finance, juridique, résumé)."""
-    out: list[tuple[str, str, str, str, str, str]] = []
-    for r in rows:
-        if len(out) >= limit:
-            break
-        out.append(
-            (
-                str(r["name"]),
-                str(r["security_classification"] or (r["status"] if r["status"] != "done" else "")),
-                str(r["rgpd_risk_level"] or ""),
-                str(r["finance_document_type"] or ""),
-                str(r["legal_contract_type"] or ""),
-                (str(r["resume"] or r["exclusion_reason"] or ""))[:120],
-            )
-        )
-    return out
 
 
 def estimate_prompt_tokens(text: str) -> int:
@@ -145,19 +104,6 @@ def progress_fraction(counts: dict[str, int]) -> float:
         return 0.0
     done = counts.get("done", 0) + counts.get("error", 0)
     return max(0.0, min(1.0, done / total))
-
-
-def eta_seconds(done_delta: int, elapsed_s: float, remaining: int) -> float | None:
-    """Temps restant estimé à partir du débit observé depuis le début du run ; None si inconnu."""
-    if done_delta <= 0 or elapsed_s <= 0 or remaining <= 0:
-        return None
-    return remaining * elapsed_s / done_delta
-
-
-def rate_per_hour(done_delta: int, elapsed_s: float) -> float:
-    if done_delta <= 0 or elapsed_s <= 0:
-        return 0.0
-    return done_delta * 3600.0 / elapsed_s
 
 
 def campaign_title(db_path: str) -> str:

@@ -190,9 +190,45 @@ class BarChart:
             )
 
 
+def sort_rows(
+    rows: Sequence[Sequence[str]],
+    tags: Sequence[str],
+    keys: Sequence[Any],
+    col: int,
+    *,
+    desc: bool = False,
+) -> tuple[list[list[str]], list[str], list[Any]]:
+    """Trie lignes, couleurs **et identités** ensemble (fonction pure, testable sans écran).
+
+    Trier les lignes sans emporter les identités, c'était afficher la fiche d'un autre
+    fichier que celui qu'on venait de cliquer — et enregistrer la vérification humaine
+    dessus. Les nombres se trient comme des nombres, le reste sans tenir compte de la casse.
+    """
+    triples = list(zip(rows, tags, keys, strict=False))
+
+    def key(triple: tuple[Sequence[str], str, Any]) -> tuple[int, float, str]:
+        value = str(triple[0][col]) if col < len(triple[0]) else ""
+        try:
+            return (0, float(value.replace(" ", "").replace(" ", "").replace(",", ".")), "")
+        except ValueError:
+            return (1, 0.0, value.lower())
+
+    triples.sort(key=key, reverse=desc)
+    return (
+        [list(r) for r, _, _ in triples],
+        [t for _, t, _ in triples],
+        [k for _, _, k in triples],
+    )
+
+
 class Table:
     """Tableau sur `ttk.Treeview` (des milliers de lignes), tri par clic sur l'en-tête,
-    callback au clic sur une ligne, lignes colorées par sévérité (`tags`)."""
+    callback au clic sur une ligne, lignes colorées par sévérité (`tags`).
+
+    C'est le tableau qui porte l'identité de ses lignes (`keys`) : `on_select` reçoit
+    l'identité de la ligne cliquée, jamais son rang — un tri par en-tête réordonne le
+    tableau et l'appelant n'a rien à resynchroniser.
+    """
 
     def __init__(
         self,
@@ -200,7 +236,7 @@ class Table:
         parent: Any,
         *,
         columns: Sequence[str],
-        on_select: Callable[[int], None] | None = None,
+        on_select: Callable[[Any], None] | None = None,
         height: int = 280,
         widths: dict[str, int] | None = None,
     ) -> None:
@@ -213,6 +249,7 @@ class Table:
         self.on_select = on_select
         self.rows: list[list[str]] = []
         self.row_tags: list[str] = []
+        self.keys: list[Any] = []
         self._sort_col: int | None = None
         self._sort_desc = False
 
@@ -288,9 +325,21 @@ class Table:
             width = self.widths.get(name, 110 if len(name) < 10 else 150)
             self.tree.column(str(idx), width=width, minwidth=50, stretch=name in stretch_cols)
 
-    def set_rows(self, rows: Sequence[Sequence[str]], tags: Sequence[str] | None = None) -> None:
+    def set_rows(
+        self,
+        rows: Sequence[Sequence[str]],
+        tags: Sequence[str] | None = None,
+        keys: Sequence[Any] | None = None,
+    ) -> None:
+        """`keys` : identité métier de chaque ligne, rendue telle quelle à `on_select`.
+
+        Optionnel : sans elle, `on_select` reçoit le rang de la ligne — ce qui suffit
+        aux tableaux qui ne servent qu'à lire (Statistiques).
+        """
         self.rows = [[str(c) for c in r] for r in rows]
         self.row_tags = list(tags) if tags else ["ok"] * len(self.rows)
+        self.keys = list(keys) if keys is not None else list(range(len(self.rows)))
+        self._sort_col, self._sort_desc = None, False  # nouvelles données : tri remis à zéro
         self._apply_columns()
         self._render()
 
@@ -306,30 +355,18 @@ class Table:
             self._sort_desc = not self._sort_desc
         else:
             self._sort_col, self._sort_desc = col, False
-
-        def key(pair: tuple[list[str], str]) -> tuple[int, float, str]:
-            value = pair[0][col] if col < len(pair[0]) else ""
-            try:
-                return (0, float(value.replace(" ", "").replace(" ", "").replace(",", ".")), "")
-            except ValueError:
-                return (1, 0.0, value.lower())
-
-        paired = sorted(
-            zip(self.rows, self.row_tags, strict=False), key=key, reverse=self._sort_desc
+        self.rows, self.row_tags, self.keys = sort_rows(
+            self.rows, self.row_tags, self.keys, col, desc=self._sort_desc
         )
-        self.rows = [r for r, _ in paired]
-        self.row_tags = [t for _, t in paired]
         self._apply_columns()
         self._render()
 
     def _on_tree_select(self, _event: object) -> None:
         selection = self.tree.selection()
-        if selection and self.on_select is not None:
-            self.on_select(int(selection[0]))
-
-    def select_first(self) -> None:
-        if self.rows:
-            self.tree.selection_set("0")
+        if not selection or self.on_select is None:
+            return
+        index = int(selection[0])
+        self.on_select(self.keys[index] if index < len(self.keys) else index)
 
 
 def rows_from_records(

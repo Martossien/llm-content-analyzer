@@ -55,6 +55,43 @@ class BuildResult:
     du lot (détection DocFuse) — pas envoyé, hérite de l'analyse de l'original."""
 
 
+def split_by_bytes(entries: Sequence[tuple[Path, int]], budget_bytes: int) -> list[list[Path]]:
+    """Découpe un lot en sous-lots dont le cumul des tailles tient dans `budget_bytes`.
+
+    C'est le **seul** garde-fou mémoire de l'extraction : `blocks.batch_files` ne
+    compte que des fichiers, or DocFuse garde en RAM le texte extrait de tout le lot
+    avant de le découper. Sur un partage où quelques fichiers pèsent 100 Mo (plafond
+    par défaut de `filter.max_size_bytes`), un lot de 50 fichiers demandait plusieurs
+    gigaoctets sur un serveur Windows qui n'en a que 8.
+
+    Un fichier seul plus gros que le budget forme son propre sous-lot : il est traité,
+    jamais écarté — le budget borne le cumul, il ne filtre rien.
+
+    Args:
+        entries: `(chemin, taille en octets)` dans l'ordre de sélection.
+        budget_bytes: Plafond du cumul par sous-lot ; `0` ou moins = aucun plafond.
+
+    Returns:
+        Les sous-lots, dans l'ordre ; liste vide si `entries` est vide.
+    """
+    if not entries:
+        return []
+    if budget_bytes <= 0:
+        return [[path for path, _ in entries]]
+    chunks: list[list[Path]] = []
+    current: list[Path] = []
+    total = 0
+    for path, size in entries:
+        if current and total + size > budget_bytes:
+            chunks.append(current)
+            current, total = [], 0
+        current.append(path)
+        total += size
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def build_blocks(
     files: Sequence[FileRow],
     cfg: BlocksConfig,
@@ -65,9 +102,16 @@ def build_blocks(
 ) -> BuildResult:
     """Construit les blocs `.md` d'un lot de fichiers.
 
+    Le lot est découpé en sous-lots par `cfg.batch_bytes` (voir `split_by_bytes`) et
+    DocFuse est appelé une fois par sous-lot : c'est ce qui borne la mémoire. Deux
+    conséquences assumées quand le budget mord — donc jamais sur un lot ordinaire de
+    documents bureautiques : les blocs portent un libellé `<label>sNN`, et la détection
+    des doublons exacts par DocFuse ne joue qu'à l'intérieur d'un sous-lot (deux copies
+    séparées par une coupure sont analysées deux fois — un coût, pas une perte).
+
     Args:
         files: Fichiers du lot, dans l'ordre de sélection.
-        cfg: Plafond, marge et moteur de comptage.
+        cfg: Plafond, marge, moteur de comptage et budget mémoire du lot.
         work_dir: Dossier des `.md` (créé au besoin) ; rien n'est écrit ailleurs.
         batch_label: Préfixe des noms de blocs (`<label>_001.md`).
         lang: Langue DocFuse (en-têtes et raisons d'exclusion).
@@ -81,25 +125,43 @@ def build_blocks(
     """
     outcomes: dict[int, str] = {}
     rows_by_key: dict[str, FileRow] = {}
-    inputs: list[Path] = []
+    inputs: list[tuple[Path, int]] = []
 
     for row in files:
-        if not Path(row.path).is_file():
+        path = Path(row.path)
+        if not path.is_file():
             outcomes.setdefault(row.id, "introuvable")
             continue
+        try:
+            size = path.stat().st_size
+        except OSError:  # disparu entre les deux appels : la taille du scan fera foi
+            size = 0
         keys = _path_keys(row.path)
         if any(key in rows_by_key for key in keys):
             outcomes.setdefault(row.id, "chemin en double dans le lot")
             continue
         for key in keys:
             rows_by_key[key] = row
-        inputs.append(Path(row.path))
+        inputs.append((path, max(size, row.size_bytes)))
 
     blocks: list[BlockSpec] = []
     duplicates: dict[int, int] = {}
-    if inputs:
-        blocks = _run_docfuse(
-            inputs, cfg, work_dir, rows_by_key, outcomes, duplicates, batch_label, lang
+    chunks = split_by_bytes(inputs, cfg.batch_bytes)
+    if len(chunks) > 1:
+        logger.info(
+            "Lot %s : %d fichier(s), %.0f Mo — découpé en %d sous-lot(s) "
+            "pour tenir le budget mémoire blocks.batch_bytes (%.0f Mo)",
+            batch_label,
+            len(inputs),
+            sum(size for _, size in inputs) / 1e6,
+            len(chunks),
+            cfg.batch_bytes / 1e6,
+        )
+    for number, chunk in enumerate(chunks, 1):
+        # Un seul sous-lot : le libellé — donc les noms de blocs — ne change pas.
+        label = batch_label if len(chunks) == 1 else f"{batch_label}s{number:02d}"
+        blocks.extend(
+            _run_docfuse(chunk, cfg, work_dir, rows_by_key, outcomes, duplicates, label, lang)
         )
 
     placed = {block_file.file_id for block in blocks for block_file in block.files}
@@ -303,7 +365,15 @@ def _segment_blocks(
 
 def _split_text(text: str, budget_tokens: int, margin: float, engine: object) -> list[str]:
     """Découpe `text` en morceaux ≤ `budget_tokens` (avec marge), en coupant de
-    préférence sur une ligne vide, sinon une fin de ligne, sinon un espace."""
+    préférence sur une ligne vide, sinon une fin de ligne, sinon un espace.
+
+    Coût LINÉAIRE : le texte complet n'est tokenisé qu'UNE fois, converti en un
+    ratio caractères/token, puis on avance par fenêtre — chaque comptage porte
+    sur le morceau candidat, jamais sur tout le reste du texte. La version qui
+    recomptait le reste à chaque tour était quadratique : 53 s pour 2,6 M de
+    caractères (≈ 15 min extrapolées pour un fichier texte de 10 Mo, avant le
+    moindre envoi et sans aucune trace d'avancement).
+    """
     from docfuse.core.tokenizers.base import TokenizerEngine
 
     eng = engine if isinstance(engine, TokenizerEngine) else None
@@ -311,26 +381,37 @@ def _split_text(text: str, budget_tokens: int, margin: float, engine: object) ->
     def tokens(s: str) -> int:
         return estimate_tokens(s, margin, eng).tokens_with_margin
 
+    total_chars = len(text)
+    if total_chars == 0:
+        return [text]
+    total_tokens = tokens(text)  # LE seul comptage sur le texte entier
+    if total_tokens <= budget_tokens:
+        return [text]
+    chars_per_token = total_chars / max(1, total_tokens)
+    # Fenêtre visée : 95 % du budget, pour laisser l'ajustement descendant converger vite.
+    window = max(1, int(budget_tokens * chars_per_token * 0.95))
+
     pieces: list[str] = []
-    rest = text
-    while rest:
-        if tokens(rest) <= budget_tokens:
-            pieces.append(rest)
+    pos = 0
+    while pos < total_chars:
+        remaining = total_chars - pos
+        # Ne compter le reste que s'il est plausiblement dans le budget : ce
+        # comptage porte alors sur une longueur bornée, pas sur tout le texte.
+        if remaining <= int(window * 1.5) and tokens(text[pos:]) <= budget_tokens:
+            pieces.append(text[pos:])
             break
-        # Estimation proportionnelle puis ajustement descendant.
-        ratio = budget_tokens / max(1, tokens(rest))
-        cut = max(1, int(len(rest) * ratio * 0.95))
-        while cut > 1 and tokens(rest[:cut]) > budget_tokens:
-            cut = int(cut * 0.9)
+        cut = min(total_chars, pos + window)
+        while cut > pos + 1 and tokens(text[pos:cut]) > budget_tokens:
+            cut = pos + max(1, int((cut - pos) * 0.9))
         # Reculer jusqu'à une frontière naturelle (dans les 20 % précédents).
-        floor = int(cut * 0.8)
+        floor = pos + int((cut - pos) * 0.8)
         for sep in ("\n\n", "\n", " "):
-            pos = rest.rfind(sep, floor, cut)
-            if pos > 0:
-                cut = pos + len(sep)
+            found = text.rfind(sep, floor, cut)
+            if found > pos:
+                cut = found + len(sep)
                 break
-        pieces.append(rest[:cut])
-        rest = rest[cut:]
+        pieces.append(text[pos:cut])
+        pos = cut
     return [p for p in pieces if p.strip()] or [text]
 
 

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import pytest
 
 from docia.cli_tools import register
 from docia.config import Config
-from docia.quick import csv_rows_from_paths, quick_analyze
+from docia.quick import QuickReport, csv_rows_from_paths, quick_analyze
 
 TEXTS = {
     "contrat_dupont.txt": (
@@ -180,3 +181,34 @@ def test_quick_dry_run_builds_blocks_without_llm(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert cli_main(["--config", str(cfg_path), "quick", "--dry-run", str(src)]) == 0
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "getuid", lambda: 1)() == 0,
+    reason="les permissions POSIX ne bloquent ni Windows ni root",
+)
+def test_quick_compte_et_signale_les_dossiers_refuses(dossier: Path) -> None:
+    """MOYEN 9 : un dossier refusé disparaissait, ni compté ni signalé.
+
+    `Path.rglob` avale les `PermissionError` : `docia quick \\\\srv\\partage\\Compta`
+    avec un compte sans droits sur un sous-dossier — le cas normal d'un partage
+    cloisonné — annonçait « 3 fichiers : 3 analysés, 0 illisible », le quatrième
+    n'existant nulle part. Pour un audit de conformité, c'est la pire des sorties.
+    """
+    prive = dossier / "prive"
+    prive.mkdir()
+    (prive / "secret.txt").write_text("dossier interdit", encoding="utf-8")
+    prive.chmod(0o000)
+    unreadable: list[str] = []
+    denied: list[str] = []
+    try:
+        rows = list(csv_rows_from_paths([dossier], unreadable=unreadable, denied_dirs=denied))
+    finally:
+        prive.chmod(0o755)
+
+    assert {r.name for r in rows} == {*TEXTS, "logo.png"}
+    assert denied == [str(prive)], "le dossier refusé doit être remonté à l'appelant"
+    assert unreadable == []
+
+    rapport = QuickReport(requested=len(rows), analyzed=len(rows), denied_dirs=len(denied))
+    assert any("1 dossier(s) refusé(s)" in ligne for ligne in rapport.as_lines())

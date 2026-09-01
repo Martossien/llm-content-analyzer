@@ -7,23 +7,30 @@ bout en bout ; `fake_server` du plugin `tests.fake_openai`.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+import docia.cli as cli
 from docia.cli import DEFAULT_KEEP_BACKUPS as CLI_KEEP_BACKUPS
 from docia.cli import main
 from docia.config import Config
 from docia.db import _SCHEMA_V1, SCHEMA_VERSION, Database, backup_dir_for
+from docia.ingest.smbeagle_csv import ImportReport
 from docia.models import DomainAnalysis, FileAnalysis, FileStatus
 from docia.service import (
     DEFAULT_KEEP_BACKUPS,
+    ImportProgress,
     RunEvent,
     ServiceError,
     backup_database,
     campaign_status,
     forget_campaign,
+    format_import_report,
+    import_progress_logger,
     import_scan,
     list_backups,
     plan,
@@ -33,6 +40,7 @@ from docia.service import (
     restore_database,
     run_campaign,
 )
+from docia.views import format_int
 from tests.test_pipeline_e2e import _config, corpus  # noqa: F401
 
 
@@ -40,6 +48,27 @@ from tests.test_pipeline_e2e import _config, corpus  # noqa: F401
 def _docia_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Isole `recent.json` : aucun test n'écrit dans le vrai dossier de config."""
     monkeypatch.setenv("DOCIA_HOME", str(tmp_path / "config_docia"))
+
+
+@pytest.fixture
+def journal_isole() -> Iterator[None]:
+    """Isole la journalisation le temps d'un test qui appelle `main()`.
+
+    `_setup_logging` n'agit qu'une fois par processus : sans cette remise à zéro,
+    le gestionnaire console d'un test précédent écrit dans un flux capturé déjà
+    refermé, et pytest voit passer des « Logging error » qui ne viennent pas du code.
+    """
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    root.handlers = []
+    cli._JOURNAL, cli._LOGGING_CONFIGURED = None, False
+    try:
+        yield
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers, root.level = handlers, level
+        cli._JOURNAL, cli._LOGGING_CONFIGURED = None, False
 
 
 def _prepare(tmp_path: Path, csv_path: Path, base_url: str) -> tuple[Config, Database]:
@@ -369,7 +398,168 @@ def test_import_scan_remembers_the_campaign(
         import_scan(db, tmp_path / "absent.csv")
 
 
+def test_import_scan_journalise_une_progression_espacee(
+    tmp_path: Path,
+    corpus: tuple[Path, Path],  # noqa: F811
+) -> None:
+    """Le rappel de progression traverse bien `import_scan` jusqu'au journal."""
+    _src, csv_path = corpus
+    cfg = _config(tmp_path, "http://127.0.0.1:1")
+    lignes: list[str] = []
+    with Database(cfg.db_path) as db:
+        report = import_scan(
+            db,
+            csv_path,
+            progress=import_progress_logger(lignes.append, min_seconds=0.0, min_rows=0),
+        )
+    assert lignes, "aucune progression journalisée"
+    assert all(ligne.startswith("intégration : ") for ligne in lignes)
+    assert lignes[0].startswith("intégration : 0 lignes")
+    assert f"{report.total} lignes" in lignes[-1]
+    assert "100 %" in lignes[-1]
+
+
+def test_import_progress_logger_espace_les_lignes() -> None:
+    """Cent appels rapprochés ne produisent qu'une ligne : le journal n'est pas inondé."""
+    lignes: list[str] = []
+    emit = import_progress_logger(lignes.append, min_seconds=60.0, min_rows=1_000_000)
+    for i in range(100):
+        emit(
+            ImportProgress(
+                rows=i * 1_000, invalid=0, bytes_read=i, total_bytes=100_000, elapsed_s=0.1
+            )
+        )
+    assert len(lignes) == 1
+
+    lignes.clear()
+    emit2 = import_progress_logger(lignes.append, min_seconds=60.0, min_rows=10_000)
+    for i in range(100):
+        emit2(
+            ImportProgress(
+                rows=i * 1_000, invalid=0, bytes_read=i, total_bytes=100_000, elapsed_s=0.1
+            )
+        )
+    assert len(lignes) == 10
+
+
+def test_import_progress_logger_emet_toujours_la_ligne_finale() -> None:
+    """L'étranglement ne doit jamais ravaler le dernier appel.
+
+    Sur les 934 028 lignes du scan réel, la dernière ligne affichée était
+    « 900 000 lignes — 96 % » ; sur un import de trois lignes, l'utilisateur ne
+    voyait que « 0 lignes — 0 % ». `ImportProgress.final` court-circuite les seuils.
+    """
+    octets = 251_868_508  # taille du gros scan de référence
+    for total_lignes in (3, 934_028):
+        lignes: list[str] = []
+        emit = import_progress_logger(lignes.append, min_seconds=3_600.0, min_rows=1_000_000)
+        emit(ImportProgress(rows=0, invalid=0, bytes_read=0, total_bytes=octets, elapsed_s=0.0))
+        for rows in range(10_000, total_lignes, 10_000):  # les lots intermédiaires, tous étranglés
+            emit(
+                ImportProgress(
+                    rows=rows,
+                    invalid=0,
+                    bytes_read=octets * rows // total_lignes,
+                    total_bytes=octets,
+                    elapsed_s=1.0,
+                )
+            )
+        emit(
+            ImportProgress(
+                rows=total_lignes,
+                invalid=0,
+                bytes_read=octets,
+                total_bytes=octets,
+                elapsed_s=42.0,
+                final=True,
+            )
+        )
+        assert lignes[-1] == f"intégration : {format_int(total_lignes)} lignes — 100 % — 42 s"
+
+
+def test_import_progress_logger_ne_repete_pas_la_ligne_finale() -> None:
+    """Le dernier lot a déjà tout dit : ne pas écrire deux fois la même ligne."""
+    lignes: list[str] = []
+    emit = import_progress_logger(lignes.append, min_seconds=0.0, min_rows=0)
+    emit(ImportProgress(rows=0, invalid=0, bytes_read=0, total_bytes=10, elapsed_s=0.0))
+    emit(ImportProgress(rows=63, invalid=0, bytes_read=10, total_bytes=10, elapsed_s=0.1))
+    emit(
+        ImportProgress(rows=63, invalid=0, bytes_read=10, total_bytes=10, elapsed_s=0.1, final=True)
+    )
+    assert lignes == [
+        "intégration : 0 lignes — 0 % — 0 s",
+        "intégration : 63 lignes — 100 % — 0 s",
+    ]
+
+
+def test_import_dun_petit_csv_finit_sur_cent_pour_cent(tmp_path: Path) -> None:
+    """Trois lignes, seuils par défaut : l'utilisateur doit voir autre chose que « 0 % »."""
+    source = Path(__file__).parent / "fixtures" / "scan_local_mini.csv"
+    entete, *donnees = source.read_text(encoding="utf-8").splitlines()
+    petit = tmp_path / "trois_lignes.csv"
+    petit.write_text("\n".join([entete, *donnees[:3]]) + "\n", encoding="utf-8")
+    lignes: list[str] = []
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_scan(db, petit, progress=import_progress_logger(lignes.append))
+    assert report.total == 3
+    assert lignes[-1] == "intégration : 3 lignes — 100 % — 0 s"
+
+
+def test_format_import_report_est_la_seule_formulation_du_bilan() -> None:
+    """Le bilan d'import n'a qu'une écriture : `cli`, `cli_tools` et la fenêtre la partagent."""
+    report = ImportReport(scan_id=7, total=63, new=60, updated=2, unchanged=1, invalid=0)
+    assert (
+        format_import_report(report)
+        == "import : 63 lignes — 60 nouveaux, 2 modifiés, 1 inchangés, 0 invalides"
+    )
+    assert format_import_report(report, prefix=f"scan {report.scan_id}").startswith("scan 7 : ")
+
+
 # ---------------------------------------------------------------------- CLI
+
+
+def test_cli_ingest_memorise_la_campagne(
+    tmp_path: Path,
+    corpus: tuple[Path, Path],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    journal_isole: None,  # noqa: ARG001 - remet la journalisation à zéro
+) -> None:
+    """`docia ingest` doit passer par `service.import_scan`, comme la fenêtre.
+
+    En appelant `import_csv` en direct, la CLI sautait `remember_campaign` :
+    après un `ingest` pourtant réussi, `docia campaigns` répondait « aucune
+    campagne récente ». La ligne de bilan, elle, ne doit pas changer d'un iota.
+    """
+    _src, csv_path = corpus
+    monkeypatch.chdir(tmp_path)
+    db_path = str(tmp_path / "docia.sqlite")
+    assert main(["--db", db_path, "ingest", str(csv_path)]) == 0
+    assert (
+        capsys.readouterr().out.strip()
+        == "scan 1 : 6 lignes — 6 nouveaux, 0 modifiés, 0 inchangés, 0 invalides"
+    )
+    assert [e.db_path for e in recent_campaigns()] == [Path(db_path).resolve()]
+    assert main(["--db", db_path, "campaigns"]) == 0
+    sortie = capsys.readouterr().out
+    assert "aucune campagne récente" not in sortie
+    assert str(Path(db_path).resolve()) in sortie
+
+
+def test_cli_ingest_csv_illisible_rend_un_message_francais(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    journal_isole: None,  # noqa: ARG001 - remet la journalisation à zéro
+) -> None:
+    """Un CSV présent mais illisible : `ServiceError`, pas une trace Python brute."""
+    monkeypatch.chdir(tmp_path)
+    illisible = tmp_path / "scan.csv"
+    illisible.mkdir()  # existe, mais refuse de s'ouvrir
+    assert main(["--db", str(tmp_path / "docia.sqlite"), "ingest", str(illisible)]) == 1
+    erreur = capsys.readouterr().err
+    assert "Traceback" not in erreur
+    assert "lecture impossible du scan" in erreur
 
 
 def test_cli_backup_restore_reanalyze_campaigns(
