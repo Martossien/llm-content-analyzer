@@ -1000,9 +1000,13 @@ def _fold_risk(
     """
     tallies: dict[str, RiskTally] = {}
     for row in rows:
-        classification = row[width]
-        if not classification:
-            continue
+        # Une analyse sans classe de sécurité tombe dans « N/A », elle n'est pas jetée.
+        # Le `continue` d'avant supprimait la ligne **entière** — son niveau RGPD compris :
+        # la synthèse annonçait 3 analysés et 2 RGPD à risque, la matrice du même rapport
+        # 2 et 1. Le cas existe (analyse aboutie mais champ vide, ou échec partiel du
+        # modèle), et c'est précisément celui qu'il faut voir : un fichier au risque RGPD
+        # critique disparaissait du tableau parce que sa sécurité n'était pas renseignée.
+        classification = row[width] or "N/A"
         label = label_of(row)
         entry = tallies.get(label)
         if entry is None:
@@ -1011,7 +1015,8 @@ def _fold_risk(
         security, rgpd, analyzed = entry
         number = int(row[width + 2])
         security[classification] = security.get(classification, 0) + number
-        rgpd[row[width + 1]] = rgpd.get(row[width + 1], 0) + number
+        niveau = row[width + 1] or "N/A"  # même règle pour le RGPD non renseigné
+        rgpd[niveau] = rgpd.get(niveau, 0) + number
         analyzed[0] += number
     return tallies
 
@@ -1227,10 +1232,25 @@ def cleanup_candidates(
 
 
 def _review_counts(db: Database) -> dict[str, int]:
-    """Nombre de fichiers par statut de vérification humaine."""
+    """Fichiers par statut de vérification humaine, **parmi les fichiers analysés**.
+
+    Le comptage portait sur toute la table `reviews`, sans lien avec l'ensemble qui
+    sert de dénominateur (`_analyzed_files`). `set_review` accepte n'importe quel
+    identifiant, y compris un fichier jamais analysé ou dont l'analyse a été invalidée
+    par une modification du contenu : l'avancement affiché montait alors au-dessus de
+    100 % — mesuré à **400 %** avec un analysé et quatre revues — et `not_reviewed`
+    était ramené à 0 par un `max(..., 0)` qui masquait l'incohérence au lieu de la
+    signaler. Les deux nombres se rapportent maintenant au même ensemble.
+    """
     return {
         str(r[0]): int(r[1])
-        for r in db.query_values("SELECT status, COUNT(*) FROM reviews GROUP BY status")
+        for r in db.query_values(
+            "SELECT r.status, COUNT(DISTINCT r.file_id) FROM reviews r"
+            " WHERE EXISTS (SELECT 1 FROM analyses a JOIN files f ON f.id = a.file_id"
+            "               AND a.content_version = f.content_version"
+            "               WHERE a.file_id = r.file_id)"
+            " GROUP BY r.status"
+        )
     }
 
 

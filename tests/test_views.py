@@ -780,6 +780,78 @@ def test_la_regle_derniere_analyse_est_la_meme_partout() -> None:
     assert attendu_a in _sql_normalise(db_module._IS_LATEST)  # noqa: SLF001
 
 
+def test_une_analyse_sans_classe_reste_dans_la_matrice(tmp_path: Path) -> None:
+    """MOYEN : une analyse sans classe de sécurité était jetée de la matrice.
+
+    `_fold_risk` faisait `continue` sur une classification vide : la ligne entière
+    disparaissait, **son niveau RGPD compris**. La synthèse et la matrice du même
+    rapport annonçaient alors des chiffres différents :
+
+        synthèse : analysés=3  RGPD à risque=2
+        matrice  : analysés=2  RGPD à risque=1
+
+    Un fichier au risque RGPD critique s'évaporait du tableau parce que sa classe de
+    sécurité n'était pas renseignée — le cas existe quand le modèle répond
+    partiellement. C'est précisément celui qu'il faut voir.
+    """
+    with Database(tmp_path / "sans_classe.sqlite") as database:
+        scan = database.start_scan("s")
+        database.upsert_files([_row(f"d{i}.pdf", fast_hash=f"h{i}") for i in range(3)], scan)
+        database.finish_scan(scan, total=3, new=3, updated=0, unchanged=0, invalid=0)
+        fichiers = sorted(database.iter_files(), key=lambda f: f.name)
+        for fichier, classe, niveau in zip(
+            fichiers, ("C3", "C0", ""), ("critical", "low", "critical"), strict=True
+        ):
+            database.store_analysis(
+                fichier.id,
+                None,
+                1,
+                prompt_hash="p",
+                model="m",
+                analysis=_analysis(fichier.name, security=classe, rgpd=niveau),
+            )
+        apercu = views.overview(database, today=TODAY)
+        matrice = views.classification_matrix(database, axis="share")
+
+    assert sum(ligne.analyzed for ligne in matrice) == apercu.analyzed == 3
+    risque = sum(ligne.rgpd.get("high", 0) + ligne.rgpd.get("critical", 0) for ligne in matrice)
+    assert risque == apercu.rgpd_at_risk == 2, "le RGPD ne disparaît pas avec la classe"
+    assert matrice[0].security["N/A"] == 1, "la classe absente se voit, elle ne s'efface pas"
+
+
+def test_l_avancement_de_verification_ne_depasse_pas_cent_pour_cent(tmp_path: Path) -> None:
+    """MOYEN : l'avancement de la vérification humaine montait à 400 %.
+
+    `_review_counts` comptait **toute** la table `reviews`, sans lien avec le
+    dénominateur (`_analyzed_files`). `set_review` accepte n'importe quel identifiant,
+    y compris un fichier jamais analysé : un analysé et quatre revues affichaient
+    « 4 sur 1 analysés », soit 400 %, et `not_reviewed` était ramené à 0 par un
+    `max(..., 0)` qui masquait l'incohérence au lieu de la signaler.
+    """
+    with Database(tmp_path / "revues.sqlite") as database:
+        scan = database.start_scan("s")
+        database.upsert_files([_row(f"d{i}.pdf", fast_hash=f"h{i}") for i in range(4)], scan)
+        database.finish_scan(scan, total=4, new=4, updated=0, unchanged=0, invalid=0)
+        fichiers = sorted(database.iter_files(), key=lambda f: f.name)
+        database.store_analysis(
+            fichiers[0].id,
+            None,
+            1,
+            prompt_hash="p",
+            model="m",
+            analysis=_analysis(fichiers[0].name, security="C0", rgpd="low"),
+        )
+        for fichier in fichiers:  # les quatre sont « vérifiés », un seul est analysé
+            database.set_review(fichier.id, "validated", reviewer="moi")
+        avancement = views.review_progress(database)
+
+    revus = avancement.to_review + avancement.validated + avancement.corrected
+    assert avancement.analyzed == 1
+    assert revus == 1, "seules les revues de fichiers analysés comptent"
+    assert views.percent(revus, avancement.analyzed) == 100.0
+    assert avancement.not_reviewed == 0
+
+
 def test_une_analyse_perimee_ne_decide_plus_d_une_suppression(tmp_path: Path) -> None:
     """GRAVE : un fichier modifié depuis son analyse restait candidat au nettoyage.
 
