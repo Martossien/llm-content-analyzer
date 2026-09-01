@@ -97,6 +97,16 @@ def normalize_index_sql(sql: str) -> str:
     return re.sub(r"\s*([(),])\s*", r"\1", text)
 
 
+MIN_DATE_KEY = "16010101"
+"""Plus ancienne date tenue pour réelle (époque FILETIME de Windows, 1er janvier 1601).
+
+Un scanner qui ne collecte pas la date d'accès écrit `default(DateTime)`, soit
+`01/01/0001 00:00:00` ; un FILETIME nul rend `01/01/1601`. Gardées comme clés, ces
+valeurs rangeaient chaque fichier concerné dans « non accédé depuis 10 ans » — donc
+parmi les candidats au nettoyage — alors que la date est simplement **inconnue**.
+Une clé sous ce seuil vaut `''` : le fichier sort des statistiques d'ancienneté."""
+
+
 def date_key_sql(column: str) -> str:
     """Expression SQL rendant `yyyymmdd` (ou `''`) pour une date SMBeagle ou ISO.
 
@@ -104,17 +114,20 @@ def date_key_sql(column: str) -> str:
     toute valeur (vérifié par `tests/test_db.py`). Sert à remplir `files.access_key`
     et `files.write_key` (schéma v6) et à les rétro-remplir à la migration.
     """
-    return (
+    key = (
         f"CASE WHEN length({column})>=10 AND substr({column},3,1)='/' AND substr({column},6,1)='/'"
         f" THEN substr({column},7,4)||substr({column},4,2)||substr({column},1,2)"
         f" WHEN length({column})>=10 AND substr({column},5,1)='-'"
         f" THEN substr({column},1,4)||substr({column},6,2)||substr({column},9,2)"
         f" ELSE '' END"
     )
+    # Une date antérieure à `MIN_DATE_KEY` n'est pas une date : voir `date_key`.
+    return f"CASE WHEN ({key}) < '{MIN_DATE_KEY}' THEN '' ELSE ({key}) END"
 
 
 def date_key(value: str) -> str:
-    """`yyyymmdd` d'une date SMBeagle (`dd/MM/yyyy…`) ou ISO, `''` si illisible.
+    """`yyyymmdd` d'une date SMBeagle (`dd/MM/yyyy…`) ou ISO, `''` si illisible ou
+    antérieure à `MIN_DATE_KEY` (date non collectée).
 
     Clé comparable lexicographiquement : c'est elle qui est stockée dans
     `files.access_key` / `files.write_key` pour que les vues d'ancienneté
@@ -127,12 +140,13 @@ def date_key(value: str) -> str:
     en `errors="replace"`), et les statistiques d'ancienneté divergeraient en
     silence.
     """
+    key = ""
     if len(value.partition("\x00")[0]) >= 10:
         if value[2] == "/" and value[5] == "/":
-            return value[6:10] + value[3:5] + value[0:2]
-        if value[4] == "-":
-            return value[0:4] + value[5:7] + value[8:10]
-    return ""
+            key = value[6:10] + value[3:5] + value[0:2]
+        elif value[4] == "-":
+            key = value[0:4] + value[5:7] + value[8:10]
+    return key if key >= MIN_DATE_KEY else ""
 
 
 def first_access_sql(prefix: str = "") -> str:

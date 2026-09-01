@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import docia.cli as cli
+from docia import journal as journal_mod
 
 
 @pytest.fixture
@@ -24,14 +25,14 @@ def racine_propre() -> Iterator[logging.Logger]:
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
     root.handlers = []
-    cli._JOURNAL, cli._LOGGING_CONFIGURED = None, False
+    journal_mod.reset()
     try:
         yield root
     finally:
         for h in root.handlers:
             h.close()
         root.handlers, root.level = handlers, level
-        cli._JOURNAL, cli._LOGGING_CONFIGURED = None, False
+        journal_mod.reset()
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
@@ -41,7 +42,7 @@ def _args(tmp_path: Path) -> argparse.Namespace:
 def test_console_sans_pile_journal_avec_pile(
     racine_propre: logging.Logger, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    journal = cli._setup_logging(_args(tmp_path))
+    journal = journal_mod.setup_logging(_args(tmp_path))
     assert journal == tmp_path / "docia.log"
 
     try:
@@ -66,9 +67,9 @@ def test_console_sans_pile_journal_avec_pile(
 
 def test_configuration_idempotente(racine_propre: logging.Logger, tmp_path: Path) -> None:
     """La fenêtre rappelle `main()` pour produire ses documents : pas de doublons."""
-    first = cli._setup_logging(_args(tmp_path))
+    first = journal_mod.setup_logging(_args(tmp_path))
     count = len(racine_propre.handlers)
-    assert cli._setup_logging(_args(tmp_path)) == first
+    assert journal_mod.setup_logging(_args(tmp_path)) == first
     assert len(racine_propre.handlers) == count
 
 
@@ -77,10 +78,10 @@ def test_journal_impossible_ne_bloque_pas(
 ) -> None:
     """Dossier en lecture seule : on garde la console, on ne plante pas."""
     monkeypatch.setattr(
-        cli, "_log_file", lambda _c: tmp_path / "inexistant" / "sous-dossier" / "docia.log"
+        journal_mod, "log_file", lambda _c: tmp_path / "inexistant" / "sous-dossier" / "docia.log"
     )
     monkeypatch.setattr(Path, "resolve", Path.absolute)
-    assert cli._setup_logging(_args(tmp_path)) is None
+    assert journal_mod.setup_logging(_args(tmp_path)) is None
     assert racine_propre.handlers, "la console reste branchée"
 
 
@@ -89,7 +90,7 @@ def test_journal_verrouille_bascule_sur_un_fichier_par_processus(
 ) -> None:
     """`docia.log` inaccessible (verrou Windows) : on écrit `docia-<pid>.log`, pas rien."""
     (tmp_path / "docia.log").mkdir()  # ouverture impossible, dossier pourtant inscriptible
-    journal = cli._setup_logging(_args(tmp_path))
+    journal = journal_mod.setup_logging(_args(tmp_path))
     assert journal == tmp_path / f"docia-{os.getpid()}.log"
     logging.getLogger("docia.essai").info("import terminé")
     for handler in racine_propre.handlers:
@@ -111,10 +112,12 @@ def test_rotation_impossible_nentraine_ni_perte_ni_traces(
     messages sont dans le fichier, la console reste propre, et l'incident n'est
     signalé qu'une fois.
     """
-    monkeypatch.setattr(cli, "_LOG_MAX_BYTES", 2_000)
-    journal = cli._setup_logging(_args(tmp_path))
+    monkeypatch.setattr(journal_mod, "_LOG_MAX_BYTES", 2_000)
+    journal = journal_mod.setup_logging(_args(tmp_path))
     assert journal is not None
-    handler = next(h for h in racine_propre.handlers if isinstance(h, cli._RotatingFileHandler))
+    handler = next(
+        h for h in racine_propre.handlers if isinstance(h, journal_mod.RotatingFileHandler)
+    )
 
     def renommage_refuse(_source: str, _dest: str) -> None:
         raise PermissionError(
@@ -153,7 +156,7 @@ def test_journal_a_cote_de_l_executable_quand_il_est_fige(
     monkeypatch.chdir(ailleurs)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe))
-    assert cli._log_file(Path("docia.toml")) == exe.parent / "docia.log"
+    assert journal_mod.log_file(Path("docia.toml")) == exe.parent / "docia.log"
 
 
 def test_journal_a_cote_de_la_config_hors_executable(
@@ -162,17 +165,17 @@ def test_journal_a_cote_de_la_config_hors_executable(
     """Hors exe : le journal suit le `--config` résolu, même relatif."""
     monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.chdir(tmp_path)
-    assert cli._log_file(Path("docia.toml")) == tmp_path / "docia.log"
+    assert journal_mod.log_file(Path("docia.toml")) == tmp_path / "docia.log"
     autre = tmp_path / "campagne"
     autre.mkdir()
-    assert cli._log_file(autre / "docia.toml") == autre / "docia.log"
+    assert journal_mod.log_file(autre / "docia.toml") == autre / "docia.log"
 
 
 def test_journal_plus_detaille_que_la_console(
     racine_propre: logging.Logger, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Le fichier s'annonce « journal détaillé » : il doit contenir plus que l'écran."""
-    journal = cli._setup_logging(_args(tmp_path))
+    journal = journal_mod.setup_logging(_args(tmp_path))
     assert journal is not None
     logging.getLogger("docia.essai").debug("détail interne %s", 42)
     logging.getLogger("docia.essai").info("visible partout")
@@ -194,7 +197,7 @@ def test_verbose_descend_le_debug_a_la_console(
 ) -> None:
     args = _args(tmp_path)
     args.verbose = True
-    cli._setup_logging(args)
+    journal_mod.setup_logging(args)
     logging.getLogger("docia.essai").debug("détail interne")
     assert "détail interne" in capsys.readouterr().err
 
@@ -204,8 +207,8 @@ def test_bibliotheques_bavardes_muselees(
     tmp_path: Path,
 ) -> None:
     """Racine en DEBUG : sans muselière, un import de 934 028 lignes noierait le journal."""
-    cli._setup_logging(_args(tmp_path))
-    for nom in cli.NOISY_DEBUG_LOGGERS:
+    journal_mod.setup_logging(_args(tmp_path))
+    for nom in journal_mod.NOISY_DEBUG_LOGGERS:
         assert logging.getLogger(nom).level >= logging.INFO, nom
 
 
@@ -227,7 +230,7 @@ def test_main_rend_une_ligne_sur_base_en_lecture_seule(
 
     dossier_journal = tmp_path / "journal"
     dossier_journal.mkdir()
-    monkeypatch.setattr(cli, "_log_file", lambda _c: dossier_journal / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: dossier_journal / "docia.log")
 
     # La campagne doit **exister** : depuis que les commandes de lecture exigent une
     # base présente (`cli._require_existing_campaign`), une base absente sort en
@@ -272,7 +275,7 @@ def test_main_laisse_remonter_ce_quil_ne_comprend_pas(
         raise RuntimeError("anomalie inattendue")
 
     monkeypatch.setattr(cli, "_dispatch", explose)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     with pytest.raises(RuntimeError, match="anomalie inattendue"):
         cli.main(["status"])
 
@@ -287,7 +290,7 @@ def test_avertissements_openpyxl_filtres_au_demarrage() -> None:
 
     with warnings.catch_warnings():
         warnings.resetwarnings()
-        cli._silence_third_party_warnings()
+        journal_mod.silence_third_party_warnings()
         assert any(
             f[0] == "ignore"
             and f[2] is UserWarning
@@ -316,7 +319,7 @@ def test_une_faute_de_frappe_dans_db_ne_fabrique_pas_une_campagne(
     le pire résultat possible.
     """
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     fantome = tmp_path / "nexistepas_audit" / "abc.sqlite"
 
     for commande in (
@@ -350,7 +353,7 @@ def test_une_base_etrangere_nest_pas_greffee_de_tables_docia(
     import sqlite3
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     etrangere = tmp_path / "contacts.sqlite"
     con = sqlite3.connect(etrangere)
     con.execute("CREATE TABLE contacts (nom TEXT)")
@@ -375,7 +378,7 @@ def test_les_commandes_qui_creent_la_base_gardent_ce_droit(
     `cli.UNCHECKED_COMMANDS`) ; `campaigns` n'ouvre pas `cfg.db_path` du tout.
     """
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     neuve = tmp_path / "neuve" / "campagne.sqlite"
     assert cli.main(["--db", str(neuve), "init"]) == 0
     assert neuve.exists()
@@ -392,8 +395,8 @@ def test_unicode_decode_error_est_une_panne_previsible() -> None:
     garde-fou de `main()` et sortait en trace Python complète.
     """
     faute = UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
-    assert cli._expected_failure(faute)
-    assert not cli._expected_failure(ValueError("autre chose")), "on ne masque pas tout"
+    assert journal_mod.expected_failure(faute)
+    assert not journal_mod.expected_failure(ValueError("autre chose")), "on ne masque pas tout"
 
 
 def test_le_journal_nomme_la_campagne(
@@ -408,7 +411,7 @@ def test_le_journal_nomme_la_campagne(
     """
     monkeypatch.chdir(tmp_path)
     journal = tmp_path / "docia.log"
-    monkeypatch.setattr(cli, "_log_file", lambda _c: journal)
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: journal)
     campagne = tmp_path / "campagne.sqlite"
 
     assert cli.main(["--db", str(campagne), "init"]) == 0
@@ -454,7 +457,7 @@ def test_serveur_llm_eteint_sort_en_code_1_et_non_2(
         port = sonde.getsockname()[1]
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     cfg = Config(db_path=str(tmp_path / "campagne.sqlite"))
     cfg.llm.base_url = f"http://127.0.0.1:{port}/v1"
     cfg.llm.timeout_s = 5
@@ -514,7 +517,7 @@ def test_backup_out_nannonce_pas_le_compte_dun_autre_dossier(
     prendre. Mieux vaut ne rien compter que compter faux.
     """
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     base = tmp_path / "campagne.sqlite"
     assert cli.main(["--db", str(base), "init"]) == 0
 
@@ -551,7 +554,7 @@ def test_backup_keep_laisse_la_rotation_au_service(
     assert cli.build_parser().parse_args(["backup"]).keep is None
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    monkeypatch.setattr(journal_mod, "log_file", lambda _c: tmp_path / "docia.log")
     base = tmp_path / "campagne.sqlite"
     assert cli.main(["--db", str(base), "init"]) == 0
     capsys.readouterr()

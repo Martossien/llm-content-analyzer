@@ -15,12 +15,8 @@ lecture des résultats, vérification humaine, FAQ.
 
 1. Copier dans un même dossier : **`Docia.exe`** (artefact `Docia-windows-x64` de la
    [CI](../../actions)) et **`SMBeagle.exe`** (artefact `windows-x64` de la
-   [CI de smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched/actions) — prenez
-   celui du dernier commit de `main` : la dernière release publiée, **v4.2.0 du 30/08**, scanne
-   encore le mauvais dossier quand le chemin est mal formé au lieu de le refuser en code 2,
-   écrit une taille de `0` quand elle n'a pas été collectée — ce qui vide la campagne en
-   silence — et rend `0` sur un partage fermé par ACL, présentant un périmètre amputé comme
-   complet. Vérifié le 01/09.)
+   [CI de smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched/actions) —
+   voir [Compatibilité du scanner](#compatibilité-du-scanner) pour la version à prendre).
 2. Lancer `Docia.exe` (double-clic = interface ; en console, `Docia.exe doctor` vérifie que tout
    est en place : DocFuse, pdfium, **OCR Tesseract embarqué** — rien d'autre à installer, ni .NET
    ni Tesseract). Le diagnostic fait un **vrai essai d'OCR** et affiche, en cas d'échec, le
@@ -37,6 +33,17 @@ bascule sur `docia-<pid>.log` au même endroit plutôt que de perdre le journal.
 
 Le mode de scan standard est le **scan local Windows** : un lecteur réseau mappé (`P:\`) ou un
 dossier (`\\serveur\partage\Finance`), avec le compte de la session (droit de lecture suffisant).
+
+## Compatibilité du scanner
+
+Prenez l'artefact `windows-x64` du **dernier commit de `main`** de smbeagle_enriched, pas
+la dernière release publiée. La release **v4.2.0 (30/08/2026)** a trois défauts corrigés
+depuis sur `main`, vérifiés le 01/09 : elle scanne le mauvais dossier quand le chemin est
+mal formé au lieu de le refuser (code 2) ; elle écrit une taille de `0` quand elle n'a pas
+été collectée, ce qui vide la campagne en silence (« fichier trop petit ») ; elle rend `0`
+sur un partage fermé par ACL et présente un périmètre amputé comme complet (désormais code
+4 et `skipped` dans le manifeste). `docia doctor` affiche le scanner trouvé ; `docia scan`
+refuse un CSV incomplet.
 
 ## Principe
 

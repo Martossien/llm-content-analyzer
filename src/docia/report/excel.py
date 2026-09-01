@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import date
 from itertools import chain, islice
 from pathlib import Path
@@ -253,75 +254,45 @@ def _file_rows(db: Database) -> tuple[list[str], Iterator[Row]]:
     return headers, rows()
 
 
-def write_workbook(
-    db: Database,
-    path: Path,
-    *,
-    today: date | None = None,
-    data: ReportData | None = None,
-    on_warning: Callable[[str], None] | None = None,
-    max_sheet_rows: int = MAX_SHEET_ROWS,
-) -> Path:
-    """Écrit le classeur `path` et le rend.
+@dataclass(frozen=True)
+class _Sheet:
+    """Un onglet à écrire : titre, en-têtes, lignes (flux), formats de colonnes, note finale."""
 
-    Le classeur est en écriture seule : l'onglet « Fichiers » est écrit ligne à
-    ligne depuis la base, sans liste intermédiaire. Les largeurs de colonnes sont
-    déduites des `WIDTH_SAMPLE_ROWS` premières lignes de chaque onglet.
+    title: str
+    headers: Sequence[str]
+    rows: Iterable[Row]
+    formats: dict[int, str] | None = None
+    note: str | None = None
 
-    Un onglet qui dépasserait `max_sheet_rows` (limite d'Excel, 1 048 576 lignes)
-    est tronqué : sa dernière ligne porte un avertissement en clair, et le même
-    message part vers `on_warning` (par défaut le journal, affiché par la CLI).
-    Les formats `powerbi` et `csv` restent la sortie complète.
 
-    **« Conservation » et « Nettoyage » portent la totalité des lignes** — c'est
-    le sens de `collect(actions=None)`. Chacune de ces lignes est une décision de
-    suppression : annoncer « 182 346 fichiers, 7,5 To libérables » puis n'en
-    donner que 50, dans le format même vers lequel le rapport renvoie, rendait le
-    gain inatteignable. « Doublons » et « Sensibles » restent des classements
-    bornés, et leur dernière ligne dit désormais sur combien ils portent.
-    """
-    report = data if data is not None else collect(db, today=today, actions=None)
-    warn = on_warning if on_warning is not None else logger.warning
-    warnings: list[str] = []
-    workbook = Workbook(write_only=True)
-    o = report.overview
+def _ranking_note(subject: str, shown: int, total: int, where: str) -> str | None:
+    """Dernière ligne d'un onglet de classement : sur combien il porte, et où est le reste."""
+    if total <= shown:
+        return None
+    return (
+        f"Classement borné : {_grouped(shown)} {subject} sur {_grouped(total)}. "
+        f"La totalité est dans {where}."
+    )
 
-    def sheet(
-        title: str,
-        headers: Sequence[str],
-        rows: Iterable[Row],
-        *,
-        formats: dict[int, str] | None = None,
-        note: str | None = None,
-    ) -> None:
-        message = _add_sheet(
-            workbook, title, headers, rows, formats=formats, max_rows=max_sheet_rows, note=note
-        )
-        if message is not None:
-            warnings.append(message)
 
-    def ranking_note(subject: str, shown: int, total: int, where: str) -> str | None:
-        """Dernière ligne d'un onglet de classement : sur combien il porte, et où est le reste."""
-        if total <= shown:
-            return None
-        return (
-            f"Classement borné : {_grouped(shown)} {subject} sur {_grouped(total)}. "
-            f"La totalité est dans {where}."
-        )
-
+def _sheet_scope(report: ReportData) -> _Sheet | None:
     scope = report.scope
-    if scope.incomplete:
-        sheet(
-            SCOPE_SHEET,
-            ["Inventaire incomplet — à lire avant toute décision de suppression"],
-            [
-                [scope.headline()],
-                *[[f"Non parcouru : {cible}"] for cible in scope.skipped_targets],
-                *[[message] for message in scope.warnings],
-            ],
-        )
+    if not scope.incomplete:
+        return None
+    return _Sheet(
+        SCOPE_SHEET,
+        ["Inventaire incomplet — à lire avant toute décision de suppression"],
+        [
+            [scope.headline()],
+            *[[f"Non parcouru : {cible}"] for cible in scope.skipped_targets],
+            *[[message] for message in scope.warnings],
+        ],
+    )
 
-    sheet(
+
+def _sheet_synthese(report: ReportData) -> _Sheet:
+    o, scope = report.overview, report.scope
+    return _Sheet(
         "Synthèse",
         ["Indicateur", "Valeur", "Détail"],
         [
@@ -363,19 +334,12 @@ def write_workbook(
         ],
     )
 
-    headers, rows = _file_rows(db)
-    sheet("Fichiers", headers, rows)
 
-    sheet(
+def _sheet_doublons(report: ReportData) -> _Sheet:
+    families = report.duplicates.families
+    return _Sheet(
         "Doublons",
-        [
-            "Famille",
-            "Empreinte",
-            "Taille unitaire (o)",
-            "Copies",
-            "Octets récupérables",
-            "Chemins",
-        ],
+        ["Famille", "Empreinte", "Taille unitaire (o)", "Copies", "Octets récupérables", "Chemins"],
         (
             [
                 f.family_id,
@@ -385,7 +349,7 @@ def write_workbook(
                 f.reclaimable_bytes,
                 " | ".join(f.paths),
             ]
-            for f in report.duplicates.families
+            for f in families
         ),
         formats={3: "#,##0", 5: "#,##0"},
         note=" ".join(
@@ -393,10 +357,10 @@ def write_workbook(
                 None,
                 (
                     views.DUPLICATE_CAUTION,
-                    ranking_note(
+                    _ranking_note(
                         "familles affichées",
-                        len(report.duplicates.families),
-                        report.totals.get("duplicates", len(report.duplicates.families)),
+                        len(families),
+                        report.totals.get("duplicates", len(families)),
                         "« export --format powerbi » (duplicates.csv, un exemplaire par ligne)",
                     ),
                 ),
@@ -404,7 +368,9 @@ def write_workbook(
         ),
     )
 
-    sheet(
+
+def _sheet_anciennete(report: ReportData) -> _Sheet:
+    return _Sheet(
         "Ancienneté",
         [
             "Seuil (ans)",
@@ -428,7 +394,9 @@ def write_workbook(
         formats={2: "DD/MM/YYYY", 4: "#,##0", 6: "#,##0"},
     )
 
-    sheet(
+
+def _sheet_sensibles(report: ReportData) -> _Sheet:
+    return _Sheet(
         "Sensibles",
         [
             "file_id",
@@ -460,7 +428,7 @@ def write_workbook(
             for f in report.sensitive
         ),
         formats={4: "#,##0"},
-        note=ranking_note(
+        note=_ranking_note(
             "fichiers affichés",
             len(report.sensitive),
             report.totals.get("sensitive", len(report.sensitive)),
@@ -468,7 +436,9 @@ def write_workbook(
         ),
     )
 
-    sheet(
+
+def _sheet_conservation(report: ReportData) -> _Sheet:
+    return _Sheet(
         "Conservation",
         [
             "file_id",
@@ -500,7 +470,9 @@ def write_workbook(
         formats={4: "#,##0", 8: "DD/MM/YYYY"},
     )
 
-    sheet(
+
+def _sheet_nettoyage(report: ReportData) -> _Sheet:
+    return _Sheet(
         "Nettoyage",
         ["file_id", "Chemin", "Propriétaire", "Taille (o)", "Dernier accès", "Sécurité"],
         (
@@ -510,8 +482,10 @@ def write_workbook(
         formats={4: "#,##0"},
     )
 
+
+def _sheet_revues(report: ReportData) -> _Sheet:
     reviews = report.reviews
-    sheet(
+    return _Sheet(
         "Revues",
         ["Indicateur", "Valeur"],
         [
@@ -528,23 +502,86 @@ def write_workbook(
         ],
     )
 
-    sheet(
+
+def _sheet_erreurs(report: ReportData) -> _Sheet:
+    status = report.status
+    return _Sheet(
         "Erreurs",
         ["Raison", "Fichiers", "Octets"],
-        [[g.label, g.files, g.bytes] for g in report.status.reasons]
-        + [
-            [f"statut : {k}", v, report.status.bytes.get(k, 0)]
-            for k, v in report.status.counts.items()
-        ],
+        [[g.label, g.files, g.bytes] for g in status.reasons]
+        + [[f"statut : {k}", v, status.bytes.get(k, 0)] for k, v in status.counts.items()],
         formats={3: "#,##0"},
         note=(
-            f"Motifs bornés : {_grouped(len(report.status.reasons))} sur "
-            f"{_grouped(report.status.reasons_total)} affichés. Ce sont des raisons de "
+            f"Motifs bornés : {_grouped(len(status.reasons))} sur "
+            f"{_grouped(status.reasons_total)} affichés. Ce sont des raisons de "
             "non-analyse : les taire ferait passer pour propre un partage mal couvert."
-            if report.status.reasons_hidden
+            if status.reasons_hidden
             else None
         ),
     )
+
+
+def write_workbook(
+    db: Database,
+    path: Path,
+    *,
+    today: date | None = None,
+    data: ReportData | None = None,
+    on_warning: Callable[[str], None] | None = None,
+    max_sheet_rows: int = MAX_SHEET_ROWS,
+) -> Path:
+    """Écrit le classeur `path` et le rend.
+
+    Le classeur est en écriture seule : l'onglet « Fichiers » est écrit ligne à
+    ligne depuis la base, sans liste intermédiaire. Les largeurs de colonnes sont
+    déduites des `WIDTH_SAMPLE_ROWS` premières lignes de chaque onglet.
+
+    Un onglet qui dépasserait `max_sheet_rows` (limite d'Excel, 1 048 576 lignes)
+    est tronqué : sa dernière ligne porte un avertissement en clair, et le même
+    message part vers `on_warning` (par défaut le journal, affiché par la CLI).
+    Les formats `powerbi` et `csv` restent la sortie complète.
+
+    **« Conservation » et « Nettoyage » portent la totalité des lignes** — c'est
+    le sens de `collect(actions=None)`. Chacune de ces lignes est une décision de
+    suppression : annoncer « 182 346 fichiers, 7,5 To libérables » puis n'en
+    donner que 50, dans le format même vers lequel le rapport renvoie, rendait le
+    gain inatteignable. « Doublons » et « Sensibles » restent des classements
+    bornés, et leur dernière ligne dit désormais sur combien ils portent.
+
+    Un onglet = une fonction `_sheet_*` (pure) ; cette fonction ne fait que les
+    écrire dans l'ordre.
+    """
+    report = data if data is not None else collect(db, today=today, actions=None)
+    warn = on_warning if on_warning is not None else logger.warning
+    warnings: list[str] = []
+    workbook = Workbook(write_only=True)
+    file_headers, file_rows = _file_rows(db)
+    sheets: list[_Sheet | None] = [
+        _sheet_scope(report),
+        _sheet_synthese(report),
+        _Sheet("Fichiers", file_headers, file_rows),
+        _sheet_doublons(report),
+        _sheet_anciennete(report),
+        _sheet_sensibles(report),
+        _sheet_conservation(report),
+        _sheet_nettoyage(report),
+        _sheet_revues(report),
+        _sheet_erreurs(report),
+    ]
+    for sheet in sheets:
+        if sheet is None:
+            continue
+        message = _add_sheet(
+            workbook,
+            sheet.title,
+            sheet.headers,
+            sheet.rows,
+            formats=sheet.formats,
+            max_rows=max_sheet_rows,
+            note=sheet.note,
+        )
+        if message is not None:
+            warnings.append(message)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(str(path))

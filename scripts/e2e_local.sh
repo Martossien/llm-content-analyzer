@@ -40,6 +40,11 @@ import sys
 lines = [f"Ligne {i:06d} — registre des decisions du conseil, seance du {i % 28 + 1:02d}/{i % 12 + 1:02d}/2019, montant {i * 13 % 9973},{i % 100:02d} EUR" for i in range(60000)]
 open(sys.argv[1], "w", encoding="utf-8").write("\n".join(lines))
 PY
+# Ancienneté : sans cela tout le corpus est daté de l'instant et les vues « non
+# accédé depuis N ans », « candidats au nettoyage » et l'onglet Ancienneté restent
+# vides par construction — le banc les traversait sans rien prouver.
+touch -a -m -d "6 years ago" "$WORK/partage/archives/sample.doc" "$WORK/partage/archives/sample.xls" "$WORK/partage/archives/sample.ppt"
+touch -a -m -d "2 years ago" "$WORK/partage/archives/sample.rtf" "$WORK/partage/archives/sample.odt"
 ls -la "$WORK/partage" "$WORK/partage/RH" | head -20
 
 say "3. configuration"

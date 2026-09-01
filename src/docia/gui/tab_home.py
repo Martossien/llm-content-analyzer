@@ -340,11 +340,11 @@ class HomeTab(LazyScreen):
                 )
             # « scan terminé » tout court sur un périmètre amputé (partage refusé,
             # arrêt demandé) présentait un fragment comme un inventaire complet :
-            # le titre de la ligne dit maintenant ce qu'il en est, et le détail de
+            # le title de la ligne dit maintenant ce qu'il en est, et le détail de
             # ce qui manque suit immédiatement.
-            titre = "scan terminé" if result.complete else "scan terminé, PÉRIMÈTRE INCOMPLET"
+            title = "scan terminé" if result.complete else "scan terminé, PÉRIMÈTRE INCOMPLET"
             app.log(
-                f"{titre} : {format_int(result.files)} fichiers en {format_duration(result.elapsed_s)} — "
+                f"{title} : {format_int(result.files)} fichiers en {format_duration(result.elapsed_s)} — "
                 f"{report.new} nouveaux, {report.updated} modifiés, {report.unchanged} inchangés — "
                 f"{plan_report.pending} à analyser, {plan_report.excluded} exclus"
             )

@@ -91,10 +91,10 @@ serveur qui bronche, une rotation impossible — est émis à `WARNING` ou au-de
 def _journal_path() -> str:
     """Chemin de `docia.log` tel que la CLI l'a ouvert, sinon son nom générique."""
     with contextlib.suppress(Exception):
-        from docia import cli
+        from docia import journal
 
-        if cli._JOURNAL is not None:
-            return str(cli._JOURNAL)
+        if journal.current_journal() is not None:
+            return str(journal.current_journal())
     return "docia.log"
 
 

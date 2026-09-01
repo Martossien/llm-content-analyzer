@@ -52,6 +52,31 @@ def main(work: Path) -> int:
         all(f["access_time_first"] for f in files),
     )
 
+    # -- ancienneté : le banc vieillit cinq fichiers (voir e2e_local.sh), les clés de
+    #    date doivent les ranger sous les seuils 5 ans (3) et 1 an (5).
+    from datetime import date
+
+    def key(years: int) -> str:
+        d = date.today()
+        return f"{d.year - years:04d}{d.month:02d}{d.day:02d}"
+
+    old5 = db.execute(
+        "SELECT COUNT(*) FROM files WHERE write_key <> '' AND write_key < ?", (key(5),)
+    ).fetchone()[0]
+    old1 = db.execute(
+        "SELECT COUNT(*) FROM files WHERE write_key <> '' AND write_key < ?", (key(1),)
+    ).fetchone()[0]
+    acc5 = db.execute(
+        "SELECT COUNT(*) FROM files WHERE access_key <> '' AND access_key < ?", (key(5),)
+    ).fetchone()[0]
+    check("ancienneté : 3 fichiers non modifiés depuis 5 ans", old5 == 3, f"{old5} (attendu 3)")
+    check("ancienneté : 5 fichiers non modifiés depuis 1 an", old1 == 5, f"{old1} (attendu 5)")
+    check(
+        "ancienneté : date d'accès préservée par le scan (--preserve-access-time)",
+        acc5 == 3,
+        f"{acc5} non accédés depuis 5 ans (attendu 3)",
+    )
+
     # -- analyse
     counts = {
         r["status"]: r["n"]

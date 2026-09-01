@@ -206,10 +206,10 @@ def _stacked(
                 f'fill="{colors.get(key, "#cbd2d9")}"/>'
             )
             offset += length
-        reste = bar_w * (base - row.analyzed) / base
-        if reste > 0.5:
+        remaining = bar_w * (base - row.analyzed) / base
+        if remaining > 0.5:
             parts.append(
-                f'<rect x="{offset:.1f}" y="{y + 2}" width="{reste:.1f}" height="13" '
+                f'<rect x="{offset:.1f}" y="{y + 2}" width="{remaining:.1f}" height="13" '
                 f'fill="{_UNANALYSED_COLOR}"/>'
             )
         parts.append(

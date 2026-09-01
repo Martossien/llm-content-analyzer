@@ -643,8 +643,8 @@ class Database:
         """
         rows = self.query_values("SELECT rows_total FROM scans WHERE id=?", (scan_id,))
         rows_total = int(rows[0][0]) if rows else 0
-        tronque = expected_files >= 0 and expected_files > rows_total
-        complete = not skipped and not cancelled and not tronque
+        truncated = expected_files >= 0 and expected_files > rows_total
+        complete = not skipped and not cancelled and not truncated
         self._conn.execute(
             "UPDATE scans SET kind='scan', manifest_json=?, scanner_elapsed_s=?,"
             " complete=?, skipped_json=?, cancelled=?, exit_code=?, expected_files=?"

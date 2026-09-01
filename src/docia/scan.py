@@ -390,13 +390,13 @@ def scope_warnings(
         # Les trois premiers noms suffisent à situer le problème dans une ligne de
         # journal ou un bandeau ; la liste entière est portée à part (`skipped`),
         # là où un rapport peut l'afficher proprement.
-        noms = ", ".join(skipped[:3])
-        reste = len(skipped) - 3
-        if reste > 0:
-            noms += f" et {reste} autre(s)"
+        names = ", ".join(skipped[:3])
+        remaining = len(skipped) - 3
+        if remaining > 0:
+            names += f" et {remaining} autre(s)"
         messages.append(
             f"Périmètre incomplet : {len(skipped)} emplacement(s) demandé(s) n'ont pas pu "
-            f"être parcourus ({noms}). Les fichiers qu'ils contiennent sont absents de "
+            f"être parcourus ({names}). Les fichiers qu'ils contiennent sont absents de "
             "l'audit. Vérifiez les droits d'accès (ou que le partage est bien monté), "
             "puis relancez le scan avant de décider la moindre suppression."
         )

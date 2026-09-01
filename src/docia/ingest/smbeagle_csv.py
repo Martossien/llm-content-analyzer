@@ -528,7 +528,7 @@ def read_smbeagle_csv(
         if header_errors:
             yield CsvLineError(1, " ; ".join(header_errors), header.rstrip("\r\n")[:_MAX_RAW])
             return
-        suite_d_un_champ_ouvert = False
+        open_field_continues = False
         for line_number, raw in enumerate(handle, start=2):
             if position is not None and line_number % _POSITION_EVERY == 0:
                 offset = _byte_position(handle)
@@ -537,13 +537,13 @@ def read_smbeagle_csv(
             line = raw.rstrip("\r\n")
             if not line.strip():
                 continue
-            if suite_d_un_champ_ouvert:
+            if open_field_continues:
                 # Suite d'un champ quoté laissé ouvert : ce n'est pas un
                 # enregistrement, c'est la fin du précédent. La relire comme une
                 # ligne à part entière fabriquait un fichier fantôme — un chemin
                 # tronqué, avec une taille plausible, qui ne désigne rien et
                 # ressortait pourtant dans les candidats au nettoyage.
-                suite_d_un_champ_ouvert = quote_left_open(line)
+                open_field_continues = quote_left_open(line)
                 yield CsvLineError(
                     line_number,
                     "suite d'un champ quoté non refermé à la ligne précédente : "
@@ -552,7 +552,7 @@ def read_smbeagle_csv(
                 )
                 continue
             if quote_left_open(line):
-                suite_d_un_champ_ouvert = True
+                open_field_continues = True
                 yield CsvLineError(
                     line_number,
                     "champ quoté non refermé en fin de ligne",
@@ -565,6 +565,96 @@ def read_smbeagle_csv(
                 yield CsvLineError(line_number, str(exc), line[:_MAX_RAW])
         if position is not None:
             position.bytes_read = position.total_bytes
+
+
+@dataclass
+class _ImportTally:
+    """Compteurs d'un import en cours — une seule addition par fait constaté."""
+
+    total: int = 0
+    new: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    invalid: int = 0
+    size_defaulted: int = 0
+    size_zero: int = 0
+    mojibake: int = 0
+    errors: list[CsvLineError] = field(default_factory=list)
+
+    def note_error(self, error: CsvLineError) -> None:
+        self.invalid += 1
+        if len(self.errors) < MAX_KEPT_ERRORS:
+            self.errors.append(error)
+
+    def note_row(self, row: SmbeagleRow) -> None:
+        self.total += 1
+        if row.size_unreadable:
+            self.size_defaulted += 1
+        elif row.file_size == 0:
+            self.size_zero += 1
+        if REPLACEMENT in row.name or REPLACEMENT in row.unc_directory:
+            self.mojibake += 1
+
+    def note_written(self, new: int, updated: int, unchanged: int) -> None:
+        self.new += new
+        self.updated += updated
+        self.unchanged += unchanged
+
+    def note_refused(self, row: SmbeagleRow, exc: Exception) -> None:
+        """Une ligne que la base refuse : comptée invalide, retirée du total."""
+        self.total -= 1
+        self.note_error(CsvLineError(0, f"écriture refusée : {exc}", row.path[:_MAX_RAW]))
+
+
+def _write_batch(db: Database, batch: list[SmbeagleRow], scan_id: int, tally: _ImportTally) -> None:
+    """Écrit un lot et cumule ses compteurs.
+
+    Un lot refusé par la base n'emporte plus l'import : sa transaction est annulée,
+    les lignes sont rejouées **une à une**, celles qui passent sont conservées et
+    seules les fautives sont comptées `invalid` avec leur raison. Une ligne ne doit
+    pas faire tomber le million (voir `_ROW_WRITE_ERRORS` pour ce qui reste fatal).
+    """
+    try:
+        tally.note_written(*db.upsert_files(batch, scan_id))
+    except _ROW_WRITE_ERRORS as exc:
+        logger.warning(
+            "lot de %d ligne(s) refusé par la base (%s) : reprise ligne par ligne",
+            len(batch),
+            exc,
+        )
+        for row in batch:
+            try:
+                tally.note_written(*db.upsert_files([row], scan_id))
+            except _ROW_WRITE_ERRORS as row_exc:
+                tally.note_refused(row, row_exc)
+    batch.clear()
+
+
+def _warn_after_import(path: Path, tally: _ImportTally) -> None:
+    """Ce qu'un administrateur doit savoir d'un CSV qui s'est importé « normalement »."""
+    if tally.size_defaulted:
+        logger.warning(
+            "%s : %d ligne(s) sans FileSize lisible — taille ramenée à 0, "
+            "donc exclusion « fichier trop petit » probable",
+            path,
+            tally.size_defaulted,
+        )
+    if tally.mojibake:
+        logger.warning(
+            "%s : %d chemin(s) non décodables en UTF-8 — ce CSV n'est pas en UTF-8 "
+            "(réenregistré depuis Excel ?). Ces chemins ne désignent aucun fichier réel "
+            "et ressortiront tels quels dans les exports.",
+            path,
+            tally.mojibake,
+        )
+    if tally.total >= SUSPECT_ZERO_MIN and tally.size_zero == tally.total:
+        logger.warning(
+            "%s : les %d fichiers annoncent 0 octet — ce CSV a très probablement été "
+            "produit sans « --sizefile ». Toute la campagne sera exclue « fichier trop "
+            "petit ». Relancez le scan avec l'option, ou utilisez « docia scan ».",
+            path,
+            tally.total,
+        )
 
 
 def import_csv(
@@ -584,7 +674,7 @@ def import_csv(
     Rien ne disparaît en silence : une ligne illisible est comptée `invalid` (avec
     sa raison dans `errors`), une taille illisible ramenée à 0 est comptée
     `size_defaulted`, et un lot refusé par la base est rejoué ligne à ligne au lieu
-    d'emporter tout l'import.
+    d'emporter tout l'import (`_write_batch`).
 
     L'écriture est encadrée par `Database.bulk_load()` : les index secondaires de
     `files` sont retirés le temps du chargement puis reconstruits d'un bloc — cinq
@@ -599,8 +689,7 @@ def import_csv(
         progress_every: nombre de lots entre deux appels.
     """
     scan_id = db.start_scan(str(path))
-    total = new = updated = unchanged = invalid = size_defaulted = size_zero = mojibake = 0
-    errors: list[CsvLineError] = []
+    tally = _ImportTally()
     batch: list[SmbeagleRow] = []
     position = ReadPosition()
     started = time.monotonic()
@@ -617,8 +706,8 @@ def import_csv(
         try:
             progress(
                 ImportProgress(
-                    rows=total,
-                    invalid=invalid,
+                    rows=tally.total,
+                    invalid=tally.invalid,
                     bytes_read=position.bytes_read,
                     total_bytes=position.total_bytes,
                     elapsed_s=time.monotonic() - started,
@@ -628,50 +717,15 @@ def import_csv(
         except Exception:  # noqa: BLE001 — l'affichage n'est jamais critique
             logger.debug("rappel de progression en échec, import poursuivi", exc_info=True)
 
-    def flush() -> None:
-        """Écrit le lot courant et **cumule** ses compteurs (une seule addition ici).
-
-        Un lot refusé par la base n'emporte plus l'import : sa transaction est
-        annulée, les lignes sont rejouées **une à une**, celles qui passent sont
-        conservées et seules les fautives sont comptées `invalid` avec leur raison.
-        Une ligne ne doit pas faire tomber le million (voir `_ROW_WRITE_ERRORS`
-        pour ce qui reste fatal).
-        """
-        nonlocal new, updated, unchanged, total, invalid
-        if not batch:
-            return
-        try:
-            batch_new, batch_updated, batch_unchanged = db.upsert_files(batch, scan_id)
-        except _ROW_WRITE_ERRORS as exc:
-            logger.warning(
-                "lot de %d ligne(s) refusé par la base (%s) : reprise ligne par ligne",
-                len(batch),
-                exc,
-            )
-            for row in batch:
-                try:
-                    row_new, row_updated, row_unchanged = db.upsert_files([row], scan_id)
-                except _ROW_WRITE_ERRORS as row_exc:
-                    total -= 1
-                    invalid += 1
-                    if len(errors) < MAX_KEPT_ERRORS:
-                        errors.append(
-                            CsvLineError(0, f"écriture refusée : {row_exc}", row.path[:_MAX_RAW])
-                        )
-                else:
-                    new += row_new
-                    updated += row_updated
-                    unchanged += row_unchanged
-        else:
-            new += batch_new
-            updated += batch_updated
-            unchanged += batch_unchanged
-        batch.clear()
-
     def close_scan() -> None:
         """Inscrit dans `scans` ce qui a réellement été écrit."""
         db.finish_scan(
-            scan_id, total=total, new=new, updated=updated, unchanged=unchanged, invalid=invalid
+            scan_id,
+            total=tally.total,
+            new=tally.new,
+            updated=tally.updated,
+            unchanged=tally.unchanged,
+            invalid=tally.invalid,
         )
 
     try:
@@ -680,24 +734,17 @@ def import_csv(
             batches = 0
             for item in read_smbeagle_csv(path, strict=strict, position=position):
                 if isinstance(item, CsvLineError):
-                    invalid += 1
-                    if len(errors) < MAX_KEPT_ERRORS:
-                        errors.append(item)
+                    tally.note_error(item)
                     continue
-                total += 1
-                if item.size_unreadable:
-                    size_defaulted += 1
-                elif item.file_size == 0:
-                    size_zero += 1
-                if REPLACEMENT in item.name or REPLACEMENT in item.unc_directory:
-                    mojibake += 1
+                tally.note_row(item)
                 batch.append(item)
                 if len(batch) >= BATCH_SIZE:
-                    flush()
+                    _write_batch(db, batch, scan_id, tally)
                     batches += 1
                     if progress_every > 0 and batches % progress_every == 0:
                         notify()
-            flush()
+            if batch:
+                _write_batch(db, batch, scan_id, tally)
             notify(final=True)
     except Exception:
         # L'import s'arrête, mais la ligne `scans` doit dire ce qui a été écrit : la
@@ -707,38 +754,16 @@ def import_csv(
         raise
 
     close_scan()
-    if size_defaulted:
-        logger.warning(
-            "%s : %d ligne(s) sans FileSize lisible — taille ramenée à 0, "
-            "donc exclusion « fichier trop petit » probable",
-            path,
-            size_defaulted,
-        )
-    if mojibake:
-        logger.warning(
-            "%s : %d chemin(s) non décodables en UTF-8 — ce CSV n'est pas en UTF-8 "
-            "(réenregistré depuis Excel ?). Ces chemins ne désignent aucun fichier réel "
-            "et ressortiront tels quels dans les exports.",
-            path,
-            mojibake,
-        )
-    if total >= SUSPECT_ZERO_MIN and size_zero == total:
-        logger.warning(
-            "%s : les %d fichiers annoncent 0 octet — ce CSV a très probablement été "
-            "produit sans « --sizefile ». Toute la campagne sera exclue « fichier trop "
-            "petit ». Relancez le scan avec l'option, ou utilisez « docia scan ».",
-            path,
-            total,
-        )
+    _warn_after_import(path, tally)
     return ImportReport(
         scan_id=scan_id,
-        total=total,
-        new=new,
-        updated=updated,
-        unchanged=unchanged,
-        invalid=invalid,
-        size_defaulted=size_defaulted,
-        size_zero=size_zero,
-        mojibake=mojibake,
-        errors=errors,
+        total=tally.total,
+        new=tally.new,
+        updated=tally.updated,
+        unchanged=tally.unchanged,
+        invalid=tally.invalid,
+        size_defaulted=tally.size_defaulted,
+        size_zero=tally.size_zero,
+        mojibake=tally.mojibake,
+        errors=tally.errors,
     )

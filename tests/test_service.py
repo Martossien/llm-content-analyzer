@@ -19,7 +19,7 @@ from textwrap import dedent
 
 import pytest
 
-import docia.cli as cli
+from docia import journal as journal_mod
 from docia.cli import main
 from docia.config import Config
 from docia.db import _SCHEMA_V1, SCHEMA_VERSION, Database, backup_dir_for
@@ -68,14 +68,14 @@ def journal_isole() -> Iterator[None]:
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
     root.handlers = []
-    cli._JOURNAL, cli._LOGGING_CONFIGURED = None, False
+    journal_mod.reset()
     try:
         yield
     finally:
         for handler in root.handlers:
             handler.close()
         root.handlers, root.level = handlers, level
-        cli._JOURNAL, cli._LOGGING_CONFIGURED = None, False
+        journal_mod.reset()
 
 
 def _prepare(tmp_path: Path, csv_path: Path, base_url: str) -> tuple[Config, Database]:

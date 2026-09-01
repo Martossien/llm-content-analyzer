@@ -26,13 +26,33 @@ antérieur à la v3 (POC 2025) est dans git.
 - **`scan.run_scan`** (153 lignes, complexité 31) découpé : lancement, suivi de
   la sortie (`_follow_scanner`), manifeste, contrôle du résultat.
 - **`report/markdown.render_markdown`** (322 lignes) : une fonction par section,
-  comme le rendu HTML.
+  comme le rendu HTML. **`report/excel.write_workbook`** (298 lignes) : un onglet =
+  une fonction `_sheet_*`. **`ingest.import_csv`** : compteurs dans `_ImportTally`,
+  écriture d'un lot et avertissements de fin extraits.
+- **Le journal sort de `cli.py`** → `docia/journal.py` (console, `docia.log`,
+  rotation, garde-fou des pannes attendues) ; `cli.py` passe de 1 041 à ~800 lignes
+  et ne fait plus que dispatcher.
+- Derniers identifiants français (`suite_d_un_champ_ouvert`, `tronque`, `noms`…)
+  passés en anglais ; les docstrings restent en français.
+- README : la mise en garde sur smbeagle v4.2.0 quitte l'étape 1 de l'installation
+  pour une section « Compatibilité du scanner ».
 - **DocFuse épinglé sur un commit** dans `pyproject.toml` (build reproductible :
   un push sur `DocFuse@main` ne peut plus casser la CI ni l'exe). Remonter
   l'épingle fait partie de toute livraison DocFuse (voir `AGENTS.md`).
 
 ### Corrigé
 
+- **Une date non collectée vieillissait le fichier** — un scanner sans
+  `--access-time` écrit `01/01/0001`, un FILETIME nul `01/01/1601` : ces valeurs
+  rangeaient le fichier dans « non accédé depuis 10 ans » et parmi les candidats au
+  nettoyage. Toute clé antérieure à 1601 vaut désormais « inconnue » (Python et SQL,
+  `MIN_DATE_KEY`).
+- **Les tests écrivaient dans le vrai `~/.config/docia/recent.json`** de la machine
+  (campagnes `/tmp/pytest-of-…` listées dans l'accueil) : `DOCIA_HOME` est isolé
+  pour chaque test.
+- **Le banc e2e ne prouvait rien sur l'ancienneté** : tous ses fichiers étaient
+  datés de l'instant. Cinq fichiers sont vieillis (6 ans, 2 ans) et trois contrôles
+  vérifient les seuils et la préservation de la date d'accès par le scan.
 - **Montant `NaN`/`Infinity` dans une réponse du modèle** — `json.loads` les accepte ;
   ils passaient la validation, étaient sommés, exportés vers Excel/Power BI et
   réécrits en JSON invalide dans `raw`. Rejetés comme mal formés.
@@ -46,8 +66,11 @@ antérieur à la v3 (POC 2025) est dans git.
 ### Technique
 
 - **Tests sans écran** : `docia doctor` avec sondes doublées (OCR, scanner,
-  serveur) et l'écran Accueil construit sur une doublure de `customtkinter`
-  — `cli_tools` 34 % → couvert, `gui/tab_home` 14 % → couvert (voir CI).
+  serveur), l'écran Accueil et la **fenêtre entière** (`DociaApp` : onglets, mode
+  administrateur, création de campagne, enregistrement du `docia.toml`, plantage
+  de thread, travaux de fond) construits sur des doublures de `customtkinter` et
+  `tkinter` — `cli_tools` 34 → 70 %, `gui/tab_home` 14 → 68 %, `gui/app` 46 → 84 %,
+  projet 77 → 88 % (614 tests).
 - **`legacy/` retiré du dépôt** (POC 2025, 76 fichiers, 18 000 lignes) : l'historique git
   le garde ; le code vivant est `src/docia`.
 - `.coverage` ignoré par git.

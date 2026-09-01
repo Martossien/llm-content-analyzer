@@ -318,6 +318,23 @@ def _fuzz_dates(count: int = 4000) -> list[str]:
     return values
 
 
+def test_date_inconnue_ne_vieillit_pas_le_fichier(tmp_path: Path) -> None:
+    """`01/01/0001` (scanner sans `--access-time`) et `01/01/1601` (FILETIME nul) ne
+    sont pas des dates : clé vide, en Python comme en SQL. Sinon le fichier passait
+    « non accédé depuis 10 ans » et candidat au nettoyage."""
+    with Database(tmp_path / "t.sqlite") as db:
+        for value, expected in (
+            ("01/01/0001 00:00:00", ""),
+            ("0001-01-01T00:00:00", ""),
+            ("01/01/1601 00:00:00", "16010101"),
+            ("31/12/1600 23:59:59", ""),
+            ("15/06/2019 10:00:00", "20190615"),
+        ):
+            assert date_key(value) == expected, value
+            row = db.query_values(f"SELECT {date_key_sql('v')} FROM (SELECT ? AS v)", (value,))
+            assert row[0][0] == expected, value
+
+
 def test_date_key_matches_sql_on_generated_dates(tmp_path: Path) -> None:
     """Même clé en Python et en SQL sur des milliers de dates engendrées.
 

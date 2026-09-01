@@ -40,6 +40,8 @@ restitue : GUI, rapport HTML, Excel, CSV Power BI. Rien ne quitte l'organisme.
 src/docia/
 ├── cli.py, cli_tools.py   argparse (init | scan | ingest | plan | run | status | export |
 │                          report | prompt | review | backup | restore | reanalyze | doctor…)
+├── journal.py             console lisible + docia.log (rotation, repli par processus),
+│                          pannes « attendues » rendues en une ligne
 ├── config.py              docia.toml (tomllib) → Config ; `update_toml` réécrit sans
 │                          perdre les commentaires
 ├── models.py              dataclasses figées (FileRow, BlockSpec, FileAnalysis…)
@@ -55,7 +57,8 @@ src/docia/
 ├── pipeline.py            le run : classe `_Run`, une méthode par étape
 ├── service.py             couche service (campagnes, run avec ETA, réanalyse,
 │                          sauvegardes) — à exposer 1:1 en REST (v4)
-├── views.py               statistiques SQL (doublons, ancienneté, risque, rétention…)
+├── views/                 statistiques SQL — _common (socle), axes, hygiene, risk,
+│                          retention, review, overview ; la façade réexporte tout
 ├── report/                html.py, markdown.py, excel.py (write_only), powerbi.py
 ├── quick.py, bench.py     analyse rapide d'un dossier ; banc vLLM
 └── gui/                   CustomTkinter : app.py, tab_*.py, lazy.py (écrans
