@@ -563,3 +563,30 @@ def test_backup_keep_laisse_la_rotation_au_service(
     # et `--keep` explicite reste respecté
     assert cli.main(["--db", str(base), "backup", "--keep", "3"]) == 0
     assert len(list((base.with_name(base.name + ".backups")).glob("*.sqlite"))) == 3
+
+
+def test_une_option_globale_mal_placee_dit_ou_la_mettre(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`docia init --config x.toml` est la forme que tout le monde tape en premier.
+
+    argparse répondait « unrecognized arguments: --config x.toml », sans dire que
+    l'option existe et qu'elle se place avant la sous-commande. Le test de fumée
+    Windows de la CI est tombé dans ce piège : la commande échouait, `smoke.toml`
+    n'était jamais écrit, et tout le reste du test tournait sur les réglages par
+    défaut — sans que rien n'échoue, le bloc PowerShell ne rendant que le code de
+    sa dernière commande.
+    """
+    with pytest.raises(SystemExit) as sortie:
+        cli.build_parser().parse_args(["init", "--config", "x.toml"])
+
+    assert sortie.value.code == 2
+    erreur = capsys.readouterr().err
+    assert "option globale" in erreur
+    assert "AVANT la sous-commande" in erreur
+
+
+def test_la_forme_correcte_reste_acceptee() -> None:
+    """Contre-épreuve : l'option avant la sous-commande n'est pas touchée."""
+    args = cli.build_parser().parse_args(["--config", "x.toml", "init"])
+    assert (args.command, str(args.config)) == ("init", "x.toml")

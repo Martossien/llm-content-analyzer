@@ -69,7 +69,7 @@ jobs:
         run: |
           dist\Docia.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dist\Docia.exe init --config smoke.toml
+          dist\Docia.exe --config smoke.toml init
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dist\Docia.exe --config smoke.toml status
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

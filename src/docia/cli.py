@@ -17,6 +17,7 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 from docia import __version__
 from docia.config import DEFAULT_CONFIG_NAME, Config, default_toml, load_config
@@ -40,8 +41,37 @@ def log_campaign(cfg: Config, message: str, *args: object) -> None:
     logger.info(CAMPAIGN_LOG, cfg.db_path, message % args if args else message)
 
 
+GLOBAL_OPTIONS = ("--config", "-c", "--db", "--verbose", "-v")
+"""Options qui se placent **avant** la sous-commande (`docia --config x.toml init`)."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """Parseur qui dit *où* placer une option globale mal positionnée.
+
+    `docia init --config x.toml` est la forme que tout le monde tape en premier, et
+    argparse répondait « unrecognized arguments: --config x.toml » sans indiquer que
+    l'option existe et qu'elle va avant la sous-commande. Le test de fumée Windows
+    de la CI est tombé dans le piège pendant des semaines : la commande échouait,
+    `smoke.toml` n'était jamais écrit, et tout le reste du test tournait sur les
+    réglages par défaut — sans que rien n'échoue, le bloc PowerShell ne rendant que
+    le code de sa dernière commande.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        mal_placees = [opt for opt in GLOBAL_OPTIONS if opt in message]
+        if mal_placees and message.startswith("unrecognized arguments"):
+            option = mal_placees[0]
+            message += (
+                f"\n  « {option} » est une option globale : placez-la AVANT la "
+                f"sous-commande, par exemple « docia {option} … init »"
+            )
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="docia", description="Doc-IA analyzer v3")
+    # Annoté au type de base : les sous-parseurs restent des `ArgumentParser`
+    # ordinaires, et `_Parser` ne sert qu'à enrichir le message du parseur racine.
+    parser: argparse.ArgumentParser = _Parser(prog="docia", description="Doc-IA analyzer v3")
     parser.add_argument(
         "--config", "-c", type=Path, default=Path(DEFAULT_CONFIG_NAME), help="docia.toml"
     )
