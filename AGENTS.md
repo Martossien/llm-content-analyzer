@@ -45,9 +45,10 @@ src/docia/
 ├── config.py              docia.toml (tomllib) → Config ; `update_toml` réécrit sans
 │                          perdre les commentaires
 ├── models.py              dataclasses figées (FileRow, BlockSpec, FileAnalysis…)
-├── db/                    SQLite (WAL) — database.py (classe Database), schema.py
-│                          (SCHEMA_VERSION, migrations une transaction par version,
-│                          sauvegarde avant migration), sql.py (fragments, règles)
+├── db/                    SQLite (WAL) — core.py (connexion, migrations une transaction par
+│                          version, sauvegarde avant migration, chargement en masse) +
+│                          mixins par table files/blocks/analyses/prompts/stats assemblés
+│                          dans database.py ; schema.py (versions), sql.py (fragments, règles)
 ├── ingest/smbeagle_csv.py CSV 19 colonnes à guillemets sélectifs, import par lots
 ├── scan.py                pilote SMBeagle.exe (progress JSON, manifeste, codes retour)
 ├── filter.py              exclusions + score de priorité, en flux
@@ -55,8 +56,8 @@ src/docia/
 ├── llm/                   client.py (httpx, retries, comptage exact), schema.py,
 │                          parse.py (validation stricte), aggregate.py (segments)
 ├── pipeline.py            le run : classe `_Run`, une méthode par étape
-├── service.py             couche service (campagnes, run avec ETA, réanalyse,
-│                          sauvegardes) — à exposer 1:1 en REST (v4)
+├── service/               couche service — _common, campaigns, backups, ingest, runs ;
+│                          façade qui réexporte tout — à exposer 1:1 en REST (v4)
 ├── views/                 statistiques SQL — _common (socle), axes, hygiene, risk,
 │                          retention, review, overview ; la façade réexporte tout
 ├── report/                html.py, markdown.py, excel.py (write_only), powerbi.py

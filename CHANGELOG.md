@@ -29,6 +29,15 @@ antérieur à la v3 (POC 2025) est dans git.
   comme le rendu HTML. **`report/excel.write_workbook`** (298 lignes) : un onglet =
   une fonction `_sheet_*`. **`ingest.import_csv`** : compteurs dans `_ImportTally`,
   écriture d'un lot et avertissements de fin extraits.
+- **`Database` assemblée par mixins** — `db/core.py` (connexion, pragmas,
+  transaction, migrations, chargement en masse) et une opération par table :
+  `files.py` (scans, fichiers, plan), `blocks.py` (runs, blocs), `analyses.py`,
+  `prompts.py` (prompts, revues), `stats.py`. `database.py` ne fait plus que les
+  assembler ; l'API `db.upsert_files(...)` ne change pas. 1 775 lignes → 6 modules
+  de 50 à 580 lignes.
+- **`service.py` devient le paquet `docia.service`** — `_common` (erreurs,
+  résultats, constantes), `campaigns` (état, récentes), `backups`, `ingest`
+  (import, scan, plan), `runs` (run, réanalyse, revue) ; façade qui réexporte tout.
 - **Le journal sort de `cli.py`** → `docia/journal.py` (console, `docia.log`,
   rotation, garde-fou des pannes attendues) ; `cli.py` passe de 1 041 à ~800 lignes
   et ne fait plus que dispatcher.
@@ -42,6 +51,11 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ### Corrigé
 
+- **Réanalyse ciblée sur une classification périmée** — `reanalyze --where
+  security=C3` retenait « la dernière analyse » sans exiger qu'elle porte sur le
+  contenu actuel (copie locale de la règle, sans `content_version`) : un fichier
+  modifié depuis son analyse était ciblé sur une classe qui ne décrit plus rien.
+  La règle unique `latest_analysis_sql` s'applique désormais là aussi.
 - **Une date non collectée vieillissait le fichier** — un scanner sans
   `--access-time` écrit `01/01/0001`, un FILETIME nul `01/01/1601` : ces valeurs
   rangeaient le fichier dans « non accédé depuis 10 ans » et parmi les candidats au

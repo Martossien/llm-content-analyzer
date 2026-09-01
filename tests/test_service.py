@@ -149,6 +149,45 @@ def test_run_campaign_without_callback_stays_silent(
 # --------------------------------------------------------------- réanalyse
 
 
+def test_reanalyse_ciblee_ignore_une_classification_perimee(tmp_path: Path) -> None:
+    """`--where security=C3` ne doit viser que les fichiers dont l'analyse **du contenu
+    actuel** dit C3. Un fichier modifié depuis (content_version 2) dont seule la
+    version 1 était C3 n'a plus de classification : il ne doit pas être ciblé, et
+    un fichier dont la version courante est C3 doit l'être."""
+    from docia.db import Database
+    from docia.models import DomainAnalysis, FileAnalysis
+    from docia.service import reanalyze
+
+    def analysis(ref: str, label: str) -> FileAnalysis:
+        dom = DomainAnalysis
+        return FileAnalysis(
+            file_ref=ref,
+            resume="r",
+            security=dom(label, 90, {"justification": ""}),
+            rgpd=dom("none", 90, {"data_types": []}),
+            finance=dom("none", 90, {"amounts": []}),
+            legal=dom("none", 90, {"parties": []}),
+            raw={},
+            retention=dom("none", 90, {"required": False, "years": 0, "justification": ""}),
+        )
+
+    cfg = Config()
+    with Database(tmp_path / "c.sqlite") as db:
+        scan = db.start_scan("x.csv")
+        db.upsert_files([_fichier("a.txt"), _fichier("b.txt")], scan)
+        a, b = (db.query("SELECT id FROM files ORDER BY path")[i]["id"] for i in (0, 1))
+        db.store_analysis(a, None, 1, prompt_hash="h", model="m", analysis=analysis("a", "C3"))
+        db.store_analysis(b, None, 1, prompt_hash="h", model="m", analysis=analysis("b", "C3"))
+        # `a` change de contenu : sa classification C3 ne décrit plus rien.
+        db._conn.execute(
+            "UPDATE files SET content_version = 2, status = 'pending' WHERE id = ?", (a,)
+        )
+        db._conn.execute("UPDATE files SET status = 'done' WHERE id = ?", (b,))
+        db._conn.commit()
+        count = reanalyze(db, cfg, scope="filter", where={"security": "C3"}, backup=False)
+        assert count == 1, "seul b porte une analyse C3 valable"
+
+
 def test_reanalyze_all_then_second_run_redoes_everything(
     tmp_path: Path,
     corpus: tuple[Path, Path],  # noqa: F811

@@ -66,9 +66,8 @@ def test_campaign_title() -> None:
 
 
 def test_recent_campaigns_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from docia import service
 
-    monkeypatch.setattr(service, "docia_home", lambda: tmp_path)
+    monkeypatch.setenv("DOCIA_HOME", str(tmp_path))  # `docia_home` lit la variable
     assert service_shim.load_recent() == []
     (tmp_path / "a.sqlite").touch()
     (tmp_path / "b.sqlite").touch()
