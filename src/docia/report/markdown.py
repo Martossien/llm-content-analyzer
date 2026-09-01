@@ -134,8 +134,11 @@ def render_markdown(
         "",
         "### 2.1 Doublons",
         "",
-        f"{_n(dup.total_families)} famille(s), {_n(dup.total_copies)} exemplaire(s), "
+        f"{_n(dup.total_families)} famille(s) à {views.DUPLICATE_BASIS}, "
+        f"{_n(dup.total_copies)} exemplaire(s), "
         f"**{_b(dup.total_reclaimable_bytes)} récupérables**.",
+        "",
+        f"> ⚠ {views.DUPLICATE_CAUTION}",
         "",
     ]
     lines += _table(
@@ -346,7 +349,16 @@ def render_markdown(
         [[g.label, _n(g.files), _b(g.bytes)] for g in report.status.reasons],
         empty="Aucune exclusion ni erreur enregistrée.",
     )
-    lines += ["### 5.3 Runs", ""]
+    if report.status.reasons_hidden:
+        # Motifs de **non**-analyse : les taire dans un rapport qui justifie des
+        # suppressions revient à présenter comme propre un partage mal couvert.
+        lines += [
+            "",
+            f"Les {_n(len(report.status.reasons))} motifs les plus fréquents sur "
+            f"{_n(report.status.reasons_total)} — les {_n(report.status.reasons_hidden)} "
+            "autres ne sont pas affichés ici.",
+        ]
+    lines += ["", "### 5.3 Runs", ""]
     lines += _table(
         [
             "Run",

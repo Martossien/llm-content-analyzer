@@ -110,10 +110,15 @@ POWERBI_COLUMNS: dict[str, tuple[Column, ...]] = {
         ("reviewed_at", "Date ISO", "Date de la dernière vérification"),
     ),
     "duplicates.csv": (
-        ("family_id", "Texte (clé)", "Famille de doublons : empreinte + taille"),
+        (
+            "family_id",
+            "Texte (clé)",
+            "Famille : empreinte des 64 PREMIERS Ko + taille — comparaison partielle, "
+            "vérifier octet à octet avant suppression",
+        ),
         ("file_id", "Entier (clé)", "Exemplaire — jointure vers files.csv"),
         ("path", "Texte", "Chemin de l'exemplaire"),
-        ("fast_hash", "Texte", "Empreinte commune à la famille"),
+        ("fast_hash", "Texte", "Empreinte des 64 premiers Ko, commune à la famille"),
         ("size_bytes", "Entier", "Taille unitaire en octets"),
         ("copies", "Entier", "Nombre d'exemplaires de la famille"),
         (

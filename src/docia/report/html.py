@@ -46,6 +46,8 @@ section { margin: 0 0 34px; }
 h2 { font-size: 19px; margin: 30px 0 4px; padding-bottom: 6px; border-bottom: 2px solid #23384d; }
 h3 { font-size: 15px; margin: 22px 0 8px; color: #33475b; }
 p.note { color: #52606d; font-size: 13px; margin: 4px 0 12px; }
+p.warn { color: #7a4b12; background: #fdf3e3; border-left: 3px solid #c9821f; font-size: 13px;
+  margin: 4px 0 12px; padding: 7px 10px; border-radius: 3px; }
 .tiles { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0 8px; }
 .tile { flex: 1 1 190px; background: #fff; border: 1px solid #d9e2ec; border-left: 4px solid #3d7ea6;
   border-radius: 4px; padding: 12px 14px; }
@@ -201,6 +203,23 @@ def _badge(value: str, colors: dict[str, str]) -> str:
     return f'<span class="badge" style="background:{colors.get(value, "#9aa5b1")}">{_esc(value)}</span>'
 
 
+def _reasons_cut(status: views.StatusSummary) -> str:
+    """Note sous le tableau 5.2 : combien de motifs ne sont pas montrés.
+
+    La borne (`views.REASON_TOP`) était mesurée — `reasons_total`, `reasons_hidden` —
+    et affichée nulle part. Sur 25 motifs, 15 disparaissaient en silence d'un rapport
+    qui justifie des suppressions : ce sont des raisons de **non-analyse**, donc
+    précisément ce qu'il faut savoir avant de conclure que le partage est propre.
+    """
+    if not status.reasons_hidden:
+        return ""
+    return (
+        f'<p class="note">Les {_n(len(status.reasons))} motifs les plus fréquents sur '
+        f"{_n(status.reasons_total)} — les {_n(status.reasons_hidden)} autres ne sont pas "
+        "affichés ici (voir « export --format powerbi », files.csv).</p>"
+    )
+
+
 def _cut(data: ReportData, name: str, shown: int) -> str:
     """Note « ce tableau est coupé », ou rien du tout s'il ne l'est pas.
 
@@ -349,10 +368,11 @@ def _section_hygiene(data: ReportData) -> str:
             '<p class="note">Ces indicateurs ne dépendent pas de la LLM : ils sont disponibles '
             "dès l'import du scan SMBeagle.</p>",
             "<h3>2.1 Doublons — espace récupérable</h3>",
-            f'<p class="note">{_n(dup.total_families)} famille(s) de fichiers identiques '
-            f"(même empreinte et même taille), {_n(dup.total_copies)} exemplaire(s) au total, "
+            f'<p class="note">{_n(dup.total_families)} famille(s) de fichiers à '
+            f"{_esc(views.DUPLICATE_BASIS)}, {_n(dup.total_copies)} exemplaire(s) au total, "
             f"<strong>{_esc(_b(dup.total_reclaimable_bytes))} récupérables</strong> en ne gardant "
             "qu'un exemplaire par famille.</p>",
+            f'<p class="warn">{_esc(views.DUPLICATE_CAUTION)}</p>',
             _bars(
                 [
                     (
@@ -658,6 +678,7 @@ def _section_execution(data: ReportData) -> str:
                 reason_rows,
                 empty="Aucune exclusion ni erreur enregistrée.",
             ),
+            _reasons_cut(data.status),
             "<h3>5.3 Runs</h3>",
             _table(
                 [

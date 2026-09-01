@@ -74,13 +74,28 @@ des milliers. Ce qui manquait n'était pas la borne, c'était de le dire :
 THOUSANDS_SEPARATOR = "\u00a0"
 """Espace insécable : les nombres ne se coupent pas en fin de ligne."""
 
-_FROM_LATEST = " FROM analyses a JOIN files f ON f.id = a.file_id"
+_FROM_LATEST = (
+    " FROM analyses a JOIN files f ON f.id = a.file_id AND a.content_version = f.content_version"
+)
 """Clause `FROM` des vues « fichier + dernière analyse », à filtrer par `_IS_LATEST`.
 
 Le parcours part des analyses : `analyses.file_id` référence toujours un fichier
 existant (clé étrangère), l'ensemble des lignes est donc celui de
 `files f JOIN analyses a ON a.id = (dernière analyse de f)`, mais sans balayer
-les fichiers jamais analysés."""
+les fichiers jamais analysés.
+
+**`a.content_version = f.content_version` est dans la jointure, pas dans un `WHERE`
+que chaque vue devrait penser à écrire.** Sans elle, un fichier modifié depuis son
+analyse gardait sa classification : le rapport combinait la **nouvelle** taille et
+l'**ancienne** classe. Mesuré — un fichier passé de 2 à 9 Mo avec un contenu tout
+autre, que la base marque pourtant `pending` et `content_version=2`, restait
+« candidat au nettoyage » pour 9 Mo. Un rapport qui justifie des suppressions ne
+peut pas attribuer une analyse à un contenu sur lequel elle n'a pas été faite.
+
+La règle n'est pas neuve : `db._PENDING_WHERE` l'applique déjà pour décider ce qui
+reste **à analyser** — c'est ce qui remet le fichier en file d'attente. Elle était
+simplement oubliée du côté **lecture** : la chaîne savait que l'analyse était
+périmée, et les rapports s'en servaient quand même."""
 
 
 def latest_analysis_sql(file_id: str, *, alias: str = "a") -> str:
@@ -561,8 +576,29 @@ def iter_duplicate_families(db: Database, *, min_copies: int = 2) -> Iterator[Du
     yield from _duplicate_families(db, _duplicate_groups(db, min_copies))
 
 
+DUPLICATE_BASIS = "même empreinte des 64 premiers Ko et même taille"
+"""Ce sur quoi une « famille de doublons » est réellement fondée — à citer tel quel.
+
+`fast_hash` ne couvre que les **64 premiers kilo-octets** du fichier
+(`quick.HASH_HEAD_BYTES`, comme SMBeagle : hacher entièrement un modèle de 7 Go
+bloquerait le scan). Deux fichiers de 200 Ko dont seuls les 64 premiers coïncident
+sont donc regroupés — cas courant des formats à en-tête fixe, des images disque et
+des exports au même gabarit. Les rendus annonçaient « fichiers **identiques** » sans
+le dire : le lecteur croyait à une comparaison octet à octet, sur un tableau qui
+chiffre un espace « récupérable » et invite donc à supprimer."""
+
+DUPLICATE_CAUTION = (
+    "Regroupement par empreinte partielle : seuls les 64 premiers Ko sont comparés. "
+    "Vérifiez octet à octet avant toute suppression."
+)
+"""Mise en garde affichée sous chaque tableau de doublons, dans les quatre rendus."""
+
+
 def duplicates(db: Database, *, min_copies: int = 2, limit: int | None = None) -> DuplicateReport:
-    """Familles de fichiers identiques (`fast_hash` + taille) et espace récupérable.
+    """Familles de fichiers de **même empreinte partielle** et espace récupérable.
+
+    « Même empreinte des 64 premiers Ko et même taille » — pas « identiques » : voir
+    `DUPLICATE_BASIS`, dont la formulation est reprise telle quelle par les rendus.
 
     L'espace récupérable d'une famille vaut `taille × (exemplaires − 1)` : un
     exemplaire est conservé. Les fichiers sans empreinte sont ignorés.

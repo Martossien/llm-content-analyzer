@@ -2357,8 +2357,20 @@ class Database:
         return counts
 
     def count_analyzed_files(self) -> int:
-        """Nombre de fichiers ayant au moins une analyse (miroir de `views._analyzed_files`)."""
-        return int(self._conn.execute("SELECT COUNT(DISTINCT file_id) FROM analyses").fetchone()[0])
+        """Fichiers analysés **pour leur contenu actuel** (miroir de `views._analyzed_files`).
+
+        `COUNT(DISTINCT file_id) FROM analyses` comptait aussi les fichiers modifiés
+        depuis leur analyse. Ceux-là sont repassés `pending` et attendent d'être
+        réanalysés : les compter « analysés » faisait dépasser le total de la campagne
+        (`analysés + à analyser + exclus + erreurs` &gt; nombre de fichiers) et laissait
+        une classification périmée décider d'une suppression. Voir `views._FROM_LATEST`.
+        """
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(DISTINCT a.file_id) FROM analyses a"
+                " JOIN files f ON f.id = a.file_id AND a.content_version = f.content_version"
+            ).fetchone()[0]
+        )
 
     _SUMMARY_COLUMNS = (
         ("security_classification", "security"),

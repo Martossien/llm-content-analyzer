@@ -200,6 +200,56 @@ def test_html_and_markdown_share_the_same_data(db: Database) -> None:
 # ------------------------------------------------------------------ Excel
 
 
+def test_les_motifs_non_affiches_sont_annonces(tmp_path: Path) -> None:
+    """MOYEN : la borne des motifs d'exclusion était mesurée, jamais dite.
+
+    `views.REASON_TOP` en montre 10. Sur une campagne à 25 motifs, 15 disparaissaient
+    en silence des trois rendus — alors que `StatusSummary.reasons_total` et
+    `reasons_hidden` existaient déjà et n'étaient lus nulle part. Ce sont des raisons
+    de **non**-analyse : les taire fait passer pour propre un partage mal couvert.
+    """
+    from tests.test_views import _row
+
+    with Database(tmp_path / "motifs.sqlite") as database:
+        scan = database.start_scan("s")
+        database.upsert_files([_row(f"f{i}.txt", fast_hash=f"h{i}") for i in range(25)], scan)
+        database.finish_scan(scan, total=25, new=25, updated=0, unchanged=0, invalid=0)
+        for fichier in database.iter_files():
+            database.set_file_status(fichier.id, "excluded", reason=f"motif {fichier.name}")
+        resume = views.status_summary(database)
+        assert (len(resume.reasons), resume.reasons_total, resume.reasons_hidden) == (10, 25, 15)
+        page = render_html(database, today=TODAY)
+        texte = render_markdown(database, today=TODAY)
+
+    for rendu, nom in ((page, "HTML"), (texte, "Markdown")):
+        assert "25" in rendu, f"{nom} ne donne pas le nombre réel de motifs"
+        assert "autres ne sont pas" in rendu, f"{nom} ne dit pas que le tableau est coupé"
+
+
+def test_les_doublons_ne_sont_jamais_annonces_comme_identiques(
+    db: Database, tmp_path: Path
+) -> None:
+    """GRAVE : les rendus affirmaient « fichiers identiques » sur 64 Ko comparés.
+
+    `fast_hash` ne couvre que les 64 premiers kilo-octets (`quick.HASH_HEAD_BYTES`,
+    comme SMBeagle). Deux fichiers de 200 Ko dont seuls les 64 premiers coïncident
+    étaient donc déclarés identiques — c'est le cas des formats à en-tête fixe, des
+    images disque et des exports au même gabarit — et le tableau chiffrait l'espace
+    « récupérable en ne gardant qu'un exemplaire ». Aucun des quatre rendus ne disait
+    que la comparaison était partielle.
+    """
+    page = render_html(db, today=TODAY)
+    texte = render_markdown(db, today=TODAY)
+    powerbi.export_powerbi(db, tmp_path / "pbi", today=TODAY)
+    lisez_moi = (tmp_path / "pbi" / "README_powerbi.md").read_text(encoding="utf-8")
+
+    for rendu, nom in ((page, "HTML"), (texte, "Markdown"), (lisez_moi, "README Power BI")):
+        assert "64 premiers Ko" in rendu, f"{nom} ne dit pas que l'empreinte est partielle"
+    assert "fichiers identiques" not in page, "le mot « identiques » promet plus que le calcul"
+    assert "octet à octet" in page, "le HTML doit dire quoi faire avant de supprimer"
+    assert "octet à octet" in texte
+
+
 def test_excel_workbook_sheets_and_rows(db: Database, tmp_path: Path) -> None:
     path = excel.write_workbook(db, tmp_path / "rapport.xlsx", today=TODAY)
     assert path.exists()
@@ -211,8 +261,11 @@ def test_excel_workbook_sheets_and_rows(db: Database, tmp_path: Path) -> None:
     assert files_sheet.freeze_panes == "A2"
     assert files_sheet.auto_filter.ref is not None
     doublons = workbook["Doublons"]
-    assert doublons.max_row == 2
+    # en-tête + 1 famille + la mise en garde : l'onglet chiffre un espace « récupérable »,
+    # donc invite à supprimer, sur un regroupement qui ne compare que les 64 premiers Ko.
+    assert doublons.max_row == 3
     assert doublons.cell(row=2, column=5).value == 4096  # octets récupérables
+    assert "64 premiers Ko" in str(doublons.cell(row=3, column=1).value)
     anciennete = workbook["Ancienneté"]
     assert anciennete.max_row == 5  # 4 seuils
     conservation = workbook["Conservation"]

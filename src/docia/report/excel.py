@@ -388,11 +388,19 @@ def write_workbook(
             for f in report.duplicates.families
         ),
         formats={3: "#,##0", 5: "#,##0"},
-        note=ranking_note(
-            "familles affichées",
-            len(report.duplicates.families),
-            report.totals.get("duplicates", len(report.duplicates.families)),
-            "« export --format powerbi » (duplicates.csv, un exemplaire par ligne)",
+        note=" ".join(
+            filter(
+                None,
+                (
+                    views.DUPLICATE_CAUTION,
+                    ranking_note(
+                        "familles affichées",
+                        len(report.duplicates.families),
+                        report.totals.get("duplicates", len(report.duplicates.families)),
+                        "« export --format powerbi » (duplicates.csv, un exemplaire par ligne)",
+                    ),
+                ),
+            )
         ),
     )
 
@@ -529,6 +537,13 @@ def write_workbook(
             for k, v in report.status.counts.items()
         ],
         formats={3: "#,##0"},
+        note=(
+            f"Motifs bornés : {_grouped(len(report.status.reasons))} sur "
+            f"{_grouped(report.status.reasons_total)} affichés. Ce sont des raisons de "
+            "non-analyse : les taire ferait passer pour propre un partage mal couvert."
+            if report.status.reasons_hidden
+            else None
+        ),
     )
 
     path.parent.mkdir(parents=True, exist_ok=True)

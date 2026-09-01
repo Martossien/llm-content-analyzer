@@ -780,6 +780,58 @@ def test_la_regle_derniere_analyse_est_la_meme_partout() -> None:
     assert attendu_a in _sql_normalise(db_module._IS_LATEST)  # noqa: SLF001
 
 
+def test_une_analyse_perimee_ne_decide_plus_d_une_suppression(tmp_path: Path) -> None:
+    """GRAVE : un fichier modifié depuis son analyse restait candidat au nettoyage.
+
+    Les vues retenaient « la dernière analyse » sans jamais vérifier qu'elle portait
+    sur le **contenu actuel**. Un fichier ré-scanné après modification repasse pourtant
+    `pending` avec `content_version + 1` : la chaîne sait que son analyse est périmée,
+    et les rapports s'en servaient quand même.
+
+    Preuve d'origine — un fichier passé de 2 à 9 Mo, contenu tout autre :
+
+        avant le re-scan : analysés=1  nettoyage=1 fichier / 2 000 000 o
+        après le re-scan : analysés=1  nettoyage=1 fichier / 9 000 000 o   ← ancienne
+                           classification C0 combinée à la **nouvelle** taille
+
+    La nouvelle taille servait donc à chiffrer un gain de place sur la foi d'une classe
+    de sécurité établie sur un contenu qui n'existe plus.
+    """
+    with Database(tmp_path / "perime.sqlite") as database:
+        scan = database.start_scan("s1")
+        database.upsert_files(
+            [_row("vieux.txt", fast_hash="a", size=2_000_000, access="01/01/2010 08:00:00")], scan
+        )
+        database.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+        fichier = next(iter(database.iter_files()))
+        database.store_analysis(
+            fichier.id,
+            None,
+            1,
+            prompt_hash="p",
+            model="m",
+            analysis=_analysis("vieux.txt", security="C0", rgpd="low"),
+        )
+        avant = views.overview(database, stale_years=1, today=TODAY)
+        assert (avant.analyzed, avant.cleanup_files, avant.cleanup_bytes) == (1, 1, 2_000_000)
+
+        rescan = database.start_scan("s2")  # le fichier a changé : empreinte et taille
+        database.upsert_files(
+            [_row("vieux.txt", fast_hash="AUTRE", size=9_000_000, access="01/01/2010 08:00:00")],
+            rescan,
+        )
+        database.finish_scan(rescan, total=1, new=0, updated=1, unchanged=0, invalid=0)
+        modifie = next(iter(database.iter_files()))
+        assert (modifie.content_version, modifie.status) == (2, "pending")
+
+        apres = views.overview(database, stale_years=1, today=TODAY)
+        assert apres.cleanup_files == 0, "une classification périmée ne justifie aucune suppression"
+        assert apres.cleanup_bytes == 0
+        assert apres.analyzed == 0, "le fichier attend d'être réanalysé : il n'est pas « analysé »"
+        assert views.cleanup_candidates(database, years=1, today=TODAY).rows == []
+        assert database.count_analyzed_files() == 0, "la CLI doit dire la même chose"
+
+
 def test_les_trois_ecrans_annoncent_les_memes_comptes_de_classification(tmp_path: Path) -> None:
     """`docia status`, le rapport et l'onglet Risque, sur une base réanalysée.
 
@@ -801,13 +853,17 @@ def test_les_trois_ecrans_annoncent_les_memes_comptes_de_classification(tmp_path
         )
         database.finish_scan(scan, total=4, new=4, updated=0, unchanged=0, invalid=0)
         fichiers = sorted(database.iter_files(), key=lambda f: f.name)
-        for version in (1, 2):  # toute la campagne est analysée deux fois
+        # Toute la campagne est analysée deux fois, avec un **prompt différent** : c'est
+        # ce que fait `docia reanalyze`. `content_version` reste 1, celle des fichiers —
+        # elle ne bouge que si le fichier lui-même change, et une analyse portant sur un
+        # contenu révolu n'a plus voix au chapitre (voir `views._FROM_LATEST`).
+        for prompt in ("p1", "p2"):
             for fichier, classe in zip(fichiers, classes, strict=True):
                 database.store_analysis(
                     fichier.id,
                     None,
-                    version,
-                    prompt_hash=f"p{version}",
+                    1,
+                    prompt_hash=prompt,
                     model="m",
                     analysis=_analysis(fichier.name, security=classe, rgpd="high"),
                 )
@@ -853,19 +909,24 @@ def test_les_vues_le_journal_et_lexport_designent_la_meme_derniere_analyse(
         database.upsert_files([_row("doc.pdf")], scan)
         database.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
         file_id = next(iter(database.iter_files())).id
-        for version, (classe, horodatage) in enumerate(
+        # Trois analyses du **même contenu** (`content_version=1`, celle du fichier),
+        # distinguées par le prompt : trois passes de `docia reanalyze`. Faire varier
+        # `content_version` à la place décrirait un fichier modifié trois fois, dont
+        # les analyses antérieures ne font justement plus foi.
+        for prompt, (classe, horodatage) in zip(
+            ("p1", "p2", "p3"),
             (
                 ("C0", "2026-01-01T08:00:00+00:00"),  # la plus ancienne
                 ("C3", "2026-03-01T08:00:00+00:00"),  # la plus récente : celle qui fait foi
                 ("C1", "2026-01-01T08:00:00+00:00"),  # id plus grand, mais horodatage ancien
             ),
-            start=1,
+            strict=True,
         ):
             database.store_analysis(
                 file_id,
                 None,
-                version,
-                prompt_hash="p",
+                1,
+                prompt_hash=prompt,
                 model="m",
                 analysis=_analysis("doc.pdf", security=classe, rgpd="critical"),
             )
