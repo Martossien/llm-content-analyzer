@@ -24,7 +24,7 @@ from datetime import date
 from itertools import chain
 from typing import Any
 
-from docia.db import Database, first_access_sql
+from docia.db import Database, first_access_sql, latest_analysis_sql
 from docia.ingest.smbeagle_csv import parse_smbeagle_datetime
 
 SECURITY_CLASSES: tuple[str, ...] = ("C0", "C1", "C2", "C3", "N/A")
@@ -74,9 +74,7 @@ des milliers. Ce qui manquait n'était pas la borne, c'était de le dire :
 THOUSANDS_SEPARATOR = "\u00a0"
 """Espace insécable : les nombres ne se coupent pas en fin de ligne."""
 
-_FROM_LATEST = (
-    " FROM analyses a JOIN files f ON f.id = a.file_id AND a.content_version = f.content_version"
-)
+_FROM_LATEST = " FROM analyses a JOIN files f ON f.id = a.file_id"
 """Clause `FROM` des vues « fichier + dernière analyse », à filtrer par `_IS_LATEST`.
 
 Le parcours part des analyses : `analyses.file_id` référence toujours un fichier
@@ -84,50 +82,26 @@ existant (clé étrangère), l'ensemble des lignes est donc celui de
 `files f JOIN analyses a ON a.id = (dernière analyse de f)`, mais sans balayer
 les fichiers jamais analysés.
 
-**`a.content_version = f.content_version` est dans la jointure, pas dans un `WHERE`
-que chaque vue devrait penser à écrire.** Sans elle, un fichier modifié depuis son
-analyse gardait sa classification : le rapport combinait la **nouvelle** taille et
-l'**ancienne** classe. Mesuré — un fichier passé de 2 à 9 Mo avec un contenu tout
-autre, que la base marque pourtant `pending` et `content_version=2`, restait
-« candidat au nettoyage » pour 9 Mo. Un rapport qui justifie des suppressions ne
-peut pas attribuer une analyse à un contenu sur lequel elle n'a pas été faite.
+La jointure **doit** amener `files` (alias `f`) : `_IS_LATEST` y compare
+`content_version`. Sans cette comparaison, un fichier modifié depuis son analyse
+gardait sa classification, et le rapport combinait la **nouvelle** taille avec
+l'**ancienne** classe — mesuré, un fichier passé de 2 à 9 Mo avec un contenu tout
+autre, que la base marque pourtant `pending`, restait « candidat au nettoyage »
+pour 9 Mo. Un rapport qui justifie des suppressions ne peut pas attribuer une
+analyse à un contenu sur lequel elle n'a pas été faite.
 
 La règle n'est pas neuve : `db._PENDING_WHERE` l'applique déjà pour décider ce qui
 reste **à analyser** — c'est ce qui remet le fichier en file d'attente. Elle était
-simplement oubliée du côté **lecture** : la chaîne savait que l'analyse était
-périmée, et les rapports s'en servaient quand même."""
-
-
-def latest_analysis_sql(file_id: str, *, alias: str = "a") -> str:
-    """Condition SQL « `alias` est la **dernière analyse** du fichier `file_id` ».
-
-    Définition unique de la règle « dernière analyse » : la plus récente par
-    `created_at`, départagée par `id` décroissant quand deux analyses portent le
-    même horodatage (réanalyse dans la même seconde, ou horloge à la seconde).
-
-    Toutes les vues de risque en dépendent — classification, top sensible, plan de
-    conservation, candidats au nettoyage — et elle existait **en trois
-    exemplaires** que rien n'obligeait à rester d'accord : ici, dans
-    `docia.db._LATEST_JOINS` (écran Résultats, `latest_analyses`, donc l'export
-    CSV/JSON et l'onglet « Fichiers ») et dans
-    `docia.report.powerbi._analyses_rows` (`analyses.csv`). Trois copies, trois
-    façons possibles de désigner « l'analyse qui fait foi » : le rapport, le
-    classeur et l'export Power BI pouvaient montrer trois classifications
-    différentes du même fichier. `tests/test_views.py` verrouille les trois, par
-    le texte SQL **et** par le comportement.
-
-    `docia.db` ne peut pas l'importer (`views` importe déjà `db`) : sa copie est
-    donc comparée à celle-ci par un test, en attendant que la fonction descende
-    dans `docia.db` à côté de `first_access_sql`.
-    """
-    return (
-        f"{alias}.id = (SELECT id FROM analyses WHERE file_id = {file_id}"
-        " ORDER BY created_at DESC, id DESC LIMIT 1)"
-    )
+simplement oubliée du côté **lecture**."""
 
 
 _IS_LATEST = latest_analysis_sql("a.file_id")
-"""Ne retient que la dernière analyse d'un fichier (comme `Database.latest_analyses`)."""
+"""Analyse faisant foi : la dernière, **et** portant sur le contenu actuel.
+
+La règle est définie une seule fois, dans `docia.db.latest_analysis_sql`, et
+importée ici — elle y a été descendue précisément parce que `db` ne pouvait pas
+l'importer de `views` (le cycle va dans l'autre sens) et en gardait une copie
+textuelle, qui a fini par diverger."""
 
 _SENSITIVE = "a.security_classification IN ('C2','C3')"
 """Classes de sécurité comptées comme sensibles."""

@@ -780,6 +780,60 @@ def test_la_regle_derniere_analyse_est_la_meme_partout() -> None:
     assert attendu_a in _sql_normalise(db_module._IS_LATEST)  # noqa: SLF001
 
 
+def test_les_cinq_chemins_ecartent_la_meme_analyse_perimee(tmp_path: Path) -> None:
+    """La règle « analyse qui fait foi » vaut pour **tous** les chemins, pas un seul.
+
+    Elle vivait en cinq exemplaires — les vues, `db._LATEST_JOINS` (écran Résultats,
+    exports CSV/JSON), `db._IS_LATEST` (`classification_summary`, `docia status`),
+    `db.count_analyzed_files` et `report.powerbi`. La condition « et portant sur le
+    contenu actuel » n'a d'abord été ajoutée qu'aux vues, et le test censé comparer
+    les cinq confrontait un fragment de texte qui, justement, ne contenait pas
+    `content_version` : il passait pendant que les chemins divergeaient.
+
+    Le rapport annonçait alors 0 candidat au nettoyage là où le classeur et
+    `analyses.csv` en montraient un, avec la **nouvelle** taille du fichier et son
+    **ancienne** classe de sécurité. Ce test fait varier `content_version` — sans
+    quoi il ne peut rien détecter — et interroge les cinq.
+    """
+    from docia.report import powerbi
+
+    with Database(tmp_path / "cinq.sqlite") as database:
+        scan = database.start_scan("s1")
+        database.upsert_files([_row("secret.pdf", fast_hash="a", size=2_000_000)], scan)
+        database.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+        fichier = next(iter(database.iter_files()))
+        database.store_analysis(
+            fichier.id,
+            None,
+            1,
+            prompt_hash="p",
+            model="m",
+            analysis=_analysis("secret.pdf", security="C3", rgpd="critical"),
+        )
+        rescan = database.start_scan("s2")  # le contenu change : l'analyse ne vaut plus
+        database.upsert_files([_row("secret.pdf", fast_hash="AUTRE", size=9_000_000)], rescan)
+        database.finish_scan(rescan, total=1, new=0, updated=1, unchanged=0, invalid=0)
+        assert next(iter(database.iter_files())).content_version == 2
+
+        apercu = views.overview(database, today=TODAY)
+        matrice = views.classification_matrix(database, axis="share")
+        resume = database.classification_summary()
+        analysees = database.count_analyzed_files()
+        fiches = list(database.latest_analyses())
+        powerbi.export_powerbi(database, tmp_path / "pbi", today=TODAY)
+
+    assert apercu.analyzed == 0, "vues : aucune analyse ne fait foi"
+    assert apercu.sensitive_files == 0
+    assert sum(ligne.analyzed for ligne in matrice) == 0
+    assert sum(resume["security"].values()) == 0, "classification_summary / docia status"
+    assert analysees == 0, "count_analyzed_files"
+    assert [r["security_classification"] for r in fiches] == [None], (
+        "écran Résultats : le fichier reste listé, sans classification périmée"
+    )
+    lignes = (tmp_path / "pbi" / "analyses.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert len(lignes) == 1, "analyses.csv : en-tête seul, aucune analyse exportée"
+
+
 def test_une_analyse_sans_classe_reste_dans_la_matrice(tmp_path: Path) -> None:
     """MOYEN : une analyse sans classe de sécurité était jetée de la matrice.
 

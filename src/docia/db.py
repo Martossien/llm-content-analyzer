@@ -299,6 +299,45 @@ def first_access_sql(prefix: str = "") -> str:
     return f"COALESCE(NULLIF({prefix}access_time_first, ''), {prefix}access_time)"
 
 
+def latest_analysis_sql(file_id: str, *, alias: str = "a", file_alias: str = "f") -> str:
+    """Condition SQL « `alias` est l'analyse qui **fait foi** pour le fichier `file_id` ».
+
+    Deux exigences, indissociables, et c'est tout l'objet de cette fonction :
+
+    1. **la plus récente** — par `created_at`, départagée par `id` décroissant quand
+       deux analyses portent le même horodatage (réanalyse dans la même seconde) ;
+    2. **portant sur le contenu actuel** — `content_version` de l'analyse égale celle
+       du fichier. Un fichier modifié depuis son analyse repasse `pending` avec
+       `content_version + 1` : sa classification ne décrit plus rien.
+
+    Les séparer a coûté cher. La règle vivait en **cinq exemplaires** — `views`,
+    `db._LATEST_JOINS` (écran Résultats, exports CSV/JSON), `db._IS_LATEST`
+    (`classification_summary`, `docia status`), `db.count_analyzed_files` et
+    `report.powerbi` — et la seconde exigence n'a d'abord été ajoutée qu'à un seul.
+    Le test qui prétendait les comparer confrontait un fragment de texte qui,
+    justement, ne contenait pas `content_version` : il passait pendant que les
+    chemins divergeaient. Le rapport disait 0 candidat au nettoyage là où l'export
+    Power BI et le classeur en annonçaient un, avec la **nouvelle** taille du fichier
+    et son **ancienne** classe de sécurité.
+
+    La fonction vit ici, dans `docia.db`, et non dans `docia.views` : le cycle
+    d'imports va de `views` vers `db`, donc `db` ne pouvait pas importer sa propre
+    règle et en gardait une copie textuelle. C'est cette copie qui a divergé.
+
+    Args:
+        file_id: expression SQL désignant l'identifiant du fichier (`f.id`,
+            `a.file_id`…), selon la table par laquelle la requête entre.
+        alias: alias de la table `analyses`.
+        file_alias: alias de la table `files`. La requête **doit** la joindre :
+            sans elle, `content_version` n'a rien à quoi se comparer.
+    """
+    return (
+        f"{alias}.id = (SELECT id FROM analyses WHERE file_id = {file_id}"
+        " ORDER BY created_at DESC, id DESC LIMIT 1)"
+        f" AND {alias}.content_version = {file_alias}.content_version"
+    )
+
+
 def split_sql_statements(script: str) -> list[str]:
     """Découpe un script SQL en instructions, en respectant les littéraux `'…'`.
 
@@ -735,25 +774,23 @@ _LATEST_SELECT = """SELECT f.path, f.name, f.extension, f.size_bytes, f.owner, f
 
 _REVIEWS_JOIN = " LEFT JOIN reviews r ON r.file_id = f.id"
 
-_LATEST_JOINS = (
-    " LEFT JOIN analyses a ON a.id = (SELECT id FROM analyses WHERE file_id=f.id"
-    " ORDER BY created_at DESC, id DESC LIMIT 1)" + _REVIEWS_JOIN
-)
-"""Dernière analyse d'un fichier + sa revue. La sous-requête corrélée s'appuie sur
-`idx_analyses_file_latest (file_id, created_at, id)`."""
+_LATEST_JOINS = f" LEFT JOIN analyses a ON {latest_analysis_sql('f.id')}" + _REVIEWS_JOIN
+"""Analyse faisant foi pour un fichier + sa revue. La sous-requête corrélée s'appuie
+sur `idx_analyses_file_latest (file_id, created_at, id)`.
+
+`LEFT JOIN` : un fichier dont l'analyse ne porte plus sur le contenu actuel reste
+**listé**, avec des colonnes d'analyse vides et son statut `pending` — il n'est ni
+masqué, ni décoré d'une classification périmée."""
 
 _LATEST_FROM = " FROM files f" + _LATEST_JOINS
 
-_IS_LATEST = (
-    "a.id = (SELECT id FROM analyses WHERE file_id = a.file_id"
-    " ORDER BY created_at DESC, id DESC LIMIT 1)"
-)
+_IS_LATEST = latest_analysis_sql("a.file_id")
 """Même règle que `_LATEST_JOINS`, mais en partant des analyses (`analyses a`).
 
-Sert aux compteurs de `counts` et `classification_summary`, qui n'ont pas besoin
-de la table `files`. Copie textuelle de `views.latest_analysis_sql("a.file_id")` —
-`docia.db` ne peut pas importer `docia.views` (le cycle est dans l'autre sens) ;
-`tests/test_views.py` compare les deux mot à mot."""
+Sert aux compteurs de `counts` et à `classification_summary` — qui doivent donc
+**joindre `files`** (alias `f`) : ils s'en passaient, et comptaient de ce fait les
+analyses devenues caduques. `docia status` annonçait alors une classification pour
+des fichiers que la base sait pourtant `pending`."""
 
 _DISPLAY_ORDER_SQL = """
     CASE WHEN COALESCE(a.security_classification,'') <> '' THEN 0
@@ -2399,6 +2436,7 @@ class Database:
         columns = ", ".join(column for column, _ in self._SUMMARY_COLUMNS)
         for row in self._conn.execute(
             f"SELECT {columns}, COUNT(*) FROM analyses a"  # noqa: S608 — colonnes internes
+            " JOIN files f ON f.id = a.file_id"
             f" WHERE {_IS_LATEST} GROUP BY 1, 2, 3, 4"
         ):
             number = int(row[len(self._SUMMARY_COLUMNS)])

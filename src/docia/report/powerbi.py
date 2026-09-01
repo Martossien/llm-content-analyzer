@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from docia import views
-from docia.db import Database
+from docia.db import Database, latest_analysis_sql
 from docia.ingest.smbeagle_csv import parse_smbeagle_datetime
 from docia.report import tabular
 
@@ -276,12 +276,13 @@ def _files_rows(db: Database, reference: date) -> Iterator[list[Any]]:
     )
 
 
-_LATEST_ANALYSIS_JOIN = f" FROM files f JOIN analyses a ON {views.latest_analysis_sql('f.id')}"
-"""Jointure « fichier + sa dernière analyse » — même règle que partout ailleurs.
+_LATEST_ANALYSIS_JOIN = f" FROM files f JOIN analyses a ON {latest_analysis_sql('f.id')}"
+"""Jointure « fichier + l'analyse qui fait foi » — même règle que partout ailleurs.
 
-Cette condition était réécrite ici à la main, alors qu'elle existe déjà dans
-`docia.views` et dans `docia.db` : trois copies de la règle qui décide quelle
-analyse fait foi. Elle vient maintenant de `views.latest_analysis_sql`."""
+Elle vient de `docia.db.latest_analysis_sql`, seule définition. Réécrite ici à la
+main, cette condition avait fini par ne plus dire la même chose que celle des vues :
+`analyses.csv` continuait d'exporter une classification pour des fichiers modifiés
+depuis leur analyse, avec leur **nouvelle** taille dans `files.csv` à côté."""
 
 
 def _analyses_rows(db: Database) -> Iterator[list[Any]]:
