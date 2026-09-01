@@ -121,7 +121,14 @@ def test_full_run_then_resume_is_idempotent(
         assert (report2.updated, report2.unchanged) == (1, 5)
         run3 = run_pipeline(db, cfg)
         assert (run3.files_selected, run3.files_done) == (1, 1)
-        assert db.counts()["analyses"] == 7  # nouvelle version de contenu = nouvelle analyse
+        # Toujours 6 **fichiers** analysés : le fichier modifié en a une deuxième dans
+        # la table, mais une seule fait foi. L'assertion valait 7 et verrouillait le
+        # défaut : `counts()["analyses"]` comptait les lignes d'`analyses`, historique
+        # des réanalyses compris. `docia status`, `docia status --json` et l'onglet
+        # Risque annonçaient donc jusqu'au double du « analysés » du rapport HTML sur
+        # la même base. Les trois chemins comptent maintenant la même chose.
+        assert db.counts()["analyses"] == 6
+        assert db.query_values("SELECT COUNT(*) FROM analyses")[0][0] == 7  # l'historique reste
 
 
 def test_openwebui_transport(tmp_path: Path, corpus: tuple[Path, Path], fake_server) -> None:  # type: ignore[no-untyped-def]

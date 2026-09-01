@@ -154,9 +154,21 @@ Règles : une seule source de vérité (vues SQL) pour CLI, GUI et rapport ; auc
   *réanalyse forcée* (`docia reanalyze --scope errors|all|filter --where security=C3`) précédée
   d'une sauvegarde automatique ; les vérifications humaines (`reviews`) sont conservées.
 - **Sauvegarde** : API `sqlite3.Connection.backup` (cohérente pendant un run), fichiers horodatés
-  `<db>.backups/<db>_AAAAMMJJ-HHMMSS[_étiquette].sqlite`, rotation (10 par défaut), automatique
-  avant migration de schéma (`_avant_migration_vN`) et avant réanalyse complète / restauration
-  (`_avant_restauration`) ; restauration atomique (`os.replace`, journaux `-wal/-shm` retirés).
+  `<db>.backups/<db>_AAAAMMJJ-HHMMSS[_étiquette].sqlite`, écrits en `.tmp` puis publiés par
+  `os.replace` — une sauvegarde interrompue (coupure, arrêt du poste) ne laisse pas un fichier
+  tronqué que la liste présenterait comme « la plus récente ». Rotation (10 par défaut) sur les
+  seules sauvegardes **courantes**, et **seulement celles de la campagne concernée** : le tri
+  reconnaît le nom exact de la base, sinon `audit.sqlite` emportait les copies de
+  `audit_2024_direction.sqlite`.
+- **Copies de sûreté** (`SAFETY_LABEL_PREFIX = "avant_"`) : posées juste avant une opération
+  destructrice — `avant_migration_vN`, `avant_restauration`, `avant_reanalyse_*`. Elles sont
+  **listées** (on doit pouvoir les restaurer) mais **jamais tournées** : une rotation qui les
+  emporte supprime exactement le filet dont on a besoin quand l'opération a mal tourné. Rançon
+  assumée : elles s'accumulent et se suppriment à la main.
+- **Restauration** : la source est d'abord copiée en `.tmp` à côté de la base, *avant* la copie de
+  sûreté `avant_restauration` ; puis `os.replace` (journaux `-wal/-shm` retirés). Ordre non
+  négociable — restaurer une sauvegarde *par-dessus elle-même* détruisait la source pendant
+  l'étape de sûreté et ne laissait plus rien à restaurer.
 
 ## 12. GUI v3.2 — refonte rapide (30/08, « pas beau, pas user friendly »)
 

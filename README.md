@@ -96,6 +96,8 @@ docia review ID --status validated  # vérification humaine (validé / corrigé 
 docia reanalyze --scope errors|all|filter [--where security=C3]
 docia backup [--out DIR]            # sauvegarde horodatée (<base>.backups/, rotation 10)
 docia restore SAUVEGARDE.sqlite     # restauration (l'actuelle est d'abord sauvegardée)
+                                    # les copies « avant_* » (migration, restauration, réanalyse)
+                                    # sont listées mais jamais tournées : à supprimer à la main
 docia campaigns                     # campagnes récentes et leur avancement
 docia retry                         # remet les fichiers en erreur à « à analyser »
 docia bench                         # vitesse de la LLM : prefill/decode, raisonnement, fichiers/heure

@@ -23,8 +23,21 @@ from docia.config import DEFAULT_CONFIG_NAME, Config, default_toml, load_config
 from docia.db import Database
 from docia.models import FileStatus
 
-DEFAULT_KEEP_BACKUPS = 10
-"""Sauvegardes conservées par `docia backup` (voir `service.DEFAULT_KEEP_BACKUPS`)."""
+logger = logging.getLogger(__name__)
+
+CAMPAIGN_LOG = "campagne %s : %s"
+"""Format des lignes de journal qui concernent une campagne : chemin, puis message.
+
+`docia.log` est **unique** — il vit à côté de `Docia.exe` et sert donc à toutes les
+campagnes du poste. Il ne nommait aucune d'elles : `grep campagne.sqlite docia.log`
+ne rendait rien, et relire un incident revenait à deviner de quelle base parlaient
+les lignes. Une ligne par étape qui compte (ouverture d'une commande, import, run,
+rapport), pas une par requête : le journal reste lisible."""
+
+
+def log_campaign(cfg: Config, message: str, *args: object) -> None:
+    """Journalise un message en le rattachant à sa campagne (voir `CAMPAIGN_LOG`)."""
+    logger.info(CAMPAIGN_LOG, cfg.db_path, message % args if args else message)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,7 +104,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backup", help="sauvegarde horodatée de la base (rotation)")
     p.add_argument("--out", type=Path, default=None, help="dossier (défaut : <base>.backups)")
     p.add_argument("--label", default="", help="étiquette ajoutée au nom du fichier")
-    p.add_argument("--keep", type=int, default=DEFAULT_KEEP_BACKUPS, help="copies conservées")
+    # Pas de valeur par défaut ici : la rotation n'a qu'une source de vérité,
+    # `service.DEFAULT_KEEP_BACKUPS`, et l'importer au montage du parseur ferait
+    # payer le chargement du pipeline à `docia --help` comme à `docia init`
+    # (mesuré : 0,07 s → 0,18 s). `cmd_backup`, qui importe déjà le service,
+    # laisse simplement le service décider quand l'option n'est pas donnée.
+    p.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help="copies conservées (défaut : la rotation standard du service)",
+    )
 
     p = sub.add_parser("restore", help="restaure une sauvegarde par-dessus la base")
     p.add_argument("backup", type=Path, help="fichier de sauvegarde à restaurer")
@@ -164,6 +187,56 @@ def _load(args: argparse.Namespace) -> Config:
     return cfg
 
 
+UNCHECKED_COMMANDS = frozenset(
+    {"init", "ingest", "scan", "restore", "quick", "bench", "doctor", "campaigns", "gui"}
+)
+"""Commandes dispensées du contrôle d'existence de la campagne — **toutes** les autres
+(`status`, `export`, `report`, `review`, `plan`, `run`, `retry`, `prompt`, `backup`,
+`reanalyze`) exigent que `cfg.db_path` désigne une campagne docia existante.
+
+* `init`, `ingest`, `scan` : c'est leur travail de créer la campagne ;
+* `restore` : reconstruit une campagne perdue depuis une sauvegarde ;
+* `quick` : travaille sur une base jetable (ou `--keep-db`), jamais sur la campagne ;
+* `bench`, `doctor`, `gui` : n'ouvrent pas `cfg.db_path` ;
+* `campaigns` : n'ouvre pas `cfg.db_path` non plus — elle parcourt le registre des
+  campagnes récentes et signale déjà « base absente » ligne par ligne.
+
+La dispense est **nominative** : une sous-commande ajoutée demain est contrôlée par
+défaut, ce qui est le bon sens pour un outil de lecture."""
+
+
+def _require_existing_campaign(cfg: Config) -> int:
+    """0 si `cfg.db_path` est une campagne docia ; 1 après un message clair sinon.
+
+    Une faute de frappe dans `--db` (ou dans `docia.toml`) faisait fabriquer par
+    `Database` le dossier **et** une base vide de 180 Ko, puis rendre en code 0 un
+    « 0 fichier, 0 analysé, 0 sensible » parfaitement rassurant. Sur un outil dont
+    la sortie justifie des suppressions de fichiers, un rapport vide livré en
+    succès sur une base inventée est le pire résultat possible : mieux vaut une
+    ligne d'erreur et un code 1.
+
+    La fenêtre se gardait déjà de ce piège (`gui.app.campaign_kind`) ; la CLI, non.
+    Le contrôle vit maintenant dans `docia.db` — `campaign_kind` — pour que les deux
+    en partagent un seul.
+    """
+    from docia.db import CAMPAIGN_DOCIA, CAMPAIGN_FOREIGN, campaign_kind
+
+    path = Path(cfg.db_path)
+    kind = campaign_kind(path)
+    if kind == CAMPAIGN_DOCIA:
+        return 0
+    if kind == CAMPAIGN_FOREIGN:
+        print(f"{path} n'est pas une campagne docia : ouverture refusée", file=sys.stderr)
+        return 1
+    print(f"campagne introuvable : {path}", file=sys.stderr)
+    print(
+        "  vérifier --db (ou db_path dans docia.toml) — « docia init » crée une"
+        " campagne, « docia ingest » ou « docia scan » l'alimente",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     target: Path = args.config
     if target.exists() and not args.force:
@@ -204,7 +277,9 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
     except ServiceError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(format_import_report(report, prefix=f"scan {report.scan_id}"))
+    bilan = format_import_report(report, prefix=f"scan {report.scan_id}")
+    log_campaign(cfg, "import de %s — %s", args.csv, bilan)
+    print(bilan)
     for err in report.errors[:10]:
         print(f"  ligne {err.line_number} : {err.reason}", file=sys.stderr)
     return 0 if report.invalid == 0 else 2
@@ -236,15 +311,25 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
     with Database(cfg.db_path) as db:
         report = run_pipeline(db, cfg, limit=args.limit, dry_run=args.dry_run, progress=print)
-    print(
+    bilan = (
         f"run {report.run_id} : {report.files_selected} sélectionnés, {report.files_done} analysés, "
         f"{report.files_error} en erreur — blocs {report.blocks_done}/"
         f"{report.blocks_built + report.blocks_resumed} "
         f"(erreurs {report.blocks_error}) — tokens {report.prompt_tokens} prompt / {report.completion_tokens} sortie"
     )
+    log_campaign(cfg, "%s", bilan)
+    print(bilan)
     for e in report.errors[:10]:
         print(f"  {e}", file=sys.stderr)
-    if report.errors and report.files_done == 0 and report.blocks_built and not args.dry_run:
+    # Code 2 = « erreurs partielles, les résultats obtenus sont persistés » : il
+    # suppose donc qu'il y a des résultats. Zéro fichier analysé n'est pas un run
+    # partiel, c'est un run raté — code 1. La condition exigeait `blocks_built`, nul
+    # justement dans la panne la plus grave : serveur LLM injoignable, où le contrôle
+    # de santé coupe avant toute construction de bloc. La panne totale rendait ainsi
+    # le code le plus doux, et une supervision qui tolère le 2 acceptait en silence
+    # un run qui n'avait rien fait. `--dry-run` reste hors sujet : il n'analyse rien
+    # par construction.
+    if report.errors and report.files_done == 0 and not args.dry_run:
         return 1
     return 2 if report.errors or report.files_error else 0
 
@@ -395,10 +480,12 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     o = data.overview
-    print(
+    bilan = (
         f"rapport → {out} — {o.total_files} fichier(s), {o.analyzed} analysé(s), "
         f"{o.sensitive_files} sensible(s), {o.duplicate_families} famille(s) de doublons"
     )
+    log_campaign(cfg, "%s", bilan)
+    print(bilan)
     return 0
 
 
@@ -470,19 +557,32 @@ def cmd_prompt(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
+    """`review` : statut de vérification humaine, **par la couche service**.
+
+    C'était le dernier appel direct de la CLI à une écriture de `Database` : la
+    doctrine veut que toute écriture de campagne passe par `service`, et une
+    doctrine avec une exception ne protège plus rien.
+    """
+    from docia.service import ServiceError, set_review
+
     with Database(cfg.db_path) as db:
         if db.get_file(args.file_id) is None:
             print(f"fichier inconnu : {args.file_id}", file=sys.stderr)
             return 1
-        db.set_review(
-            args.file_id,
-            args.status,
-            comment=args.comment,
-            reviewer=args.reviewer,
-            corrected_security=args.security,
-            corrected_rgpd=args.rgpd,
-            corrected_retention_years=args.retention_years,
-        )
+        try:
+            set_review(
+                db,
+                args.file_id,
+                args.status,
+                comment=args.comment,
+                reviewer=args.reviewer,
+                corrected_security=args.security,
+                corrected_rgpd=args.rgpd,
+                corrected_retention_years=args.retention_years,
+            )
+        except ServiceError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         counts = db.review_counts()
     print(
         f"fichier {args.file_id} : {args.status} — revues : "
@@ -492,20 +592,31 @@ def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_backup(args: argparse.Namespace, cfg: Config) -> int:
-    """`backup` : copie horodatée de la base, avec rotation."""
+    """`backup` : copie horodatée de la base, avec rotation.
+
+    `--keep` non précisé laisse la valeur au service : la rotation n'a qu'une
+    source de vérité (`service.DEFAULT_KEEP_BACKUPS`), et la CLI n'en redéfinit
+    plus une seconde qui pourrait dériver — dix copies annoncées, huit gardées.
+    """
     from docia.service import ServiceError, backup_database, list_backups
 
+    keep = {} if args.keep is None else {"keep": args.keep}
     try:
-        path = backup_database(
-            Path(cfg.db_path), out_dir=args.out, label=args.label, keep=args.keep
-        )
+        path = backup_database(Path(cfg.db_path), out_dir=args.out, label=args.label, **keep)
     except ServiceError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"sauvegarde → {path}")
-    kept = list_backups(Path(cfg.db_path))
-    if kept:
-        print(f"{len(kept)} sauvegarde(s) conservée(s) dans {kept[0].parent}")
+    if args.out is None:
+        kept = list_backups(Path(cfg.db_path))
+        if kept:
+            print(f"{len(kept)} sauvegarde(s) conservée(s) dans {kept[0].parent}")
+    else:
+        # `list_backups` ne sait regarder que `<base>.backups`. Avec `--out`, le
+        # compte annoncé était donc celui d'un **autre** dossier que celui où la
+        # sauvegarde vient d'être écrite et où la rotation vient de passer : mieux
+        # vaut ne rien compter que compter faux.
+        print(f"rotation appliquée dans {path.parent}")
     return 0
 
 
@@ -800,10 +911,16 @@ def _expected_failure(exc: BaseException) -> bool:
 
     L'import de `docia.service` n'a lieu qu'ici, sur le chemin d'erreur : `docia
     init` n'a pas à payer le chargement du pipeline pour un garde-fou.
+
+    `UnicodeDecodeError` en fait partie : un prompt enregistré en « ANSI » par le
+    Bloc-notes, un CSV exporté en Latin-1, et l'utilisateur recevait vingt-deux
+    lignes de trace Python pour un fichier qu'il lui suffit de réenregistrer en
+    UTF-8. C'est bien une panne qu'il peut comprendre et corriger seul.
+    (Il hérite de `ValueError`, pas d'`OSError` : il n'était donc pas couvert.)
     """
     from docia.service import ServiceError
 
-    return isinstance(exc, OSError | sqlite3.Error | ServiceError)
+    return isinstance(exc, OSError | sqlite3.Error | ServiceError | UnicodeDecodeError)
 
 
 def _report_failure(command: str, exc: BaseException) -> None:
@@ -863,6 +980,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         launch(args.config, smoke=bool(getattr(args, "smoke", False)))
         return 0
     cfg = _load(args)
+    if args.command not in UNCHECKED_COMMANDS and (code := _require_existing_campaign(cfg)):
+        return code
+    log_campaign(cfg, "commande « docia %s »", args.command)
     handlers = {
         "ingest": cmd_ingest,
         "plan": cmd_plan,

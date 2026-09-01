@@ -62,6 +62,15 @@ SIZE_BUCKETS: tuple[tuple[str, int, int], ...] = (
 STALE_YEARS: tuple[int, ...] = (1, 3, 5, 10)
 """Seuils d'ancienneté par défaut, en années."""
 
+REASON_TOP = 10
+"""Raisons d'exclusion ou d'erreur listées par défaut (`status_summary`).
+
+Borne explicite, et non plus un `LIMIT 10` en dur dans le SQL : les raisons
+d'exclusion sont bornées par la configuration (extensions, marqueurs de dossier),
+mais les raisons d'**erreur** sont du texte libre — une campagne peut en produire
+des milliers. Ce qui manquait n'était pas la borne, c'était de le dire :
+`StatusSummary.reasons_total` et `reasons_hidden` le disent maintenant."""
+
 THOUSANDS_SEPARATOR = "\u00a0"
 """Espace insécable : les nombres ne se coupent pas en fin de ligne."""
 
@@ -286,6 +295,13 @@ class StatusSummary:
     total_files: int
     total_bytes: int
     reasons: list[GroupStat] = field(default_factory=list)
+    reasons_total: int = 0
+    """Nombre **total** de raisons distinctes, `reasons` fût-il tronqué (voir `REASON_TOP`)."""
+
+    @property
+    def reasons_hidden(self) -> int:
+        """Raisons que `reasons` ne montre pas — 0 quand rien n'est tronqué."""
+        return max(self.reasons_total - len(self.reasons), 0)
 
 
 @dataclass(frozen=True)
@@ -716,8 +732,17 @@ def empty_or_tiny(db: Database, *, max_bytes: int = 100) -> TinyReport:
     )
 
 
-def status_summary(db: Database) -> StatusSummary:
-    """Compteurs par statut et top 10 des raisons d'exclusion ou d'erreur."""
+def status_summary(db: Database, *, reason_limit: int | None = REASON_TOP) -> StatusSummary:
+    """Compteurs par statut et principales raisons d'exclusion ou d'erreur.
+
+    `reason_limit` borne la liste (`None` : toutes). La borne est **légitime** —
+    les raisons d'erreur sont du texte libre tronqué à 500 caractères
+    (`pipeline` → `Database.set_file_status`), donc de cardinalité non bornée par
+    la configuration — mais elle ne doit pas être muette : `reasons_total` dit
+    combien il y en a réellement, et `reasons_hidden` combien manquent. Elle
+    valait 10, en dur dans le SQL, sans que rien ne le signale : un rapport qui
+    justifie des suppressions taisait ainsi des motifs de **non**-analyse.
+    """
     total_files, total_bytes = _totals(db)
     counts: dict[str, int] = {}
     volume: dict[str, int] = {}
@@ -726,6 +751,10 @@ def status_summary(db: Database) -> StatusSummary:
     ):
         counts[str(r["status"])] = int(r["n"])
         volume[str(r["status"])] = int(r["b"])
+    where = " FROM files WHERE exclusion_reason IS NOT NULL AND exclusion_reason <> ''"
+    reasons_total = int(
+        db.query_values(f"SELECT COUNT(DISTINCT exclusion_reason){where}")[0][0]  # noqa: S608
+    )
     reasons = [
         GroupStat(
             str(r["reason"]),
@@ -735,12 +764,13 @@ def status_summary(db: Database) -> StatusSummary:
             percent(int(r["b"]), total_bytes),
         )
         for r in db.query(
-            "SELECT exclusion_reason AS reason, COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS b"
-            " FROM files WHERE exclusion_reason IS NOT NULL AND exclusion_reason <> ''"
-            " GROUP BY reason ORDER BY n DESC, reason LIMIT 10"
+            "SELECT exclusion_reason AS reason, COUNT(*) AS n,"  # noqa: S608 — clause interne
+            f" COALESCE(SUM(size_bytes),0) AS b{where}"
+            " GROUP BY reason ORDER BY n DESC, reason LIMIT ?",
+            (-1 if reason_limit is None else reason_limit,),
         )
     ]
-    return StatusSummary(counts, volume, total_files, total_bytes, reasons)
+    return StatusSummary(counts, volume, total_files, total_bytes, reasons, reasons_total)
 
 
 # ------------------------------------------------------------------ risque
@@ -849,15 +879,32 @@ def _run_prefix(text: str, segments: int) -> str:
     return ""
 
 
+def _path_levels(text: str) -> int:
+    """Nombre de niveaux non vides d'un chemin (`\\\\srv\\part` → 2, `\\\\srv\\part\\a` → 3).
+
+    Compté comme `_run_prefix` compte : les séparateurs vides ne font pas un niveau."""
+    return sum(1 for part in text.replace("/", "\\").split("\\") if part)
+
+
 def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
     """Rend la fonction qui étiquette une ligne d'axe (clés d'axe en tête de ligne).
 
     `share_label` ne lit que les deux premiers niveaux d'un répertoire, et
-    `directory_label` `depth` de plus : deux répertoires qui partagent ces
-    niveaux portent la même étiquette. Les lignes arrivant groupées par
-    répertoire, l'étiquette n'est donc recalculée qu'au changement
+    `directory_label` `depth` de plus **à partir du partage** : deux répertoires
+    qui partagent ces niveaux portent la même étiquette. Les lignes arrivant
+    groupées par répertoire, l'étiquette n'est donc recalculée qu'au changement
     d'arborescence — sur un parc où presque chaque fichier a son répertoire,
     c'est l'essentiel du coût de la vue.
+
+    Le nombre de niveaux couverts par le préfixe est tiré de la **profondeur
+    réelle du partage**, celle de la colonne `base`. Le supposer égal à deux
+    (`\\\\serveur\\partage`) était juste pour un scan SMB, faux dès qu'une campagne
+    porte sur un sous-arbre : avec `base = \\\\srv\\part\\Direction\\RH`, le préfixe
+    couvrait deux niveaux de moins que l'étiquette n'en consomme, et
+    `\\\\srv\\part\\Direction\\RH\\Paie` réutilisait l'étiquette de
+    `\\\\srv\\part\\Direction\\RH\\Contrats` : deux répertoires distincts additionnés
+    sur une même ligne du tableau « Répertoires », le second disparaissant.
+    Un préfixe trop long ne fait, lui, que recalculer inutilement.
     """
     if axis in _SIMPLE_AXES:
         empty = _SIMPLE_AXES[axis][1]
@@ -867,10 +914,6 @@ def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
 
         return by_column
 
-    # Niveaux non vides dont dépend l'étiquette : `share_label` en lit deux,
-    # `directory_label` `depth` de plus. Le préfixe doit en couvrir au moins autant —
-    # trop long ne fait que recalculer inutilement, trop court fusionne deux partages.
-    segments = 2 if axis == "share" else depth + 2
     previous_base: Any = None
     prefix = ""
     label = ""
@@ -878,16 +921,19 @@ def _axis_labeller(axis: str, depth: int) -> Callable[[tuple[Any, ...]], str]:
     def by_path(row: tuple[Any, ...]) -> str:
         nonlocal previous_base, prefix, label
         base, directory = row[0], row[1]  # colonnes TEXT NOT NULL : toujours des chaînes
-        # Le préfixe est comparé sur le texte normalisé, celui-là même dont les
-        # étiquettes sont tirées : sinon `/` et `\` ne se comparent pas entre eux.
+        # Le préfixe est tiré et comparé sur le texte normalisé, celui-là même dont
+        # les étiquettes sont tirées : sinon `/` et `\` ne se comparent pas entre eux,
+        # et un chemin à slashs ne se compte pas dans les mêmes niveaux.
         text = directory.replace("/", "\\").strip()
         if base != previous_base or not prefix or not text.startswith(prefix):
-            label = (
-                share_label(base, directory)
-                if axis == "share"
-                else directory_label(base, directory, depth)
-            )
-            prefix = _run_prefix(directory, segments)
+            share = share_label(base, directory)
+            if axis == "share":
+                label = share
+                segments = 2  # `share_label` ne lit jamais plus de deux niveaux
+            else:
+                label = directory_label(base, directory, depth)
+                segments = _path_levels(share) + depth
+            prefix = _run_prefix(text, segments)
             previous_base = base
         return label
 
@@ -1153,8 +1199,13 @@ def _review_counts(db: Database) -> dict[str, int]:
 
 
 def _analyzed_files(db: Database) -> int:
-    """Nombre de fichiers ayant au moins une analyse."""
-    return int(db.query_values("SELECT COUNT(DISTINCT file_id) FROM analyses")[0][0])
+    """Nombre de fichiers ayant au moins une analyse.
+
+    Délégué à `Database.count_analyzed_files` : c'est le même chiffre que
+    `counts()["analyses"]` de la fenêtre et de `docia status`, et il n'existe
+    donc plus qu'une seule façon de le calculer.
+    """
+    return db.count_analyzed_files()
 
 
 def review_progress(db: Database, *, limit: int | None = None) -> ReviewProgress:

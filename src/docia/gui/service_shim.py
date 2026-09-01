@@ -125,17 +125,18 @@ class GuiService:
     def set_review(self, file_id: int, status: str, **kwargs: Any) -> sqlite3.Row | None:
         """Enregistre la vérification humaine (`to_review` / `validated` / `corrected`).
 
-        Passe par ici, et non par `Database` depuis la fenêtre : c'est la seule écriture
-        que l'onglet Résultats provoque, et la doctrine « toute écriture par le service »
-        n'a de valeur que si elle n'a pas d'exception.
+        Délègue à `service.set_review`, comme toutes les autres écritures. Ce fut
+        longtemps la seule qui appelait `Database` en direct depuis ce pont : la
+        doctrine « toute écriture par le service » qu'annonce le docstring du module
+        n'a de valeur que si elle n'a pas d'exception, et la v4 n'aurait eu aucune
+        revue à exposer dans son API.
 
         Rend la fiche **relue après écriture** (None si le fichier a disparu) : l'écran
         s'en sert pour réécrire la seule ligne concernée au lieu de relire toute la
         campagne, et il l'obtient sans rouvrir la base une seconde fois.
         """
         with self._open_db() as db:
-            db.set_review(file_id, status, **kwargs)
-            return next(iter(db.latest_analyses(file_id=file_id)), None)
+            return service.set_review(db, file_id, status, **kwargs)
 
     # ---- relancer
     def reanalyze(self, cfg: Config, scope: str, log: Log) -> int:

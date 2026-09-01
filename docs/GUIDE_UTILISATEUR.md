@@ -170,6 +170,17 @@ sensibles, conservation…) ne sont pas concernés.
 sauvegarde est faite automatiquement avant toute réanalyse complète — et avant toute migration du
 schéma, sous un nom horodaté qui n'écrase jamais une sauvegarde précédente.
 
+Deux choses à savoir sur la liste :
+
+- Doc-IA ne conserve que les **10 dernières sauvegardes manuelles** de cette campagne ; au-delà,
+  la plus ancienne disparaît. Les copies dont le nom contient **`avant_`** (avant migration, avant
+  restauration, avant réanalyse) échappent à ce ménage et restent tant que vous ne les supprimez
+  pas vous-même : ce sont les filets posés avant les opérations qui effacent quelque chose. Si le
+  dossier `<votre-campagne>.backups` grossit, ce sont elles qu'on efface, une fois l'opération
+  confirmée bonne.
+- **Restaurer remplace la campagne en cours.** Celle-ci est copiée juste avant sous
+  `…_avant_restauration.sqlite`, donc rien n'est perdu si vous vous êtes trompé de fichier.
+
 ![Rapports et sauvegarde](images/06_rapports.png)
 
 ## 6. Relancer plus tard

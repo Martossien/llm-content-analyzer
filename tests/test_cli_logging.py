@@ -229,6 +229,13 @@ def test_main_rend_une_ligne_sur_base_en_lecture_seule(
     dossier_journal.mkdir()
     monkeypatch.setattr(cli, "_log_file", lambda _c: dossier_journal / "docia.log")
 
+    # La campagne doit **exister** : depuis que les commandes de lecture exigent une
+    # base présente (`cli._require_existing_campaign`), une base absente sort en
+    # amont, sur un tout autre message. Ce que ce test vérifie est le garde-fou du
+    # cas « la base est là mais refuse d'être écrite ».
+    base = tmp_path / "programme" / "docia.sqlite"
+    docia.db.Database(base).close()
+
     # On reproduit l'erreur que SQLite lève réellement, au lieu de verrouiller un
     # dossier : `chmod(0o555)` n'interdit rien sous Windows, qui ignore les bits
     # POSIX sur les répertoires. Le test passait donc sous Linux et échouait sur la
@@ -238,7 +245,7 @@ def test_main_rend_une_ligne_sur_base_en_lecture_seule(
         raise sqlite3.OperationalError("attempt to write a readonly database")
 
     monkeypatch.setattr(docia.db.Database, "__init__", refuse)
-    code = cli.main(["--db", str(tmp_path / "programme" / "docia.sqlite"), "status"])
+    code = cli.main(["--db", str(base), "status"])
     for handler in racine_propre.handlers:
         handler.flush()
 
@@ -288,3 +295,271 @@ def test_avertissements_openpyxl_filtres_au_demarrage() -> None:
             and f[3].pattern.startswith("openpyxl")
             for f in warnings.filters
         ), warnings.filters
+
+
+# ------------------- une base absente ne se fabrique pas toute seule
+
+
+def test_une_faute_de_frappe_dans_db_ne_fabrique_pas_une_campagne(
+    racine_propre: logging.Logger,  # noqa: ARG001 - remet la journalisation à zéro
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--db /chemin/qui/nexiste/pas` : code 1, et **rien** n'est créé sur le disque.
+
+    Avant : `Database` créait le dossier *et* une base vide de 180 Ko, puis
+    `docia status` annonçait « 0 fichier » et `docia report` « 0 fichier sensible »
+    — en code retour **0**, sur une campagne inventée de toutes pièces. Pour un
+    outil dont la sortie justifie des suppressions de fichiers dans un organisme
+    public, un rapport rassurant livré en succès sur une base qui n'existe pas est
+    le pire résultat possible.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    fantome = tmp_path / "nexistepas_audit" / "abc.sqlite"
+
+    for commande in (
+        ["status"],
+        ["status", "--json"],
+        ["report", "--format", "html", "--out", str(tmp_path / "rapport.html")],
+        ["export", "--format", "csv", "--out", str(tmp_path / "export.csv")],
+        ["plan"],
+        ["retry"],
+        ["review", "1", "--status", "validated"],
+        ["backup"],
+    ):
+        capsys.readouterr()
+        assert cli.main(["--db", str(fantome), *commande]) == 1, commande
+        erreur = capsys.readouterr().err
+        assert "campagne introuvable" in erreur, commande
+        assert str(fantome) in erreur, "l'utilisateur voit le chemin qu'il a tapé"
+        assert not fantome.exists(), f"{commande} a fabriqué la base"
+        assert not fantome.parent.exists(), f"{commande} a fabriqué le dossier"
+    assert not (tmp_path / "rapport.html").exists(), "aucun rapport rassurant n'est écrit"
+    assert not (tmp_path / "export.csv").exists()
+
+
+def test_une_base_etrangere_nest_pas_greffee_de_tables_docia(
+    racine_propre: logging.Logger,  # noqa: ARG001 - remet la journalisation à zéro
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Un SQLite d'un autre logiciel reste intact : refus, pas de greffe."""
+    import sqlite3
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    etrangere = tmp_path / "contacts.sqlite"
+    con = sqlite3.connect(etrangere)
+    con.execute("CREATE TABLE contacts (nom TEXT)")
+    con.execute("INSERT INTO contacts VALUES ('Dupont')")
+    con.commit()
+    con.close()
+    avant = etrangere.read_bytes()
+
+    assert cli.main(["--db", str(etrangere), "status"]) == 1
+    assert "n'est pas une campagne docia" in capsys.readouterr().err
+    assert etrangere.read_bytes() == avant, "la base d'un autre logiciel n'a pas bougé"
+
+
+def test_les_commandes_qui_creent_la_base_gardent_ce_droit(
+    racine_propre: logging.Logger,  # noqa: ARG001 - remet la journalisation à zéro
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Le contrôle ne vise que la lecture : `init` crée toujours sa campagne.
+
+    `ingest`, `scan` et `restore` sont dispensés pour la même raison (voir
+    `cli.UNCHECKED_COMMANDS`) ; `campaigns` n'ouvre pas `cfg.db_path` du tout.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    neuve = tmp_path / "neuve" / "campagne.sqlite"
+    assert cli.main(["--db", str(neuve), "init"]) == 0
+    assert neuve.exists()
+    assert cli.main(["--db", str(tmp_path / "absente.sqlite"), "campaigns"]) == 0
+
+    # et une fois la campagne créée, les commandes de lecture repassent
+    assert cli.main(["--db", str(neuve), "status"]) == 0
+
+
+def test_unicode_decode_error_est_une_panne_previsible() -> None:
+    """Un prompt enregistré en « ANSI » par le Bloc-notes : une ligne, pas 22.
+
+    `UnicodeDecodeError` hérite de `ValueError`, pas d'`OSError` : il échappait au
+    garde-fou de `main()` et sortait en trace Python complète.
+    """
+    faute = UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+    assert cli._expected_failure(faute)
+    assert not cli._expected_failure(ValueError("autre chose")), "on ne masque pas tout"
+
+
+def test_le_journal_nomme_la_campagne(
+    racine_propre: logging.Logger,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docia.log` est unique pour tout le poste : chaque ligne dit de quelle base elle parle.
+
+    `grep campagne.sqlite docia.log` ne rendait rien — relire un incident revenait
+    à deviner à laquelle des campagnes du poste appartenaient les lignes.
+    """
+    monkeypatch.chdir(tmp_path)
+    journal = tmp_path / "docia.log"
+    monkeypatch.setattr(cli, "_log_file", lambda _c: journal)
+    campagne = tmp_path / "campagne.sqlite"
+
+    assert cli.main(["--db", str(campagne), "init"]) == 0
+    assert cli.main(["--db", str(campagne), "status"]) == 0
+    for handler in racine_propre.handlers:
+        handler.flush()
+
+    lignes = [
+        ligne for ligne in journal.read_text(encoding="utf-8").splitlines() if "campagne" in ligne
+    ]
+    assert lignes, "le journal ne nomme aucune campagne"
+    assert any(str(campagne) in ligne for ligne in lignes), lignes
+    assert any("docia status" in ligne for ligne in lignes), lignes
+
+
+# ------------------- la panne la plus grave doit rendre le code le plus dur
+
+
+def test_serveur_llm_eteint_sort_en_code_1_et_non_2(
+    racine_propre: logging.Logger,  # noqa: ARG001 - remet la journalisation à zéro
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Serveur LLM éteint : 0 fichier traité — c'est un run **raté**, pas partiel.
+
+    `cli` documente « 1 erreur (config, base, LLM injoignable), 2 erreurs partielles
+    — les résultats obtenus sont persistés ». Mesuré serveur éteint : **2**. La
+    condition du code 1 exigeait `blocks_built`, précisément nul dans cette
+    panne-là, puisque le contrôle de santé coupe avant toute construction de bloc.
+    La panne totale rendait donc le code le plus doux, et une supervision qui
+    tolère le 2 acceptait en silence un run qui n'avait rien fait.
+    """
+    import socket
+
+    from docia.config import Config
+    from docia.db import Database
+    from docia.models import SmbeagleRow
+
+    # Un port fermé : le contrôle de santé échoue tout de suite, sans attente réseau.
+    with socket.socket() as sonde:
+        sonde.bind(("127.0.0.1", 0))
+        port = sonde.getsockname()[1]
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    cfg = Config(db_path=str(tmp_path / "campagne.sqlite"))
+    cfg.llm.base_url = f"http://127.0.0.1:{port}/v1"
+    cfg.llm.timeout_s = 5
+    cfg.llm.max_retries = 1
+    with Database(cfg.db_path) as db:
+        scan = db.start_scan("scan.csv")
+        db.upsert_files(
+            [
+                SmbeagleRow(
+                    name="note.txt",
+                    host="srv",
+                    extension="txt",
+                    username="u",
+                    hostname="srv.dom",
+                    unc_directory="\\\\srv\\part\\dossier",
+                    creation_time="01/01/2020 10:00:00",
+                    last_write_time="01/01/2026 10:00:00",
+                    readable=True,
+                    writeable=False,
+                    deletable=False,
+                    directory_type="SMB",
+                    base="\\\\srv\\part",
+                    file_size=1000,
+                    access_time="02/01/2026 10:00:00",
+                    file_attributes="Archive",
+                    owner="DOM\\alice",
+                    fast_hash="h1",
+                    file_signature="unknown",
+                )
+            ],
+            scan,
+        )
+        db.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+
+    args = argparse.Namespace(limit=None, dry_run=False)
+    code = cli.cmd_run(args, cfg)
+    sortie = capsys.readouterr()
+    assert "injoignable" in sortie.err, sortie.err
+    assert "0 analysés" in sortie.out, sortie.out
+    assert code == 1, "un run qui n'a rien fait ne s'annonce pas comme partiellement réussi"
+
+
+# ------------------- `docia backup --out` : ne pas compter dans le mauvais dossier
+
+
+def test_backup_out_nannonce_pas_le_compte_dun_autre_dossier(
+    racine_propre: logging.Logger,  # noqa: ARG001 - remet la journalisation à zéro
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--out AUTRE` : la sauvegarde et la rotation vont dans AUTRE — le compte aussi.
+
+    `list_backups` ne sait regarder que `<base>.backups` : après `--out`, le
+    « N sauvegarde(s) conservée(s) » annoncé était celui d'un **autre** dossier, et
+    nommait un dossier où l'utilisateur ne trouverait pas la copie qu'il vient de
+    prendre. Mieux vaut ne rien compter que compter faux.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    base = tmp_path / "campagne.sqlite"
+    assert cli.main(["--db", str(base), "init"]) == 0
+
+    # deux copies dans le dossier par défaut, pour que le mauvais compte soit visible
+    capsys.readouterr()
+    assert cli.main(["--db", str(base), "backup"]) == 0
+    assert cli.main(["--db", str(base), "backup"]) == 0
+    defaut = capsys.readouterr().out
+    assert "2 sauvegarde(s) conservée(s)" in defaut
+    assert str(base.with_name(base.name + ".backups")) in defaut
+
+    ailleurs = tmp_path / "coffre"
+    assert cli.main(["--db", str(base), "backup", "--out", str(ailleurs)]) == 0
+    sortie = capsys.readouterr().out
+    assert str(ailleurs) in sortie, "l'utilisateur sait où la copie est partie"
+    assert "sauvegarde(s) conservée(s)" not in sortie, "aucun compte d'un autre dossier"
+    assert len(list(ailleurs.glob("*.sqlite"))) == 1
+
+
+def test_backup_keep_laisse_la_rotation_au_service(
+    racine_propre: logging.Logger,  # noqa: ARG001 - remet la journalisation à zéro
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--keep` non précisé : c'est `service.DEFAULT_KEEP_BACKUPS` qui décide, lui seul.
+
+    La CLI redéfinissait sa propre constante. Deux valeurs pour la rotation, c'est
+    une campagne effacée le jour où l'une des deux bouge sans l'autre.
+    """
+    from docia.service import DEFAULT_KEEP_BACKUPS
+
+    assert not hasattr(cli, "DEFAULT_KEEP_BACKUPS"), "plus de seconde source de vérité"
+    assert cli.build_parser().parse_args(["backup"]).keep is None
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_log_file", lambda _c: tmp_path / "docia.log")
+    base = tmp_path / "campagne.sqlite"
+    assert cli.main(["--db", str(base), "init"]) == 0
+    capsys.readouterr()
+    for _ in range(DEFAULT_KEEP_BACKUPS + 2):
+        assert cli.main(["--db", str(base), "backup"]) == 0
+    gardees = list((base.with_name(base.name + ".backups")).glob("*.sqlite"))
+    assert len(gardees) == DEFAULT_KEEP_BACKUPS
+
+    # et `--keep` explicite reste respecté
+    assert cli.main(["--db", str(base), "backup", "--keep", "3"]) == 0
+    assert len(list((base.with_name(base.name + ".backups")).glob("*.sqlite"))) == 3

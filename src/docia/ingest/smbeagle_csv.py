@@ -182,7 +182,36 @@ class ImportReport:
     0, pas la taille réelle (mode tolérant). Sans ce compteur, un fichier dont le
     scanner n'a pas pu lire la taille (ACL, verrou, montage cassé) sortait de
     l'audit — exclu « fichier trop petit » — sans laisser la moindre trace."""
+    size_zero: int = 0
+    """Lignes acceptées annonçant **exactement 0 octet** — taille lue, pas retombée.
+
+    Un fichier vide, c'est banal ; *tout* un partage à 0 octet, non : c'est la
+    signature d'un CSV produit sans `--sizefile` par un scanner qui écrit `0` au
+    lieu d'un champ vide (SMBeagle ≤ v4.2.0, ou un outil tiers). Le cas est
+    invité par le guide (« importer un CSV SMBeagle existant ») et vidait la
+    campagne en silence, chaque fichier étant exclu « trop petit »."""
+    mojibake: int = 0
+    """Lignes acceptées (mode tolérant) dont le chemin contient un caractère de
+    remplacement : le CSV n'était pas en UTF-8.
+
+    Ces chemins ne désignent aucun fichier réel, mais partaient dans les exports
+    comme candidats à la suppression sans que rien ne les distingue. En mode strict
+    ils sont refusés ; en mode tolérant on les garde — l'audit reste exploitable —
+    mais on les compte et on le dit."""
     errors: list[CsvLineError] = field(default_factory=list)
+
+
+SUSPECT_ZERO_MIN = 20
+"""En deçà, « tous les fichiers à 0 octet » reste un partage plausible (dossier de
+test, arborescence de témoins) : on ne crie pas pour si peu."""
+
+REPLACEMENT = "�"
+"""Caractère de remplacement produit par `errors="replace"` sur un octet non UTF-8.
+
+Sa présence dans un chemin n'est pas un détail d'affichage : le chemin stocké ne
+désigne alors **aucun fichier réel**. Il ressortira quand même dans les exports,
+comme candidat à la suppression, et rien ne dira qu'il est faux. Cas courant : un
+CSV réenregistré depuis Excel en cp1252 (« Compté été » → « Compt� �t� »)."""
 
 
 # --------------------------------------------------------------------- parsing
@@ -310,10 +339,13 @@ def parse_line(line: str, line_number: int, *, strict: bool = False) -> Smbeagle
 
     Le `FileSize` connaît trois sorts, et aucun n'est silencieux :
 
-    * **absent** (champ vide : scan sans `--sizefile`, ACL, verrou) — taille 0 et
-      `size_unreadable`, dans les deux modes. En faire une erreur ferait échouer
-      un scan entier, mais faire passer « inconnu » pour « 0 octet » ferait sortir
-      le fichier de l'audit, exclu « trop petit », sans un mot ;
+    * **absent** (champ vide) — taille 0 et `size_unreadable`, dans les deux
+      modes. En faire une erreur ferait échouer un scan entier, mais faire passer
+      « inconnu » pour « 0 octet » ferait sortir le fichier de l'audit, exclu
+      « trop petit », sans un mot. C'est ce qu'écrit SMBeagle depuis le 01/09
+      quand la taille n'est pas collectée (sans `--sizefile`) ou pas lisible
+      (ACL, verrou) — **les versions antérieures écrivaient `0`**, indiscernable
+      d'un fichier vide : d'où le garde-fou `size_zero` de `import_csv` ;
     * **illisible** (non entier, ou hors de la plage des INTEGER SQLite) — refusé
       en mode strict, sinon taille 0 et `size_unreadable` ;
     * **lisible** — la taille, telle quelle.
@@ -365,6 +397,11 @@ def parse_line(line: str, line_number: int, *, strict: bool = False) -> Smbeagle
     identity = row.identity_error()
     if identity:
         raise ValueError(f"ligne {line_number} : {identity}, chemin non identifiant")
+    if strict and REPLACEMENT in row.path:
+        raise ValueError(
+            f"ligne {line_number} : chemin non décodable en UTF-8 "
+            f"(« {row.path[:60]} ») — ce chemin ne désigne aucun fichier réel"
+        )
     return row
 
 
@@ -438,6 +475,18 @@ def read_smbeagle_csv(
         if not header:
             yield CsvLineError(1, "fichier vide", "")
             return
+        if REPLACEMENT in header or "\x00" in header:
+            # Un CSV UTF-16 échouait déjà, mais sur un message de 1 400 caractères
+            # de mojibake (« ��N a m e » au lieu de « Name »), qui ne nommait jamais
+            # la seule cause : ce fichier n'est pas en UTF-8.
+            yield CsvLineError(
+                1,
+                "en-tête illisible : ce fichier n'est pas encodé en UTF-8 "
+                "(UTF-16 ou page de codes Windows ?). Réenregistrez-le en UTF-8, "
+                "ou relancez le scan avec « docia scan »",
+                header.rstrip("\r\n")[:80],
+            )
+            return
         header_errors = validate_header(header.rstrip("\r\n"))
         if header_errors:
             yield CsvLineError(1, " ; ".join(header_errors), header.rstrip("\r\n")[:_MAX_RAW])
@@ -490,7 +539,7 @@ def import_csv(
         progress_every: nombre de lots entre deux appels.
     """
     scan_id = db.start_scan(str(path))
-    total = new = updated = unchanged = invalid = size_defaulted = 0
+    total = new = updated = unchanged = invalid = size_defaulted = size_zero = mojibake = 0
     errors: list[CsvLineError] = []
     batch: list[SmbeagleRow] = []
     position = ReadPosition()
@@ -578,6 +627,10 @@ def import_csv(
                 total += 1
                 if item.size_unreadable:
                     size_defaulted += 1
+                elif item.file_size == 0:
+                    size_zero += 1
+                if REPLACEMENT in item.name or REPLACEMENT in item.unc_directory:
+                    mojibake += 1
                 batch.append(item)
                 if len(batch) >= BATCH_SIZE:
                     flush()
@@ -601,6 +654,22 @@ def import_csv(
             path,
             size_defaulted,
         )
+    if mojibake:
+        logger.warning(
+            "%s : %d chemin(s) non décodables en UTF-8 — ce CSV n'est pas en UTF-8 "
+            "(réenregistré depuis Excel ?). Ces chemins ne désignent aucun fichier réel "
+            "et ressortiront tels quels dans les exports.",
+            path,
+            mojibake,
+        )
+    if total >= SUSPECT_ZERO_MIN and size_zero == total:
+        logger.warning(
+            "%s : les %d fichiers annoncent 0 octet — ce CSV a très probablement été "
+            "produit sans « --sizefile ». Toute la campagne sera exclue « fichier trop "
+            "petit ». Relancez le scan avec l'option, ou utilisez « docia scan ».",
+            path,
+            total,
+        )
     return ImportReport(
         scan_id=scan_id,
         total=total,
@@ -609,5 +678,7 @@ def import_csv(
         unchanged=unchanged,
         invalid=invalid,
         size_defaulted=size_defaulted,
+        size_zero=size_zero,
+        mojibake=mojibake,
         errors=errors,
     )

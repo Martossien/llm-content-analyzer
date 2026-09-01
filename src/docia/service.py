@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +46,7 @@ __all__ = [
     "MAX_RECENT",
     "REANALYZE_SCOPES",
     "RECENT_FILE",
+    "SAFETY_LABEL_PREFIX",
     "WHERE_KEYS",
     "CampaignStatus",
     "ImportProgress",
@@ -66,6 +69,7 @@ __all__ = [
     "remember_campaign",
     "restore_database",
     "run_campaign",
+    "set_review",
 ]
 """Surface publique du service : ce que la CLI, la GUI et l'API REST utilisent."""
 
@@ -75,7 +79,23 @@ HOME_ENV = "DOCIA_HOME"
 RECENT_FILE = "recent.json"
 MAX_RECENT = 20
 DEFAULT_KEEP_BACKUPS = 10
+"""Sauvegardes **courantes** conservées par la rotation — seule source de vérité.
+
+`cli.py` doit importer cette valeur (`--keep`) plutôt que d'en redéfinir une : elle
+gouverne ce que la rotation supprime, et deux valeurs qui divergent, c'est une
+campagne effacée un jour où l'on croyait en garder dix.
+"""
 BACKUP_SUFFIX = ".sqlite"
+SAFETY_LABEL_PREFIX = "avant_"
+"""Étiquette d'une **copie de sûreté** : filet posé juste avant une opération
+destructrice (`avant_migration_*`, `avant_restauration`, `avant_reanalyse_*`).
+
+Ce ne sont pas des sauvegardes courantes : elles n'entrent jamais dans le vivier
+des `DEFAULT_KEEP_BACKUPS` copies tournantes. Une rotation qui les emportait
+supprimait précisément le filet dont on a besoin quand l'opération a mal tourné.
+Elles restent listées par `list_backups` (l'utilisateur doit pouvoir les
+restaurer) et se suppriment à la main.
+"""
 REANALYZE_SCOPES = ("all", "errors", "pending_only", "filter")
 WHERE_KEYS = ("security", "rgpd", "owner", "extension", "path_like")
 
@@ -580,6 +600,15 @@ def reanalyze(
     effectif et modèle configuré : changer de prompt ou de modèle provoque déjà
     une réanalyse sans rien effacer. Une sauvegarde est prise avant l'opération
     (`backup=False` pour la désactiver, à réserver aux tests).
+
+    **Atomicité — limite connue.** Remettre les fichiers `pending` et supprimer
+    leurs analyses sont deux écritures, et `Database` n'expose aujourd'hui aucune
+    opération qui les enchaîne dans une seule transaction (`set_files_status` et
+    `delete_analyses` ouvrent chacune la leur). Une coupure entre les deux laisse
+    donc un état intermédiaire ; l'ordre choisi ci-dessous le rend visible et
+    réparable en rejouant la même commande, mais seule une méthode
+    `Database.reset_for_reanalysis(...)` (une transaction, les deux écritures)
+    supprimerait complètement la fenêtre.
     """
     if scope not in REANALYZE_SCOPES:
         raise ServiceError(
@@ -597,8 +626,19 @@ def reanalyze(
         logger.info("réanalyse (%s) : aucun fichier ciblé", scope)
         return 0
     phash, model = _effective_keys(db, cfg)
-    deleted = db.delete_analyses(file_ids, prompt_hash=phash, model=model)
+    # L'ordre compte, et il n'est pas anodin : `db.py` n'expose pas d'opération qui
+    # fasse les deux écritures dans une seule transaction (voir la note ci-dessus),
+    # donc une coupure entre les deux est possible. Remettre les fichiers `pending`
+    # **d'abord** rend cet état intermédiaire visible et réparable :
+    #   - visible : la campagne affiche 0 % au lieu de mentir avec « 100 % analysé » ;
+    #   - réparable : rejouer *la même* commande de réanalyse retrouve les fichiers
+    #     (ils sont `pending`, et leurs analyses sont toujours là pour un `--where`)
+    #     et termine le travail.
+    # Dans l'ordre inverse, la coupure laissait des fichiers `done` sans analyse :
+    # `run`, `retry`, `plan` et un `reanalyze` ciblé n'en voyaient plus aucun, et
+    # seul `reanalyze --all` — que personne n'a de raison de tenter — réparait.
     db.set_files_status(file_ids, FileStatus.PENDING, None)
+    deleted = db.delete_analyses(file_ids, prompt_hash=phash, model=model)
     logger.info(
         "réanalyse (%s) : %s fichier(s) remis à analyser, %s analyse(s) supprimée(s)",
         scope,
@@ -608,16 +648,65 @@ def reanalyze(
     return len(file_ids)
 
 
+# -------------------------------------------------------- vérification humaine
+
+
+def set_review(
+    db: Database,
+    file_id: int,
+    status: str,
+    *,
+    comment: str = "",
+    reviewer: str = "",
+    corrected_security: str | None = None,
+    corrected_rgpd: str | None = None,
+    corrected_retention_years: int | None = None,
+) -> sqlite3.Row | None:
+    """Enregistre la vérification humaine d'un fichier et rend sa fiche relue.
+
+    `status` : `to_review`, `validated` ou `corrected`. Rend la ligne telle qu'elle
+    est **après** écriture (`None` si le fichier a disparu) : l'appelant réaffiche
+    la seule ligne concernée sans rouvrir la base.
+
+    Cette fonction n'ajoute rien à `Database.set_review` — c'est justement le point.
+    La doctrine du module annonce que toute écriture de campagne passe par le
+    service ; l'onglet Résultats était la seule exception, et une doctrine avec une
+    exception ne protège plus rien (l'API REST de la v4 n'aurait pas eu de revue à
+    exposer). `cli.py` appelle encore `Database.set_review` en direct : à basculer
+    ici aussi.
+    """
+    try:
+        db.set_review(
+            file_id,
+            status,
+            comment=comment,
+            reviewer=reviewer,
+            corrected_security=corrected_security,
+            corrected_rgpd=corrected_rgpd,
+            corrected_retention_years=corrected_retention_years,
+        )
+    except ValueError as exc:
+        raise ServiceError(f"statut de vérification inconnu : « {status} »") from exc
+    except sqlite3.Error as exc:
+        raise ServiceError(f"vérification non enregistrée : {exc}") from exc
+    return next(iter(db.latest_analyses(file_id=file_id)), None)
+
+
 # ----------------------------------------------------------------- sauvegarde
 
 
 def _unique_backup_path(directory: Path, stem: str, label: str) -> Path:
-    """Chemin libre `<stem>_<horodatage>[_label][_n].sqlite` (deux appels dans la même seconde)."""
+    """Chemin libre `<stem>_<horodatage>[_label][_n].sqlite` (deux appels dans la même seconde).
+
+    Le `.sqlite.tmp` correspondant compte comme occupé : la copie n'apparaît sous
+    son nom définitif qu'au `os.replace` final, et deux sauvegardes lancées dans la
+    même seconde choisiraient sinon le même nom — la seconde écraserait la première.
+    """
     suffix = f"_{_slug(label)}" if _slug(label) else ""
     base = f"{stem}_{_stamp()}{suffix}"
     candidate = directory / f"{base}{BACKUP_SUFFIX}"
     counter = 2
-    while candidate.exists():
+    while candidate.exists() or candidate.with_name(candidate.name + ".tmp").exists():
         candidate = directory / f"{base}_{counter}{BACKUP_SUFFIX}"
         counter += 1
     return candidate
@@ -634,9 +723,16 @@ def backup_database(
     """Sauvegarde horodatée d'une base, cohérente même pendant un run.
 
     Écrit `<base>.backups/<nom>_AAAAMMJJ-HHMMSS[_étiquette].sqlite` via l'API
-    `sqlite3` de sauvegarde, puis ne garde que les `keep` copies les plus
-    récentes du dossier (`keep <= 0` : aucune rotation). `db` évite d'ouvrir une
-    seconde connexion quand la base est déjà ouverte.
+    `sqlite3` de sauvegarde, puis ne garde que les `keep` copies courantes les
+    plus récentes **de cette campagne** (`keep <= 0` : aucune rotation ; les
+    copies de sûreté, voir `SAFETY_LABEL_PREFIX`, ne sont jamais tournées).
+    `db` évite d'ouvrir une seconde connexion quand la base est déjà ouverte.
+
+    La copie est écrite dans `<nom>.sqlite.tmp` puis renommée par `os.replace`,
+    comme `restore_database` et `_write_recent`. Sans cela, une machine éteinte
+    au milieu d'une sauvegarde de 932 Mo laissait un fichier tronqué que
+    `list_backups` présentait comme « la plus récente » — donc celle qu'un
+    utilisateur restaure. Un `.tmp` abandonné, lui, n'est jamais listé.
     """
     source = Path(db_path)
     if db is None and not source.exists():
@@ -645,18 +741,25 @@ def backup_database(
     try:
         directory.mkdir(parents=True, exist_ok=True)
         target = _unique_backup_path(directory, source.stem, label)
-        if db is not None:
-            db.backup_to(target)
-        else:
-            src = sqlite3.connect(str(source))
-            try:
-                dest = sqlite3.connect(str(target))
+        temporary = target.with_name(target.name + ".tmp")
+        try:
+            if db is not None:
+                db.backup_to(temporary)
+            else:
+                src = sqlite3.connect(str(source))
                 try:
-                    src.backup(dest)
+                    dest = sqlite3.connect(str(temporary))
+                    try:
+                        src.backup(dest)
+                    finally:
+                        dest.close()
                 finally:
-                    dest.close()
-            finally:
-                src.close()
+                    src.close()
+            os.replace(temporary, target)
+        except BaseException:
+            with suppress(OSError):  # une copie partielle ne protège rien
+                temporary.unlink(missing_ok=True)
+            raise
     except (OSError, sqlite3.Error) as exc:
         raise ServiceError(f"sauvegarde impossible dans {directory} : {exc}") from exc
     logger.info("sauvegarde → %s", target)
@@ -665,10 +768,14 @@ def backup_database(
 
 
 def _rotate(directory: Path, stem: str, keep: int) -> None:
-    """Supprime les sauvegardes les plus anciennes au-delà de `keep`."""
+    """Supprime les sauvegardes **courantes** de cette campagne au-delà de `keep`.
+
+    Ne voit ni les sauvegardes d'une autre campagne du même dossier, ni les
+    copies de sûreté : voir `_backups_in` et `SAFETY_LABEL_PREFIX`.
+    """
     if keep <= 0:
         return
-    for old in _backups_in(directory, stem)[keep:]:
+    for old in _rotatable_in(directory, stem)[keep:]:
         try:
             old.unlink()
             logger.info("sauvegarde éliminée par rotation : %s", old.name)
@@ -676,16 +783,74 @@ def _rotate(directory: Path, stem: str, keep: int) -> None:
             logger.warning("suppression impossible de %s : %s", old, exc)
 
 
+_CURRENT_TAIL = re.compile(r"^\d{8}-\d{6}(?:_(?P<label>.+))?$")
+"""Ce qui suit `<campagne>_` dans une sauvegarde de `backup_database` :
+l'horodatage de `_stamp()`, puis l'étiquette et le rang éventuels."""
+
+_MIGRATION_TAIL = re.compile(r"^avant_migration_v\d+_\d{8}T\d{6}(?:_\d+)?$")
+"""Idem pour une copie d'avant-migration, écrite par `Database._backup_before_migration`
+(horodatage `AAAAMMJJTHHMMSS`, sans tiret)."""
+
+
+def _backup_tail(path: Path, stem: str) -> str | None:
+    """Ce qui suit `<stem>_` si `path` est une sauvegarde de **cette** campagne, sinon `None`.
+
+    Le nom complet est exigé : `<stem>_` suivi d'un horodatage reconnu. Un simple
+    `glob("audit_*.sqlite")` réclamait aussi les sauvegardes de la campagne
+    `audit_2024_direction` — que l'écran Rapports invite précisément à ranger dans
+    le même dossier. `list_backups` les présentait comme siennes et la rotation
+    d'`audit` les supprimait. Le `.tmp` d'une sauvegarde en cours (ou abandonnée)
+    n'est pas non plus une sauvegarde : il n'a pas le suffixe attendu.
+    """
+    if path.suffix != BACKUP_SUFFIX:
+        return None
+    prefix = f"{stem}_"
+    name = path.stem
+    if not name.startswith(prefix):
+        return None
+    tail = name[len(prefix) :]
+    if not (_CURRENT_TAIL.match(tail) or _MIGRATION_TAIL.match(tail)):
+        return None
+    return tail if path.is_file() else None
+
+
+def _is_safety_copy(tail: str) -> bool:
+    """Une copie de sûreté (`avant_migration_*`, `avant_restauration`, `avant_reanalyse_*`) ?"""
+    if _MIGRATION_TAIL.match(tail):
+        return True
+    match = _CURRENT_TAIL.match(tail)
+    label = str(match.group("label") or "") if match else ""
+    return label.startswith(SAFETY_LABEL_PREFIX)
+
+
 def _backups_in(directory: Path, stem: str) -> list[Path]:
-    """Sauvegardes du dossier, de la plus récente à la plus ancienne."""
+    """Sauvegardes de **cette** campagne, de la plus récente à la plus ancienne.
+
+    Copies de sûreté comprises : elles sont restaurables comme les autres, et
+    l'utilisateur doit les voir. Seule la rotation les ignore (`_rotatable_in`).
+    """
     if not directory.is_dir():
         return []
-    found = [p for p in directory.glob(f"{stem}_*{BACKUP_SUFFIX}") if p.is_file()]
+    found = [p for p in directory.iterdir() if _backup_tail(p, stem) is not None]
     return sorted(found, key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
 
 
+def _rotatable_in(directory: Path, stem: str) -> list[Path]:
+    """Vivier de la rotation : les sauvegardes courantes, hors copies de sûreté."""
+    out: list[Path] = []
+    for path in _backups_in(directory, stem):
+        tail = _backup_tail(path, stem)
+        if tail is not None and not _is_safety_copy(tail):
+            out.append(path)
+    return out
+
+
 def list_backups(db_path: Path) -> list[Path]:
-    """Sauvegardes d'une base, de la plus récente à la plus ancienne."""
+    """Sauvegardes d'une base, de la plus récente à la plus ancienne.
+
+    Seulement celles de cette campagne, même si le dossier en abrite d'autres, et
+    jamais une copie en cours d'écriture (`.sqlite.tmp`).
+    """
     source = Path(db_path)
     return _backups_in(backup_dir_for(source), source.stem)
 
@@ -693,10 +858,17 @@ def list_backups(db_path: Path) -> list[Path]:
 def restore_database(db_path: Path, backup_path: Path) -> Path:
     """Restaure une sauvegarde par-dessus la base et rend le chemin restauré.
 
-    La base courante est d'abord sauvegardée (étiquette `avant_restauration`),
-    puis le fichier est remplacé en deux temps (`<base>.tmp` puis `os.replace`,
-    atomique sous Windows comme sous POSIX). Les journaux `-wal`/`-shm` de
-    l'ancienne base sont retirés pour ne pas être rejoués sur la nouvelle.
+    La sauvegarde est **d'abord** recopiée dans `<base>.tmp`, ensuite seulement la
+    base courante est mise de côté (étiquette `avant_restauration`), et enfin le
+    `.tmp` prend la place de la base par `os.replace` (atomique sous Windows comme
+    sous POSIX). Les journaux `-wal`/`-shm` de l'ancienne base sont retirés pour ne
+    pas être rejoués sur la nouvelle.
+
+    Cet ordre n'est pas un détail : la sauvegarde préalable déclenche une rotation,
+    et la rotation supprimait le fichier que l'on est en train de restaurer dès
+    qu'il était le plus ancien des dix. La restauration échouait (« No such file or
+    directory ») **et** la copie visée était perdue — juste au moment où l'on comptait
+    dessus. Copier avant de tourner met la source à l'abri quoi qu'il advienne.
 
     Aucun verrou n'est posé : c'est à l'appelant de s'assurer qu'aucun run ni
     aucune interface n'a la base ouverte (sinon le remplacement échoue sous
@@ -715,12 +887,12 @@ def restore_database(db_path: Path, backup_path: Path) -> Path:
     except sqlite3.Error as exc:
         raise ServiceError(f"sauvegarde illisible ({source.name}) : {exc}") from exc
 
-    if target.exists():
-        backup_database(target, label="avant_restauration")
     temporary = target.with_name(target.name + ".tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, temporary)
+        shutil.copy2(source, temporary)  # avant toute rotation : voir la docstring
+        if target.exists():
+            backup_database(target, label="avant_restauration")
         os.replace(temporary, target)
         for sidecar in (
             target.with_name(target.name + "-wal"),
@@ -728,8 +900,13 @@ def restore_database(db_path: Path, backup_path: Path) -> Path:
         ):
             sidecar.unlink(missing_ok=True)
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise ServiceError(f"restauration impossible vers {target} : {exc}") from exc
+    except BaseException:  # `ServiceError` de la sauvegarde préalable, interruption…
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        raise
     logger.info("restauration : %s → %s", source, target)
     return target
 

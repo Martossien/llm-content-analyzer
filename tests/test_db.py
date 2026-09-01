@@ -1151,3 +1151,208 @@ def test_le_compromis_sur_les_accents_est_celui_qui_est_documente(tmp_path: Path
         exact = [str(r["name"]) for r in _reference_python(db)]
         assert sorted(approche) == sorted(exact), "les mêmes lignes, quel que soit l'ordre"
         assert sorted(approche, key=str.lower) == sorted(exact, key=str.lower)
+
+
+# ------------------- lire une campagne archivée que rien ne peut plus écrire
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows ignore les bits POSIX sur les fichiers")
+def test_une_campagne_en_lecture_seule_se_lit_quand_meme(tmp_path: Path) -> None:
+    """`PRAGMA journal_mode=WAL` est une écriture : refusé, il interdisait de **lire**.
+
+    Support en écriture protégée, dossier verrouillé, copie déposée sur un partage
+    en lecture : rendre un rapport sur une campagne close est un besoin ordinaire,
+    et rien n'y écrit. Les **deux** formes du refus sont couvertes, et elles ne se
+    ressemblent pas :
+
+    1. base hors WAL (campagne archivée, copie faite sans son `-wal`) et fichier en
+       lecture seule : c'est le `PRAGMA` lui-même qui écrit, et qui est refusé ;
+    2. base en WAL et **dossier** verrouillé : SQLite ne peut plus créer le fichier
+       `-shm` dont le WAL a besoin, et refuse jusqu'au `SELECT` — seul un
+       `mode=ro&immutable=1` lit encore.
+    """
+    base = tmp_path / "archive" / "campagne.sqlite"
+    with Database(base) as db:
+        scan = db.start_scan("scan.csv")
+        db.upsert_files([_row("note.txt")], scan)
+        db.finish_scan(scan, total=1, new=1, updated=0, unchanged=0, invalid=0)
+        assert db.read_only is False, "le cas normal n'est pas dégradé"
+        assert str(db.query("PRAGMA journal_mode")[0][0]).lower() == "wal"
+
+    def controle(db: Database) -> None:
+        assert db.read_only is True
+        assert db.schema_version == SCHEMA_VERSION
+        assert db.counts()["files"] == 1
+        assert [f.name for f in db.iter_files()] == ["note.txt"]
+        with pytest.raises(sqlite3.OperationalError, match="lecture seule"), db.bulk_load():
+            pass  # pragma: no cover — `bulk_load` refuse avant d'entrer
+
+    # 1. base ramenée hors WAL (archive), fichier en lecture seule
+    hors_wal = sqlite3.connect(str(base))
+    hors_wal.execute("PRAGMA journal_mode=DELETE")
+    hors_wal.close()
+    base.chmod(0o444)
+    try:
+        with Database(base) as db:
+            controle(db)
+    finally:
+        base.chmod(0o644)
+
+    # 2. base en WAL, dossier verrouillé : même la lecture était refusée
+    sqlite3.connect(str(base)).execute("PRAGMA journal_mode=WAL")
+    base.chmod(0o444)
+    base.parent.chmod(0o555)
+    try:
+        with Database(base) as db:
+            controle(db)
+    finally:
+        base.parent.chmod(0o755)
+        base.chmod(0o644)
+
+    # et la base redevient pleinement ouvrable une fois les droits rendus
+    with Database(base) as db:
+        assert db.read_only is False
+        db.set_file_status(next(iter(db.iter_files())).id, FileStatus.DONE, None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows ignore les bits POSIX sur les répertoires")
+def test_une_base_a_creer_refuse_toujours_clairement_un_dossier_verrouille(
+    tmp_path: Path,
+) -> None:
+    """La tolérance ne couvre pas la création : `docia init` garde son message net.
+
+    Ouvrir « en lecture » une base qui n'existe pas encore rendrait une campagne
+    sans table, dont la première requête échouerait bien plus loin et bien moins
+    clairement. Le refus d'origine est relayé tel quel.
+    """
+    dossier = tmp_path / "verrouille"
+    dossier.mkdir()
+    dossier.chmod(0o555)
+    try:
+        with pytest.raises((sqlite3.OperationalError, OSError)):
+            Database(dossier / "neuve.sqlite").close()
+    finally:
+        dossier.chmod(0o755)
+
+
+# ------------------- réanalyse : les deux écritures, ou aucune
+
+
+class _ConnexionQuiCoupe:
+    """Connexion qui lève sur une instruction donnée : une coupure en pleine transaction."""
+
+    def __init__(self, conn: sqlite3.Connection, motif: str) -> None:
+        self._conn, self._motif = conn, motif
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if self._motif in sql:
+            raise sqlite3.OperationalError("coupure simulée")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def test_reset_for_reanalysis_fait_les_deux_ecritures_ou_aucune(tmp_path: Path) -> None:
+    """Remise à `pending` **et** suppression des analyses : une seule transaction.
+
+    `service.reanalyze` faisait les deux écritures en deux transactions. Une
+    coupure entre elles laissait la campagne dans un état intermédiaire — dans un
+    sens `done=60, analyses=0`, une campagne qui s'annonce à 100 % analysée et que
+    plus aucune commande ordinaire ne reprend. La fenêtre est ici fermée : le test
+    coupe au milieu et vérifie que **rien** n'a bougé.
+    """
+    with Database(tmp_path / "reanalyse.sqlite") as db:
+        scan = db.start_scan("scan.csv")
+        db.upsert_files([_row(f"f{i}.txt") for i in range(3)], scan)
+        db.finish_scan(scan, total=3, new=3, updated=0, unchanged=0, invalid=0)
+        fichiers = sorted(db.iter_files(), key=lambda f: f.name)
+        for f in fichiers:
+            db.store_analysis(f.id, None, 1, prompt_hash="p", model="m", analysis=_analysis(f.name))
+        ids = [f.id for f in fichiers]
+        assert db.counts()["done"] == 3
+        assert db.query_values("SELECT COUNT(*) FROM analyses")[0][0] == 3
+
+        # 1. coupure au milieu : la base reste exactement dans son état d'avant
+        vraie = db._conn
+        db._conn = _ConnexionQuiCoupe(vraie, "DELETE FROM analyses")  # type: ignore[assignment]
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="coupure simulée"):
+                db.reset_for_reanalysis(ids, prompt_hash="p", model="m")
+        finally:
+            db._conn = vraie
+        assert db.counts()["done"] == 3, "aucun fichier remis à analyser"
+        assert db.query_values("SELECT COUNT(*) FROM analyses")[0][0] == 3, "aucune analyse perdue"
+
+        # 2. sans coupure : les deux écritures passent ensemble
+        assert db.reset_for_reanalysis(ids, prompt_hash="p", model="m") == 3
+        counts = db.counts()
+        assert (counts["pending"], counts["done"], counts["analyses"]) == (3, 0, 0)
+        assert db.query_values("SELECT COUNT(*) FROM analyses")[0][0] == 0
+
+        # 3. la clé (prompt, modèle) est respectée, et une liste vide ne coûte rien
+        assert db.reset_for_reanalysis([], prompt_hash="p", model="m") == 0
+        for f in fichiers:
+            db.store_analysis(f.id, None, 1, prompt_hash="p", model="m", analysis=_analysis(f.name))
+        assert db.reset_for_reanalysis(ids, prompt_hash="autre", model="m") == 0
+        assert db.query_values("SELECT COUNT(*) FROM analyses")[0][0] == 3
+        assert db.counts()["pending"] == 3, "les fichiers repartent quand même à analyser"
+
+
+def test_campaign_kind_reconnait_neuve_docia_et_etrangere(tmp_path: Path) -> None:
+    """Le contrôle qui empêche de greffer douze tables docia dans la base d'un autre logiciel."""
+    absente = tmp_path / "pas_la.sqlite"
+    assert db_module.campaign_kind(absente) == db_module.CAMPAIGN_NEW
+
+    vide = tmp_path / "vide.sqlite"
+    vide.touch()
+    assert db_module.campaign_kind(vide) == db_module.CAMPAIGN_NEW  # 0 octet : utilisable
+
+    sqlite_vide = tmp_path / "sqlite_vide.sqlite"
+    sqlite3.connect(str(sqlite_vide)).close()
+    assert db_module.campaign_kind(sqlite_vide) == db_module.CAMPAIGN_NEW
+
+    campagne = tmp_path / "campagne.sqlite"
+    Database(campagne).close()
+    assert db_module.campaign_kind(campagne) == db_module.CAMPAIGN_DOCIA
+
+    contacts = tmp_path / "contacts.sqlite"
+    con = sqlite3.connect(str(contacts))
+    con.execute("CREATE TABLE contacts (nom TEXT)")
+    con.commit()
+    con.close()
+    assert db_module.campaign_kind(contacts) == db_module.CAMPAIGN_FOREIGN
+
+    texte = tmp_path / "note.txt"
+    texte.write_text("ceci n'est pas une base", encoding="utf-8")
+    assert db_module.campaign_kind(texte) == db_module.CAMPAIGN_FOREIGN
+
+    # et rien n'a été créé ni modifié au passage
+    assert not absente.exists()
+    assert texte.read_text(encoding="utf-8") == "ceci n'est pas une base"
+
+
+def test_la_fenetre_et_la_cli_jugent_une_campagne_de_la_meme_facon(tmp_path: Path) -> None:
+    """`gui.app.campaign_kind` et `db.campaign_kind` doivent rendre le même verdict.
+
+    Le contrôle existait **seulement** dans la fenêtre ; il vit maintenant dans
+    `docia.db`, d'où la CLI peut l'atteindre sans dépendre de l'extra `gui`. Les
+    deux copies coexistent le temps que `gui/app.py` — hors du périmètre de cette
+    correction — se contente de déléguer. D'ici là, ce test interdit qu'elles
+    divergent.
+    """
+    app = pytest.importorskip("docia.gui.app", reason="extra docia[gui] absent")
+    assert (app.NEW, app.DOCIA, app.FOREIGN) == (
+        db_module.CAMPAIGN_NEW,
+        db_module.CAMPAIGN_DOCIA,
+        db_module.CAMPAIGN_FOREIGN,
+    )
+    campagne = tmp_path / "campagne.sqlite"
+    Database(campagne).close()
+    contacts = tmp_path / "contacts.sqlite"
+    con = sqlite3.connect(str(contacts))
+    con.execute("CREATE TABLE contacts (nom TEXT)")
+    con.commit()
+    con.close()
+    for cible in (tmp_path / "absente.sqlite", campagne, contacts, tmp_path):
+        assert app.campaign_kind(cible) == db_module.campaign_kind(cible), cible

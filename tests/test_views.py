@@ -300,6 +300,35 @@ def test_by_directory_groups_two_levels(db: Database) -> None:
     assert rows["\\\\srv\\rh\\dossier"].files == 1
 
 
+def test_status_summary_borne_les_raisons_sans_le_taire(tmp_path: Path) -> None:
+    """La borne sur les raisons d'exclusion est explicite, paramétrable, et annoncée.
+
+    Elle valait `LIMIT 10` en dur dans le SQL, sans que rien ne signale la coupe :
+    un rapport qui justifie des suppressions taisait des motifs de **non**-analyse.
+    Les raisons d'erreur sont du texte libre (`Database.set_file_status`), donc de
+    cardinalité non bornée : la borne reste — mais elle se dit.
+    """
+    with Database(tmp_path / "raisons.sqlite") as database:
+        scan = database.start_scan("scan.csv")
+        database.upsert_files([_row(f"f{i}.pdf", fast_hash=f"h{i}") for i in range(25)], scan)
+        database.finish_scan(scan, total=25, new=25, updated=0, unchanged=0, invalid=0)
+        for i, fichier in enumerate(sorted(database.iter_files(), key=lambda f: f.name)):
+            database.set_file_status(fichier.id, FileStatus.ERROR, f"extraction : panne n°{i:02d}")
+
+        defaut = views.status_summary(database)
+        assert len(defaut.reasons) == views.REASON_TOP == 10
+        assert defaut.reasons_total == 25
+        assert defaut.reasons_hidden == 15, "le rapport peut dire ce qu'il ne montre pas"
+
+        trois = views.status_summary(database, reason_limit=3)
+        assert len(trois.reasons) == 3
+        assert (trois.reasons_total, trois.reasons_hidden) == (25, 22)
+
+        tout = views.status_summary(database, reason_limit=None)
+        assert len(tout.reasons) == 25
+        assert (tout.reasons_total, tout.reasons_hidden) == (25, 0)
+
+
 # ------------------------------------------------------------------ risque
 
 
@@ -453,6 +482,11 @@ def _generated_directories(count: int, seed: int = 11) -> list[tuple[str, str]]:
 
     Les 19 cas choisis à la main ne suffisaient pas : le défaut ne se déclenche que
     sur un séparateur vide, forme qu'aucun d'eux ne portait.
+
+    Les `base` engendrées descendent aussi **dans** l'arborescence
+    (`\\\\srv\\part\\Direction\\RH`), la forme que prend une campagne cadrée sur un
+    sous-arbre. C'est la profondeur que la mémoïsation supposait toujours égale à
+    deux — 2 000 chemins n'en rendaient plus que 304 étiquettes distinctes sur 500.
     """
     import random
 
@@ -469,7 +503,10 @@ def _generated_directories(count: int, seed: int = 11) -> list[tuple[str, str]]:
         directory = head + sep.join(parts)
         if rng.random() < 0.15:
             directory += rng.choice(["\\", "/", " "])
-        base = rng.choice(["", "", "", f"\\\\{parts[0]}\\{parts[1]}", parts[1], "X"])
+        profond = "\\\\" + "\\".join(p for p in parts[:4] if p)
+        base = rng.choice(
+            ["", "", "", f"\\\\{parts[0]}\\{parts[1]}", parts[1], "X", profond, profond]
+        )
         out.append((base, directory))
     return out
 
@@ -504,6 +541,58 @@ def test_axis_labeller_matches_direct_labels(depth: int) -> None:
     ):
         label_of = views._axis_labeller(axis, depth)  # noqa: SLF001
         assert [label_of(row) for row in rows] == expected
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2, 3, 5])
+def test_le_regroupement_memoise_egale_le_regroupement_ligne_a_ligne(depth: int) -> None:
+    """Propriété : le tableau « Répertoires » compte comme un regroupement naïf.
+
+    Le test frère compare des **étiquettes** ; celui-ci compare le **regroupement**,
+    c'est-à-dire ce que la ligne du tableau annonce : combien de répertoires
+    distincts, et combien de fichiers sur chacun. Les deux se lisent différemment —
+    une étiquette réutilisée à tort ne fait pas qu'égarer un nom, elle **additionne
+    les fichiers d'un répertoire sur la ligne d'un autre**, et fait disparaître le
+    second du tableau.
+
+    Mesuré sur ces 2 000 chemins avant la correction, à `depth=1` : 304 lignes au
+    lieu de 500, soit 196 répertoires évaporés, leurs fichiers reportés ailleurs.
+    Sur une sortie qui justifie des suppressions, se tromper de répertoire est
+    exactement l'erreur à ne pas faire.
+    """
+    from collections import Counter
+
+    rows = sorted(_generated_directories(2_000))
+    label_of = views._axis_labeller("directory", depth)  # noqa: SLF001
+    memoise = Counter(label_of(row) for row in rows)
+    ligne_a_ligne = Counter(views.directory_label(base, path, depth) for base, path in rows)
+    assert memoise == ligne_a_ligne
+    assert len(memoise) == len(ligne_a_ligne), "des répertoires distincts ont fusionné"
+
+
+def test_le_tableau_repertoires_ne_fusionne_pas_un_sous_arbre(tmp_path: Path) -> None:
+    """Campagne cadrée sur un sous-arbre : chaque répertoire garde sa ligne.
+
+    `base` vaut alors `\\\\srv\\part\\Direction\\RH` — quatre niveaux, pas deux. Le
+    préfixe mémoïsé n'en couvrait que `depth + 2`, donc deux de moins que
+    l'étiquette n'en consomme : `…\\RH\\Paie` héritait de l'étiquette de
+    `…\\RH\\Contrats`. Le tableau annonçait **une** ligne de quatre fichiers là où
+    il y a quatre répertoires d'un fichier.
+    """
+    base = "\\\\srv\\part\\Direction\\RH"
+    dossiers = ("Contrats", "Paie", "Recrutement", "Sanctions")
+    with Database(tmp_path / "sous_arbre.sqlite") as database:
+        scan = database.start_scan("scan.csv")
+        database.upsert_files(
+            [
+                _row(f"{nom}.pdf", base=base, directory=f"{base}\\{nom}", fast_hash=f"h{i}")
+                for i, nom in enumerate(dossiers)
+            ],
+            scan,
+        )
+        database.finish_scan(scan, total=4, new=4, updated=0, unchanged=0, invalid=0)
+        lignes = views.by_directory(database, depth=1)
+    assert sorted(ligne.label for ligne in lignes) == [f"{base}\\{nom}" for nom in dossiers]
+    assert [ligne.files for ligne in lignes] == [1, 1, 1, 1]
 
 
 def test_directory_label_depth() -> None:
@@ -686,6 +775,67 @@ def test_la_regle_derniere_analyse_est_la_meme_partout() -> None:
     # `docia.db` ne peut pas importer `docia.views` (le cycle est dans l'autre sens) :
     # sa copie est comparée mot à mot, en attendant qu'elle descende dans `docia.db`.
     assert attendu_f in _sql_normalise(db_module._LATEST_JOINS)  # noqa: SLF001
+    # Quatrième formulation : celle des compteurs (`classification_summary`), qui
+    # partait des analyses et comptait donc **toutes** les lignes de la table.
+    assert attendu_a in _sql_normalise(db_module._IS_LATEST)  # noqa: SLF001
+
+
+def test_les_trois_ecrans_annoncent_les_memes_comptes_de_classification(tmp_path: Path) -> None:
+    """`docia status`, le rapport et l'onglet Risque, sur une base réanalysée.
+
+    Les trois chemins comptaient différemment : `classification_summary` et
+    `counts()["analyses"]` totalisaient les **lignes** de la table `analyses`,
+    historique des réanalyses compris, quand le rapport comptait les **fichiers**
+    dont l'analyse fait foi. Une campagne entièrement réanalysée — le cas d'un
+    changement de prompt ou de modèle — affichait donc le double dans la console
+    et dans la fenêtre, et le bon chiffre dans le rapport HTML, sur la même base.
+    Chaque écran justifie des suppressions : ils doivent compter la même chose.
+    """
+    from docia.service import campaign_status
+
+    classes = ("C0", "C1", "C2", "C3")
+    with Database(tmp_path / "reanalysee.sqlite") as database:
+        scan = database.start_scan("scan.csv")
+        database.upsert_files(
+            [_row(f"doc{i}.pdf", fast_hash=f"h{i}") for i in range(len(classes))], scan
+        )
+        database.finish_scan(scan, total=4, new=4, updated=0, unchanged=0, invalid=0)
+        fichiers = sorted(database.iter_files(), key=lambda f: f.name)
+        for version in (1, 2):  # toute la campagne est analysée deux fois
+            for fichier, classe in zip(fichiers, classes, strict=True):
+                database.store_analysis(
+                    fichier.id,
+                    None,
+                    version,
+                    prompt_hash=f"p{version}",
+                    model="m",
+                    analysis=_analysis(fichier.name, security=classe, rgpd="high"),
+                )
+        assert database.query_values("SELECT COUNT(*) FROM analyses")[0][0] == 8, "8 lignes"
+
+        repartition = database.classification_summary()
+        etat = campaign_status(database)
+        apercu = views.overview(database, today=TODAY)
+        matrice = views.classification_matrix(database, axis="share")
+
+    # 1. la répartition ne compte chaque fichier qu'une fois
+    assert repartition["security"] == dict.fromkeys(classes, 1)
+    assert sum(repartition["security"].values()) == 4
+    assert sum(repartition["rgpd"].values()) == 4
+
+    # 2. `docia status`, `docia status --json` et l'onglet Risque lisent celle-là
+    assert etat.security == repartition["security"]
+    assert etat.rgpd == repartition["rgpd"]
+    assert etat.analyses == 4
+
+    # 3. le rapport HTML tombe sur les mêmes chiffres, dérivés des mêmes classes
+    assert apercu.analyzed == etat.analyses
+    assert apercu.sensitive_files == repartition["security"]["C2"] + repartition["security"]["C3"]
+    assert apercu.rgpd_at_risk == repartition["rgpd"].get("high", 0)
+
+    # 4. et la matrice de risque du rapport, quatrième formulation, aussi
+    assert sum(ligne.analyzed for ligne in matrice) == 4
+    assert sum(ligne.sensitive for ligne in matrice) == apercu.sensitive_files
 
 
 def test_les_vues_le_journal_et_lexport_designent_la_meme_derniere_analyse(

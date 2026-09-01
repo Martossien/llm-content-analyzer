@@ -172,6 +172,22 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
         "pending": plan_report.pending,
         "excluded": plan_report.excluded,
     }
+    # Le journal `docia.log` est unique pour tout le poste : sans le chemin de la
+    # base, on ne sait pas de quelle campagne parle la ligne (voir `cli.CAMPAIGN_LOG`).
+    from docia.cli import log_campaign
+
+    log_campaign(
+        cfg,
+        "scan de %s fichiers → %s — %s nouveaux, %s mis à jour, %s invalides,"
+        " %s à analyser, %s exclus",
+        result.files,
+        result.csv_path,
+        report.new,
+        report.updated,
+        report.invalid,
+        plan_report.pending,
+        plan_report.excluded,
+    )
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:

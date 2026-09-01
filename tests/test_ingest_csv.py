@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 from docia.db import FILES_INDEXES, Database
 from docia.ingest.smbeagle_csv import (
+    SUSPECT_ZERO_MIN,
     CsvLineError,
     ImportProgress,
     import_csv,
@@ -487,6 +489,133 @@ def test_taille_illisible_comptee_dans_le_bilan(tmp_path: Path) -> None:
         report = import_csv(db, csv, strict=False)
     assert (report.total, report.invalid) == (3, 0)
     assert report.size_defaulted == 2
+
+
+def _csv_tailles(chemin: Path, tailles: list[str]) -> Path:
+    """CSV de N lignes valides, une taille imposée par ligne."""
+    chemin.write_text(
+        HEADER_LINE
+        + "\n"
+        + "\n".join(quoted_line(f'"doc{i:03d}.pdf"', file_size=t) for i, t in enumerate(tailles))
+        + "\n",
+        encoding="utf-8",
+    )
+    return chemin
+
+
+def test_partage_entier_a_zero_octet_est_signale(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CRITIQUE : un CSV produit sans `--sizefile` vidait la campagne en silence.
+
+    Les scanners antérieurs au 01/09 écrivaient `0` — et non un champ vide — quand
+    la taille n'était pas collectée. `size_unreadable` ne se déclenchait donc pas,
+    `size_defaulted` restait à 0, l'avertissement ne sortait pas, et `plan` excluait
+    les 100 % « fichier trop petit » sans dire pourquoi. Le guide invite pourtant à
+    importer un CSV « fait ailleurs ».
+    """
+    csv = _csv_tailles(tmp_path / "sans_sizefile.csv", ["0"] * SUSPECT_ZERO_MIN)
+    with caplog.at_level(logging.WARNING), Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+
+    assert (report.total, report.invalid, report.size_defaulted) == (SUSPECT_ZERO_MIN, 0, 0)
+    assert report.size_zero == SUSPECT_ZERO_MIN
+    assert "--sizefile" in caplog.text
+    assert "trop petit" in caplog.text
+
+
+def test_un_seul_fichier_non_vide_suffit_a_taire_le_soupcon(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Le soupçon ne porte que sur le partage *entièrement* à zéro.
+
+    Un partage réel contient des fichiers vides ; les compter n'autorise pas à
+    crier au scan raté. Un seul octet quelque part et l'hypothèse tombe.
+    """
+    csv = _csv_tailles(tmp_path / "presque.csv", ["0"] * (SUSPECT_ZERO_MIN - 1) + ["4096"])
+    with caplog.at_level(logging.WARNING), Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+
+    assert report.size_zero == SUSPECT_ZERO_MIN - 1
+    assert "--sizefile" not in caplog.text
+
+
+def test_petit_lot_tout_a_zero_ne_declenche_pas_l_alerte(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Sous le seuil, « tout à zéro » reste un dossier de test plausible."""
+    csv = _csv_tailles(tmp_path / "poignee.csv", ["0"] * (SUSPECT_ZERO_MIN - 1))
+    with caplog.at_level(logging.WARNING), Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+
+    assert report.size_zero == SUSPECT_ZERO_MIN - 1
+    assert "--sizefile" not in caplog.text
+
+
+def test_taille_absente_et_taille_nulle_ne_se_confondent_pas(tmp_path: Path) -> None:
+    """Champ vide et `0` sont deux faits différents, comptés séparément.
+
+    C'est toute la correction du 01/09 côté scanner : « je n'ai pas collecté la
+    taille » ne doit plus s'écrire comme « ce fichier est vide ».
+    """
+    csv = _csv_tailles(tmp_path / "mixte.csv", ["", "0", "12"])
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+
+    assert (report.size_defaulted, report.size_zero) == (1, 1)
+
+
+def _csv_cp1252(chemin: Path) -> Path:
+    """CSV réenregistré depuis Excel en page de codes Windows — cas courant."""
+    ligne = quoted_line('"présentation.pdf"').replace(r"\\srv\part$\docs", r"\\srv\Compta été")
+    chemin.write_bytes((HEADER_LINE + "\n" + ligne + "\n").encode("cp1252"))
+    return chemin
+
+
+def test_chemin_non_utf8_est_compte_et_annonce(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """GRAVE : `errors="replace"` acceptait des chemins qui ne désignent rien.
+
+    « Compta été » lu en UTF-8 donne « Compt� �t� ». La ligne était acceptée,
+    `invalid=0`, et le chemin ressortait dans les exports comme candidat à la
+    suppression — sans qu'aucun compteur n'existe pour le signaler.
+    """
+    csv = _csv_cp1252(tmp_path / "excel.csv")
+    with caplog.at_level(logging.WARNING), Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=False)
+
+    assert (report.total, report.invalid, report.mojibake) == (1, 0, 1)
+    assert "n'est pas en UTF-8" in caplog.text
+
+
+def test_chemin_non_utf8_est_refuse_en_mode_strict(tmp_path: Path) -> None:
+    """Le mode strict existe pour ça : ne rien laisser entrer d'invérifiable."""
+    csv = _csv_cp1252(tmp_path / "excel.csv")
+    with Database(tmp_path / "docia.sqlite") as db:
+        report = import_csv(db, csv, strict=True)
+
+    assert (report.total, report.invalid) == (0, 1)
+    assert "non décodable en UTF-8" in report.errors[0].reason
+
+
+def test_fichier_utf16_nomme_sa_cause_au_lieu_du_mojibake(tmp_path: Path) -> None:
+    """Un CSV UTF-16 était bien refusé, mais sur 1 400 caractères de mojibake.
+
+    Le message énumérait 19 colonnes illisibles (« ��N a m e » au lieu de
+    « Name ») sans jamais dire la seule chose utile : ce fichier n'est pas en
+    UTF-8. L'utilisateur n'avait aucun moyen d'en tirer quoi que ce soit.
+    """
+    csv = tmp_path / "utf16.csv"
+    csv.write_bytes((HEADER_LINE + "\n" + quoted_line('"note.pdf"') + "\n").encode("utf-16"))
+
+    items = list(read_smbeagle_csv(csv, strict=False))
+
+    assert len(items) == 1, "la lecture s'arrête : les colonnes ne sont plus à leur place"
+    erreur = items[0]
+    assert isinstance(erreur, CsvLineError)
+    assert "n'est pas encodé en UTF-8" in erreur.reason
+    assert len(erreur.reason) < 300, "un message de 1 400 caractères n'est pas un message"
 
 
 def test_ligne_sans_nom_ni_dossier_est_rejetee(tmp_path: Path) -> None:

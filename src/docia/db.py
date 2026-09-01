@@ -53,6 +53,55 @@ def backup_dir_for(db_path: Path) -> Path:
     return db_path.with_name(db_path.name + BACKUP_DIR_SUFFIX)
 
 
+CAMPAIGN_NEW = "neuve"
+"""Aucune base à ce chemin, ou fichier SQLite vide : `Database` peut la créer."""
+
+CAMPAIGN_DOCIA = "docia"
+"""Base docia existante (`meta.schema_version` présent)."""
+
+CAMPAIGN_FOREIGN = "étrangère"
+"""Fichier existant qui n'est pas une campagne docia : ne rien y greffer."""
+
+
+def campaign_kind(target: str | Path) -> str:
+    """`neuve`, `docia` ou `étrangère` — **sans rien créer ni modifier**.
+
+    `Database(chemin)` crée le dossier manquant, le fichier manquant, et greffe les
+    tables docia dans n'importe quel SQLite ouvrable. Une faute de frappe dans
+    `--db` fabriquait donc une base vide, et `docia status` ou `docia report`
+    annonçaient « 0 fichier, 0 sensible » en code retour 0, sur une campagne
+    inventée : pour un outil dont la sortie justifie des suppressions, c'est le
+    pire résultat possible. Les commandes de **lecture** regardent donc avant
+    d'ouvrir (`cli._require_existing_campaign`) ; `init`, `ingest` et `scan`
+    gardent le droit de créer.
+
+    Même contrôle que `gui.app.campaign_kind`, qui a découvert le danger sur une
+    base « contacts » d'un autre logiciel enrichie de douze tables docia pendant
+    que le journal affirmait « aucune donnée effacée ».
+    """
+    path = Path(target)
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return CAMPAIGN_NEW
+        con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except (OSError, ValueError, sqlite3.Error):
+        return CAMPAIGN_FOREIGN
+    try:
+        names = {
+            str(r[0]) for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if not names:
+            return CAMPAIGN_NEW  # fichier SQLite vide : utilisable comme campagne neuve
+        if "meta" not in names:
+            return CAMPAIGN_FOREIGN
+        row = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        return CAMPAIGN_DOCIA if row else CAMPAIGN_FOREIGN
+    except sqlite3.Error:
+        return CAMPAIGN_FOREIGN  # pas un fichier SQLite (texte, archive, base corrompue)
+    finally:
+        con.close()
+
+
 def _stamp() -> str:
     """Horodatage local `AAAAMMJJTHHMMSS` pour nommer une sauvegarde."""
     return datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005 - nom de fichier, heure locale
@@ -665,6 +714,17 @@ _LATEST_JOINS = (
 
 _LATEST_FROM = " FROM files f" + _LATEST_JOINS
 
+_IS_LATEST = (
+    "a.id = (SELECT id FROM analyses WHERE file_id = a.file_id"
+    " ORDER BY created_at DESC, id DESC LIMIT 1)"
+)
+"""Même règle que `_LATEST_JOINS`, mais en partant des analyses (`analyses a`).
+
+Sert aux compteurs de `counts` et `classification_summary`, qui n'ont pas besoin
+de la table `files`. Copie textuelle de `views.latest_analysis_sql("a.file_id")` —
+`docia.db` ne peut pas importer `docia.views` (le cycle est dans l'autre sens) ;
+`tests/test_views.py` compare les deux mot à mot."""
+
 _DISPLAY_ORDER_SQL = """
     CASE WHEN COALESCE(a.security_classification,'') <> '' THEN 0
          WHEN f.status='error' THEN 1
@@ -742,24 +802,108 @@ _PLAN_KEEP_SQL = (
 class Database:
     """Accès à la base. Utiliser comme gestionnaire de contexte ou appeler `close()`."""
 
+    read_only: bool
+    """Vrai quand la base n'a pu être ouverte qu'en **lecture** (voir `_open_pragmas`)."""
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
         try:
-            self._migrate()
-            self._ensure_files_indexes()
+            self.read_only = self._open_pragmas()
+            if not self.read_only:
+                self._migrate()
+                self._ensure_files_indexes()
         except BaseException:
             # Ouverture refusée (sauvegarde impossible, migration interrompue) : sans
             # ce `close`, la connexion — et son verrou WAL — survivait à l'exception
             # sans qu'aucun objet ne la référence.
             self._conn.close()
             raise
+
+    _WRITE_PRAGMAS = ("PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL")
+    """Réglages qui **écrivent** dans la base : refusés, ils n'interdisent pas de lire."""
+
+    _READ_PRAGMAS = ("PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000")
+    """Réglages de session : acceptés même sur une base en lecture seule."""
+
+    def _open_pragmas(self) -> bool:
+        """Applique les réglages d'ouverture. Rend `True` si la base est en lecture seule.
+
+        `PRAGMA journal_mode=WAL` est une **écriture**. Inconditionnel, il interdisait
+        jusqu'à la simple lecture d'une campagne archivée : support en écriture
+        protégée, dossier verrouillé, copie déposée sur un partage en lecture. Rendre
+        un rapport sur une campagne close est pourtant un besoin ordinaire, et rien
+        n'y écrit.
+
+        Le cas normal ne change pas d'un pouce : les deux `PRAGMA` passent, la base
+        s'ouvre en écriture, migrations et index compris. Le repli n'est tenté que si
+        SQLite refuse, et seulement pour une base docia **déjà au schéma courant** :
+        une base neuve ou plus ancienne a besoin d'écrire (création des tables,
+        migration), et son refus est relayé tel quel — c'est le message d'erreur en
+        une ligne que `cli.main` sait déjà rendre.
+        """
+        try:
+            for pragma in self._WRITE_PRAGMAS:
+                self._conn.execute(pragma)
+        except sqlite3.OperationalError as refus:
+            self._reopen_read_only(refus)
+            read_only = True
+        else:
+            read_only = False
+        for pragma in self._READ_PRAGMAS:
+            self._conn.execute(pragma)
+        return read_only
+
+    def _reopen_read_only(self, refus: sqlite3.OperationalError) -> None:
+        """Rouvre en lecture une base qui refuse l'écriture, ou relaie le refus."""
+        if not self._can_read():
+            # Base déjà en WAL dont le dossier est verrouillé : SQLite exige un
+            # fichier `-shm` qu'il ne peut pas créer, et refuse jusqu'au `SELECT`.
+            # `immutable=1` est le seul mode qui lise encore — il promet que le
+            # fichier ne bougera pas, ce qui est exactement le cas d'une campagne
+            # archivée sur un support protégé en écriture.
+            try:
+                conn = sqlite3.connect(
+                    self.path.resolve().as_uri() + "?mode=ro&immutable=1",
+                    uri=True,
+                    check_same_thread=False,
+                )
+            except (OSError, ValueError, sqlite3.Error):
+                raise refus from None
+            conn.row_factory = sqlite3.Row
+            self._conn.close()
+            self._conn = conn
+        version = self._readable_schema_version()
+        if version != SCHEMA_VERSION:
+            # Ni base docia (0), ni schéma courant : il faudrait écrire pour la créer
+            # ou la migrer. Le refus d'origine dit la vraie cause.
+            raise refus
+        logger.warning(
+            "campagne %s ouverte en lecture seule (écriture refusée : %s)", self.path, refus
+        )
+
+    def _can_read(self) -> bool:
+        try:
+            self._conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return False
+        return True
+
+    def _readable_schema_version(self) -> int:
+        """Version de schéma, ou 0 si la table `meta` est absente ou illisible."""
+        try:
+            return self.schema_version
+        except sqlite3.Error:
+            return 0
+
+    def _refuse_if_read_only(self, operation: str) -> None:
+        """Refuse une écriture d'emblée sur une base ouverte en lecture seule."""
+        if self.read_only:
+            raise sqlite3.OperationalError(
+                f"{operation} impossible : {self.path} est ouverte en lecture seule"
+            )
 
     # ------------------------------------------------------------------ infra
     def __enter__(self) -> Database:
@@ -1014,7 +1158,13 @@ class Database:
             analyze: rejoue `ANALYZE` après la reconstruction (statistiques du
                 planificateur). Inutile si l'appelant enchaîne sur `finish_scan`,
                 qui le fait déjà.
+
+        Raises:
+            sqlite3.OperationalError: base ouverte en lecture seule. Le refus arrive
+                **avant** la suppression du premier index : sans lui, `bulk_load`
+                échouait au milieu de son travail sur une base non écrivable.
         """
+        self._refuse_if_read_only("chargement en masse")
         defs: list[tuple[str, str]] = []
         for r in self._conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='files'"
@@ -1871,6 +2021,52 @@ class Database:
                 deleted += int(cur.rowcount)
         return deleted
 
+    def reset_for_reanalysis(self, file_ids: Sequence[int], *, prompt_hash: str, model: str) -> int:
+        """Remet des fichiers `pending` **et** supprime leurs analyses, en une transaction.
+
+        Rend le nombre de lignes `analyses` supprimées.
+
+        C'est l'opération que `service.reanalyze` faisait en deux écritures, donc en
+        deux transactions : une coupure entre les deux laissait la campagne dans un
+        état intermédiaire. Dans un sens, des fichiers `done` sans analyse —
+        `done=60, analyses=0`, une campagne qui s'annonce à 100 % et que plus aucune
+        commande ordinaire ne reprend. Dans l'autre, des fichiers `pending` dont les
+        analyses subsistent — visible et réparable en rejouant la commande, mais une
+        fenêtre quand même. Ici, il n'y a plus de fenêtre : soit les deux écritures
+        passent, soit la base reste exactement dans son état d'avant.
+
+        `transaction()` n'est pas réentrante — un `BEGIN` imbriqué lève — donc les
+        deux méthodes existantes ne peuvent pas se composer : leurs corps sont
+        réunis ici, et `delete_analyses` comme `set_files_status` restent utiles
+        seules (suppression sans remise à `pending`, changement de statut sans
+        suppression).
+        """
+        if not file_ids:
+            return 0
+        deleted = 0
+        now = _now()
+        with self.transaction() as conn:
+            conn.executemany(
+                "UPDATE files SET status=?, exclusion_reason=?, updated_at=? WHERE id=?",
+                [(str(FileStatus.PENDING), None, now, fid) for fid in file_ids],
+            )
+            for start in range(0, len(file_ids), 500):
+                chunk = tuple(file_ids[start : start + 500])
+                marks = ",".join("?" for _ in chunk)
+                params: tuple[object, ...] = (*chunk, prompt_hash, model)
+                conn.execute(
+                    f"DELETE FROM segment_analyses WHERE file_id IN ({marks})"  # noqa: S608
+                    " AND prompt_hash=? AND model=?",
+                    params,
+                )
+                cur = conn.execute(
+                    f"DELETE FROM analyses WHERE file_id IN ({marks})"  # noqa: S608
+                    " AND prompt_hash=? AND model=?",
+                    params,
+                )
+                deleted += int(cur.rowcount)
+        return deleted
+
     def latest_analyses(
         self,
         *,
@@ -2061,11 +2257,23 @@ class Database:
 
     # ------------------------------------------------------------------ stats
     def counts(self) -> dict[str, int]:
+        """Compteurs de la campagne — `analyses` compte des **fichiers**, pas des lignes.
+
+        `analyses` est le nombre de fichiers dont une analyse fait foi, c'est-à-dire
+        exactement ce que le rapport appelle « analysés » (`views.overview.analyzed`)
+        et le total de `classification_summary`. La table, elle, garde l'historique :
+        un fichier réanalysé (nouvelle version de contenu, nouveau prompt, nouveau
+        modèle) y laisse une ligne de plus. Compter ces lignes affichait jusqu'au
+        **double** du nombre de fichiers analysés dans `docia status`, dans
+        `docia status --json` et dans l'onglet Risque, pendant que le rapport HTML
+        annonçait le bon chiffre sur la même base. Pour un outil dont la sortie
+        justifie des suppressions, les trois écrans doivent compter la même chose.
+        """
         counts = {s.value: 0 for s in FileStatus}
         for r in self._conn.execute("SELECT status, COUNT(*) AS n FROM files GROUP BY status"):
             counts[r["status"]] = int(r["n"])
         counts["files"] = sum(counts[s.value] for s in FileStatus)
-        counts["analyses"] = int(self._conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0])
+        counts["analyses"] = self.count_analyzed_files()
         for status in BlockStatus:
             counts[f"blocks_{status.value}"] = int(
                 self._conn.execute(
@@ -2074,18 +2282,41 @@ class Database:
             )
         return counts
 
+    def count_analyzed_files(self) -> int:
+        """Nombre de fichiers ayant au moins une analyse (miroir de `views._analyzed_files`)."""
+        return int(self._conn.execute("SELECT COUNT(DISTINCT file_id) FROM analyses").fetchone()[0])
+
+    _SUMMARY_COLUMNS = (
+        ("security_classification", "security"),
+        ("rgpd_risk_level", "rgpd"),
+        ("finance_document_type", "finance"),
+        ("legal_contract_type", "legal"),
+    )
+    """Colonnes de `analyses` réparties par `classification_summary` : (colonne, clé rendue)."""
+
     def classification_summary(self) -> dict[str, dict[str, int]]:
-        out: dict[str, dict[str, int]] = {}
-        for column, key in (
-            ("security_classification", "security"),
-            ("rgpd_risk_level", "rgpd"),
-            ("finance_document_type", "finance"),
-            ("legal_contract_type", "legal"),
+        """Répartition des classes sur la **dernière analyse** de chaque fichier.
+
+        Même règle que les vues du rapport (`views._IS_LATEST`) : l'historique des
+        réanalyses ne compte pas deux fois. Chaque répartition totalise donc
+        `counts()["analyses"]`.
+
+        Les quatre répartitions sortent d'**une seule** requête croisée, repliée
+        ensuite en Python. Retenir la dernière analyse coûte une sous-requête
+        corrélée par ligne : une requête par colonne, c'était quatre fois ce
+        balayage (mesuré sur 80 000 analyses : 246 ms contre 116 ms ici, coût
+        linéaire). Le croisement ne pèse rien en mémoire : les quatre vocabulaires
+        sont fermés (classes de sécurité, niveaux RGPD, types de document), donc
+        le nombre de groupes est borné quelle que soit la taille de la campagne.
+        """
+        out: dict[str, dict[str, int]] = {key: {} for _, key in self._SUMMARY_COLUMNS}
+        columns = ", ".join(column for column, _ in self._SUMMARY_COLUMNS)
+        for row in self._conn.execute(
+            f"SELECT {columns}, COUNT(*) FROM analyses a"  # noqa: S608 — colonnes internes
+            f" WHERE {_IS_LATEST} GROUP BY 1, 2, 3, 4"
         ):
-            out[key] = {
-                r[0]: int(r[1])
-                for r in self._conn.execute(
-                    f"SELECT {column}, COUNT(*) FROM analyses GROUP BY {column}"
-                )  # noqa: S608 — colonnes internes
-            }
+            number = int(row[len(self._SUMMARY_COLUMNS)])
+            for position, (_, key) in enumerate(self._SUMMARY_COLUMNS):
+                bucket = out[key]
+                bucket[row[position]] = bucket.get(row[position], 0) + number
         return out

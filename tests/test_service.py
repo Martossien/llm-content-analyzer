@@ -8,24 +8,30 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import sqlite3
-from collections.abc import Iterator
+import subprocess
+import sys
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from textwrap import dedent
 
 import pytest
 
 import docia.cli as cli
-from docia.cli import DEFAULT_KEEP_BACKUPS as CLI_KEEP_BACKUPS
 from docia.cli import main
 from docia.config import Config
 from docia.db import _SCHEMA_V1, SCHEMA_VERSION, Database, backup_dir_for
+from docia.gui.service_shim import GuiService
 from docia.ingest.smbeagle_csv import ImportReport
-from docia.models import DomainAnalysis, FileAnalysis, FileStatus
+from docia.models import DomainAnalysis, FileAnalysis, FileStatus, SmbeagleRow
 from docia.service import (
     DEFAULT_KEEP_BACKUPS,
     ImportProgress,
     RunEvent,
     ServiceError,
+    _effective_keys,  # noqa: PLC2701 - la clé (empreinte de prompt, modèle) d'une analyse
     backup_database,
     campaign_status,
     forget_campaign,
@@ -39,6 +45,7 @@ from docia.service import (
     remember_campaign,
     restore_database,
     run_campaign,
+    set_review,
 )
 from docia.views import format_int
 from tests.test_pipeline_e2e import _config, corpus  # noqa: F401
@@ -610,14 +617,333 @@ def test_cli_backup_restore_reanalyze_campaigns(
     assert "prompt actif" in capsys.readouterr().out
 
 
-def test_cli_keeps_the_same_rotation_default() -> None:
-    """La valeur par défaut de `--keep` ne doit pas diverger de celle du service."""
-    assert CLI_KEEP_BACKUPS == DEFAULT_KEEP_BACKUPS
-
-
 def test_cli_campaigns_without_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["campaigns"]) == 0
     assert "aucune campagne récente" in capsys.readouterr().out
+
+
+# ------------------------- sauvegarde : cloisonnement, filets, interruptions
+#
+# Le triptyque sauvegarde / restauration / réanalyse est ce sur quoi on se rabat
+# quand quelque chose a mal tourné : les tests ci-dessous coupent pour de vrai
+# (processus tué, rotation réelle) plutôt que de simuler poliment.
+
+
+def _base(tmp_path: Path, name: str) -> Path:
+    """Petite base réelle, prête à être sauvegardée."""
+    path = tmp_path / name
+    with Database(path) as db:
+        db.start_scan("a.csv")
+    return path
+
+
+def _vieillit(paths: Sequence[Path]) -> None:
+    """Horodate les copies dans l'ordre donné : la première est la plus ancienne."""
+    for n, path in enumerate(paths):
+        stamp = 1_600_000_000_000_000_000 + n * 1_000_000_000
+        os.utime(path, ns=(stamp, stamp))
+
+
+def test_restauration_ne_detruit_pas_la_sauvegarde_restauree(tmp_path: Path) -> None:
+    """C1 : la sauvegarde préalable tournait et emportait le fichier même visé.
+
+    Dix copies, on restaure la plus ancienne : la rotation de la copie
+    « avant_restauration » la supprimait *avant* que la source ne soit lue. La
+    restauration échouait (« No such file or directory ») et la copie était perdue.
+    """
+    db_path = _base(tmp_path, "campagne.sqlite")
+    with Database(db_path) as db:
+        db.save_prompt("origine", "x" * 60, activate=True)
+    copies = [backup_database(db_path, keep=0, label=f"s{n}") for n in range(DEFAULT_KEEP_BACKUPS)]
+    _vieillit(copies)
+    plus_ancienne = copies[0]
+    with Database(db_path) as db:
+        db.delete_prompt("origine")
+
+    restaure = restore_database(db_path, plus_ancienne)
+
+    assert plus_ancienne.exists(), "la copie restaurée a été emportée par la rotation"
+    with Database(restaure) as db:
+        actif = db.active_prompt()
+    assert actif is not None
+    assert actif[0] == "origine"
+    assert any("avant_restauration" in p.name for p in list_backups(db_path))
+
+
+def test_restauration_aboutit_meme_si_la_rotation_emporte_la_source(tmp_path: Path) -> None:
+    """C1 (suite) : au-delà des dix, la source est légitimement reprise — sans échec.
+
+    Onze copies courantes : celle qu'on restaure sort de la fenêtre de rétention
+    pendant l'opération. La copie vers `<base>.tmp` étant faite *avant* la rotation,
+    la restauration aboutit quand même et ne laisse aucun `.tmp` derrière elle.
+    """
+    db_path = _base(tmp_path, "campagne.sqlite")
+    with Database(db_path) as db:
+        db.save_prompt("origine", "x" * 60, activate=True)
+    copies = [
+        backup_database(db_path, keep=0, label=f"s{n}") for n in range(DEFAULT_KEEP_BACKUPS + 1)
+    ]
+    _vieillit(copies)
+    with Database(db_path) as db:
+        db.delete_prompt("origine")
+
+    restaure = restore_database(db_path, copies[0])
+
+    with Database(restaure) as db:
+        actif = db.active_prompt()
+    assert actif is not None
+    assert actif[0] == "origine"
+    assert not copies[0].exists()  # onzième copie courante : la rotation l'a reprise
+    assert not db_path.with_name(db_path.name + ".tmp").exists()
+
+
+def test_la_rotation_ne_voit_que_sa_propre_campagne(tmp_path: Path) -> None:
+    """C2 : `audit` supprimait les sauvegardes d'`audit_2024_direction`.
+
+    Le motif n'était pas ancré sur le nom complet. Dans le dossier commun que
+    l'écran Rapports invite à choisir, la rotation d'une campagne emportait celles
+    d'une autre, et `list_backups` les présentait comme siennes.
+    """
+    audit = _base(tmp_path, "audit.sqlite")
+    direction = _base(tmp_path, "audit_2024_direction.sqlite")
+    commun = backup_dir_for(audit)
+    voisines = [backup_database(direction, out_dir=commun, keep=0) for _ in range(3)]
+    siennes = [
+        backup_database(audit, keep=DEFAULT_KEEP_BACKUPS) for _ in range(DEFAULT_KEEP_BACKUPS)
+    ]
+
+    manquantes = [p.name for p in voisines if not p.exists()]
+    assert not manquantes, (
+        f"rotation d'audit : sauvegardes d'une autre campagne effacées {manquantes}"
+    )
+    assert set(list_backups(audit)) == set(siennes)
+
+
+def test_les_copies_de_surete_echappent_a_la_rotation(tmp_path: Path) -> None:
+    """C3 : les filets (`avant_migration`, `avant_restauration`, `avant_reanalyse`)
+    entraient dans le vivier des dix et disparaissaient les premiers, étant les
+    plus anciens. Ils restent listés — un utilisateur doit pouvoir les restaurer."""
+    db_path = _base(tmp_path, "campagne.sqlite")
+    migration = (
+        backup_dir_for(db_path)
+        / f"campagne_avant_migration_v{SCHEMA_VERSION}_20200101T000000.sqlite"
+    )
+    filets = [
+        backup_database(db_path, keep=0, label="avant_restauration"),
+        backup_database(db_path, keep=0, label="avant_reanalyse_all"),
+    ]
+    shutil.copy2(filets[0], migration)
+    filets.append(migration)
+    _vieillit(filets)  # les plus anciennes du dossier : les premières servies
+
+    courantes = [backup_database(db_path, keep=2) for _ in range(3)]
+
+    emportes = [p.name for p in filets if not p.exists()]
+    assert not emportes, f"copies de sûreté emportées par la rotation : {emportes}"
+    assert not courantes[0].exists(), "la rotation doit tourner les copies courantes"
+    assert set(list_backups(db_path)) == {*filets, *courantes[1:]}
+
+
+def test_une_sauvegarde_tuee_en_plein_vol_ne_laisse_pas_de_cadavre(tmp_path: Path) -> None:
+    """Copie interrompue par un arrêt brutal : rien de tronqué ne doit être listé.
+
+    Le processus est réellement tué (`os._exit`) au milieu de l'écriture : aucun
+    `finally`, aucun `except` ne s'exécute. Le fichier laissé derrière doit être un
+    `.sqlite.tmp` — jamais un `.sqlite` de 932 Mo que `list_backups` présenterait
+    comme « la plus récente », donc celle qu'un utilisateur restaurerait.
+    """
+    db_path = _base(tmp_path, "campagne.sqlite")
+    script = tmp_path / "coupure_sauvegarde.py"
+    script.write_text(
+        dedent(f"""
+        import os
+        from pathlib import Path
+
+        import docia.db as db_module
+        from docia.service import backup_database
+
+        base = Path({str(db_path)!r})
+
+        def _tronque(self, path):
+            Path(path).write_bytes(base.read_bytes()[:512])  # copie partielle
+            os._exit(9)  # ... et la machine s'éteint
+
+        db_module.Database.backup_to = _tronque
+        with db_module.Database(base) as db:
+            backup_database(base, db=db)
+        """),
+        encoding="utf-8",
+    )
+    fini = subprocess.run(  # noqa: S603 - interpréteur courant, script écrit par le test
+        [sys.executable, str(script)], capture_output=True, check=False
+    )
+    assert fini.returncode == 9, fini.stderr.decode("utf-8", "replace")
+
+    assert list_backups(db_path) == [], "un cadavre tronqué est présenté comme une sauvegarde"
+    restes = sorted(p.name for p in backup_dir_for(db_path).iterdir())
+    assert restes, "le test n'a rien interrompu"
+    assert all(n.endswith(".sqlite.tmp") for n in restes), restes
+
+
+# ------------------------------------------- réanalyse : atomicité et réparation
+
+
+def _fichier(name: str) -> SmbeagleRow:
+    return SmbeagleRow(
+        name=name,
+        host="srv",
+        extension=name.rsplit(".", 1)[-1],
+        username="u",
+        hostname="srv.dom",
+        unc_directory="\\\\srv\\part\\dossier",
+        creation_time="01/01/2025 10:00:00",
+        last_write_time="01/01/2026 10:00:00",
+        readable=True,
+        writeable=False,
+        deletable=False,
+        directory_type="SMB",
+        base="\\\\srv\\part\\",
+        file_size=1000,
+        access_time="02/01/2026 10:00:00",
+        file_attributes="Archive",
+        owner="DOM\\x",
+        fast_hash="aaaa",
+        file_signature="unknown",
+    )
+
+
+def _campagne_analysee(tmp_path: Path, combien: int = 6) -> tuple[Config, Path]:
+    """Base où `combien` fichiers sont `done` avec une analyse C3 chacun."""
+    db_path = tmp_path / "campagne.sqlite"
+    cfg = Config(db_path=str(db_path))
+    with Database(db_path) as db:
+        scan = db.start_scan("a.csv")
+        db.upsert_files([_fichier(f"f{n}.pdf") for n in range(combien)], scan)
+        phash, model = _effective_keys(db, cfg)
+        for row in db.query("SELECT id, content_version FROM files ORDER BY id"):
+            db.store_analysis(
+                int(row["id"]),
+                None,
+                int(row["content_version"]),
+                prompt_hash=phash,
+                model=model,
+                analysis=_c3(f"f{row['id']}"),
+            )
+        assert (db.counts()["done"], db.counts()["analyses"]) == (combien, combien)
+    return cfg, db_path
+
+
+def test_une_reanalyse_coupee_en_deux_reste_reparable(tmp_path: Path) -> None:
+    """M1 : coupure entre les deux écritures de `reanalyze`.
+
+    Le processus est réellement tué juste après la première des deux écritures,
+    quelle qu'elle soit. Avant correction, l'ordre laissait des fichiers `done`
+    sans analyse : la campagne annonçait « 100 % analysé » pendant que le rapport
+    disait « 0 analysé », `run`/`retry`/`plan` ne voyaient plus rien, et rejouer la
+    même commande de réanalyse ne rattrapait aucun fichier — seul `reanalyze --all`
+    réparait, ce que personne n'a de raison de tenter.
+
+    Après correction, l'état intermédiaire est honnête (0 %) et *la même commande*,
+    rejouée, termine le travail.
+    """
+    cfg, db_path = _campagne_analysee(tmp_path)
+    script = tmp_path / "coupure_reanalyse.py"
+    script.write_text(
+        dedent(f"""
+        import os
+        from pathlib import Path
+
+        import docia.db as db_module
+        from docia.config import Config
+        from docia.service import reanalyze
+
+        base = Path({str(db_path)!r})
+        originaux = {{
+            nom: getattr(db_module.Database, nom)
+            for nom in ("delete_analyses", "set_files_status")
+        }}
+
+        def _coupe_apres(nom):
+            def wrapper(self, *args, **kwargs):
+                originaux[nom](self, *args, **kwargs)
+                os._exit(9)  # la machine s'éteint entre les deux écritures
+            return wrapper
+
+        for nom in originaux:
+            setattr(db_module.Database, nom, _coupe_apres(nom))
+
+        with db_module.Database(base) as db:
+            reanalyze(
+                db,
+                Config(db_path=str(base)),
+                scope="filter",
+                where={{"security": "C3"}},
+                backup=False,
+            )
+        """),
+        encoding="utf-8",
+    )
+    fini = subprocess.run(  # noqa: S603 - interpréteur courant, script écrit par le test
+        [sys.executable, str(script)], capture_output=True, check=False
+    )
+    assert fini.returncode == 9, fini.stderr.decode("utf-8", "replace")
+
+    with Database(db_path) as db:
+        interrompu = campaign_status(db)
+        assert interrompu.percent_done == 0.0, "la campagne annonce un avancement qu'elle n'a plus"
+        # la même commande, rejouée, doit rattraper les fichiers
+        repris = reanalyze(db, cfg, scope="filter", where={"security": "C3"}, backup=False)
+        apres = campaign_status(db)
+        phash, model = _effective_keys(db, cfg)
+        selectionnables = db.select_pending_ids(1000, prompt_hash=phash, model=model)
+
+    assert repris == 6, "rejouer la même réanalyse ne rattrape aucun fichier"
+    assert (apres.done, apres.pending, apres.analyses) == (0, 6, 0)
+    assert len(selectionnables) == 6, "`docia run` ne sélectionne toujours rien"
+
+
+# ----------------------------------------------------- vérification humaine
+
+
+def test_set_review_enregistre_et_relit_la_fiche(tmp_path: Path) -> None:
+    cfg, db_path = _campagne_analysee(tmp_path, combien=1)
+    with Database(db_path) as db:
+        file_id = int(db.query("SELECT id FROM files")[0]["id"])
+        fiche = set_review(db, file_id, "corrected", corrected_security="C2", reviewer="moi")
+        assert fiche is not None
+        assert db.review_counts()["corrected"] == 1
+        with pytest.raises(ServiceError):
+            set_review(db, file_id, "n_importe_quoi")
+
+
+def test_le_pont_gui_delegue_la_verification_au_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La doctrine du pont — « toute écriture passe par le service » — sans exception.
+
+    `GuiService.set_review` écrivait directement dans `Database`, seule écriture de
+    la fenêtre à court-circuiter `docia.service` : l'API REST de la v4 n'aurait eu
+    aucune revue à exposer.
+    """
+    from docia.gui import service_shim
+
+    _cfg, db_path = _campagne_analysee(tmp_path, combien=1)
+    with Database(db_path) as db:
+        file_id = int(db.query("SELECT id FROM files")[0]["id"])
+    appels: list[tuple[int, str]] = []
+    vrai = service_shim.service.set_review
+
+    def espion(db: Database, fid: int, status: str, **kwargs: object) -> sqlite3.Row | None:
+        appels.append((fid, status))
+        return vrai(db, fid, status, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service_shim.service, "set_review", espion)
+    fiche = GuiService(lambda: Database(db_path)).set_review(file_id, "validated", reviewer="moi")
+
+    assert appels == [(file_id, "validated")]
+    assert fiche is not None
+    with Database(db_path) as db:
+        assert db.review_counts()["validated"] == 1
