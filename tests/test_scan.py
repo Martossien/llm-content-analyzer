@@ -490,7 +490,21 @@ def test_scan_annule_est_marque_en_base(tmp_path: Path, caplog: pytest.LogCaptur
     cfg.filter.excluded_dir_markers = []
     cfg.filter.min_size_bytes = 1
     cancel = threading.Event()
-    threading.Timer(0.25, cancel.set).start()
+
+    def annule_des_le_csv_ecrit(event: object) -> None:
+        """Annule **sur un fait**, jamais sur un délai.
+
+        Ce test avait un `threading.Timer(0.25, cancel.set)` : il pariait que le
+        faux scanner aurait écrit son CSV partiel avant l'annulation. Sur un
+        runner Windows lent, le seul démarrage de l'interpréteur dépasse ce délai,
+        l'annulation arrivait **avant** le CSV, et le scan tombait dans l'autre
+        branche — correcte, mais pas celle qu'on veut éprouver ici (« scan arrêté
+        avant que le scanner n'écrive le CSV »). Le faux scanner émet son étape
+        `writing` **après** avoir écrit les lignes : on s'y accroche.
+        """
+        if getattr(event, "stage", "") == "writing":
+            cancel.set()
+
     lignes: list[str] = []
     with caplog.at_level(logging.WARNING), Database(cfg.db_path) as db:
         result, report, _ = service.scan_campaign(
@@ -498,6 +512,7 @@ def test_scan_annule_est_marque_en_base(tmp_path: Path, caplog: pytest.LogCaptur
             cfg,
             ScanProfile(local_paths=[str(tmp_path)]),
             cancel=cancel,
+            on_event=annule_des_le_csv_ecrit,
             on_line=lignes.append,
             do_plan=False,
         )
