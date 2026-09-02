@@ -503,6 +503,10 @@ def test_les_blocs_non_envoyes_ne_sont_pas_effaces(
     restés `built` : à la reprise `BlockSpec.text` levait `FileNotFoundError`, le run
     plantait, le bloc passait `sent` au passage — et replantait au run suivant. Sans
     intervention en base, la campagne ne redémarrait plus jamais.
+
+    Construction et envoi se recouvrent : au moment de l'annulation, des blocs du
+    premier lot peuvent déjà être partis — ceux-là sont `done` et effacés, les autres
+    restent `built` avec leur `.md`.
     """
     csv_path = corpus(tmp_path, petits=8)
     cfg = config(tmp_path, serveur.base_url, block_tokens=1_200, batch_files=2)
@@ -517,12 +521,13 @@ def test_les_blocs_non_envoyes_ne_sont_pas_effaces(
         prepare(db, cfg, csv_path)
         run1 = run_pipeline(db, cfg, progress=journal, cancel=cancel)
         assert run1.blocks_built >= 2
-        assert serveur.post_count == 0
+        restants = run1.blocks_built - run1.blocks_done
+        assert restants >= 1, "l'annulation a laissé des blocs non envoyés"
         sur_disque = list(cfg.work_dir().rglob("*.md"))
-        assert len(sur_disque) == run1.blocks_built, "un bloc `built` garde son `.md`"
+        assert len(sur_disque) == restants, "un bloc `built` garde son `.md`"
 
         run2 = run_pipeline(db, cfg)
-        assert run2.blocks_resumed == run1.blocks_built
+        assert run2.blocks_resumed == restants
         assert db.counts()["done"] == 8
         assert db.counts()["error"] == 0
 
@@ -656,9 +661,11 @@ def test_les_compteurs_du_rapport_comptent_des_fichiers(
     with Database(cfg.db_path) as db:
         prepare(db, cfg, csv_path)
         run1 = run_pipeline(db, cfg, progress=journal, cancel=cancel)
-        assert serveur.post_count == 0
+        # Construction et envoi se recouvrent : le premier lot a pu partir avant
+        # l'annulation ; le reste est repris par le run 2.
+        restants = 8 - run1.files_done
         run2 = run_pipeline(db, cfg)
-        assert run2.files_done == 8
-        assert run2.files_selected == 8, "les fichiers des blocs repris sont comptés"
+        assert run2.files_done == restants
+        assert run2.files_selected == restants, "les fichiers des blocs repris sont comptés"
         assert run2.files_done <= run2.files_selected
-        assert run2.blocks_resumed == run1.blocks_built
+        assert run2.blocks_resumed == run1.blocks_built - run1.blocks_done

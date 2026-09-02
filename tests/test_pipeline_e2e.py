@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -392,6 +393,72 @@ def test_file_estimated_too_long_but_counted_short_is_sent_whole(
         big = {r["name"]: r for r in db.latest_analyses()}["enorme.txt"]
         assert big["segments"] == 1
     assert fake_server.tokenize_calls >= 1
+
+
+# ----------------------------------- construction et envoi recouverts
+
+
+def test_construction_et_envoi_se_recouvrent(
+    fake_server: FakeOpenAIServer,
+    corpus: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Le lot N+1 se construit pendant que le lot N est servi : le premier bloc
+    revient avant que le dernier lot soit construit. Avant : tout construit, puis
+    tout envoyé — GPU inactif pendant l'extraction, CPU inactif pendant l'envoi."""
+    import docia.pipeline as pipeline_mod
+
+    real_build = pipeline_mod.build_blocks
+
+    def build_lentement(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(0.4)  # une extraction qui prend du temps, par lot
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_mod, "build_blocks", build_lentement)
+    _src, csv_path = corpus
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000, batch_files=2)
+    lines: list[str] = []
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg, progress=lines.append)
+        assert (report.files_done, report.files_error) == (6, 0)
+    premier_bloc = next(
+        i for i, line in enumerate(lines) if " fichiers, " in line and "tok prompt" in line
+    )
+    dernier_lot = next(i for i, line in enumerate(lines) if line.startswith("lot b0003"))
+    assert premier_bloc < dernier_lot, lines
+
+
+def test_une_construction_qui_casse_clot_le_run_en_erreur(
+    fake_server: FakeOpenAIServer,
+    corpus: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Le producteur casse au 2e lot : ce qui est en file est servi, le run se
+    clôt avec l'erreur — jamais un blocage sur une file sans sentinelle."""
+    import docia.pipeline as pipeline_mod
+
+    real_build = pipeline_mod.build_blocks
+
+    def build_qui_casse(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("batch_label") == "b0002":
+            raise RuntimeError("DocFuse a explosé")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_mod, "build_blocks", build_qui_casse)
+    _src, csv_path = corpus
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000, batch_files=2)
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg)
+        assert report.files_done == 2
+        assert any("construction des blocs interrompue" in e for e in report.errors)
+        assert "DocFuse a explosé" in " ".join(report.errors)
+        assert db.counts()["pending"] == 4  # les lots jamais construits restent à faire
 
 
 # ----------------------------------- alimentation adaptative (llm.adaptive)

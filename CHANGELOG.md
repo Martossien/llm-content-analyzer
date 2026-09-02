@@ -49,6 +49,11 @@ antérieur à la v3 (POC 2025) est dans git.
   selon le contenu des blocs.
 - **Prompt** : un document seulement *cité* dans le texte d'un fichier n'a pas
   d'entrée (le modèle en inventait pour les pièces jointes nommées dans des échanges).
+- **Construction et envoi recouverts** : le lot N+1 s'extrait (CPU du poste, dans un
+  thread) pendant que le lot N est servi (GPU du serveur). Avant, tout était construit
+  d'abord puis tout envoyé : sur une grande campagne, des heures de GPU inactif puis
+  des heures de CPU inactif. La base reste servie par un seul fil ; une construction
+  qui casse clôt le run avec l'erreur, les blocs déjà en file sont servis.
 
 ### Modifié
 

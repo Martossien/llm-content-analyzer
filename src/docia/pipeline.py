@@ -427,15 +427,25 @@ class _Run:
             self.client = client
             if not await self._negotiate_context():
                 return self.report
-            self._build_selected()
+            selected = self._select()
             self.emit(
                 "start",
                 f"{self.report.files_selected} fichier(s) à analyser, "
-                f"{len(self.specs)} bloc(s) construit(s)",
+                f"{len(self.specs)} bloc(s) repris",
             )
             if self.dry_run:
+                await self._build_selected(selected, None)
                 return self._finish_dry_run()
-            await self._send(list(self.specs))
+            # Construction et envoi se recouvrent : le lot N+1 s'extrait (CPU du
+            # poste) pendant que le lot N est servi (GPU du serveur). Avant, tout
+            # était construit d'abord : sur une grande campagne, des heures de GPU
+            # inactif, puis des heures de CPU inactif.
+            queue: asyncio.Queue[BlockSpec | None] = asyncio.Queue()
+            for spec in self.specs:
+                queue.put_nowait(spec)  # blocs repris d'un run précédent
+            producer = asyncio.create_task(self._produce(selected, queue))
+            await self._send_from(queue)
+            await producer
             await self._second_pass()
         self._inherit_duplicates()
         self._cleanup_blocks()
@@ -507,8 +517,8 @@ class _Run:
             return False
         return True
 
-    def _build_selected(self) -> None:
-        """3. Sélection + construction des blocs, par lots.
+    def _select(self) -> list[int]:
+        """3a. Sélection des fichiers à analyser.
 
         Seuls les **identifiants** sont retenus pour toute la durée du run : la liste
         complète des `FileRow` pesait 1 722 Mo pour 700 797 fichiers et restait en
@@ -517,13 +527,25 @@ class _Run:
         est un instantané : elle ne bouge pas quand le run change les statuts,
         contrairement à un curseur ouvert sur la connexion qui écrit.
         """
-        cfg = self.cfg
         selected = self.db.select_pending_ids(
             self.limit or 10**9, prompt_hash=self.prompt_hash, model=self.model
         )
         self.report.files_selected = len(self.engaged | set(selected))
         self.say(f"{len(selected)} fichier(s) à analyser")
+        return selected
 
+    async def _build_selected(
+        self, selected: Sequence[int], queue: asyncio.Queue[BlockSpec | None] | None
+    ) -> None:
+        """3b. Construction des blocs, par lots ; chaque bloc créé est poussé dans
+        `queue` (None : dry-run, on construit seulement).
+
+        L'extraction DocFuse (`build_blocks`) tourne dans un thread : elle ne touche
+        pas la base et ne doit pas bloquer la boucle qui, pendant ce temps, envoie
+        les blocs déjà construits. Tout ce qui écrit en base (`files_by_ids`,
+        `_register_built`) reste sur la boucle : une seule connexion, un seul fil.
+        """
+        cfg = self.cfg
         batch_size = cfg.blocks.batch_files
         with self._token_counter() as counter:
             policy = SegmentPolicy(self.file_cap, counter if counter.available else None)
@@ -533,14 +555,38 @@ class _Run:
                     break
                 batch = self.db.files_by_ids(selected[start : start + batch_size])
                 label = f"b{start // batch_size + 1:04d}"
-                built = build_blocks(
-                    batch, cfg.blocks, self.work_dir, batch_label=label, policy=policy
+                built = await asyncio.to_thread(
+                    build_blocks,
+                    batch,
+                    cfg.blocks,
+                    self.work_dir,
+                    batch_label=label,
+                    policy=policy,
                 )
-                self._register_built(built, first_pass=True)
+                created = self._register_built(built, first_pass=True)
+                if queue is not None:
+                    for spec in created:
+                        queue.put_nowait(spec)
                 self.say(
                     f"lot {label} : {len(built.blocks)} bloc(s), "
                     f"{len(built.failed)} échec(s) d'extraction"
                 )
+
+    async def _produce(
+        self, selected: Sequence[int], queue: asyncio.Queue[BlockSpec | None]
+    ) -> None:
+        """Producteur de `execute` : construit, puis pose la sentinelle — toujours,
+        même si la construction casse : les travailleurs d'envoi finissent ce qui
+        est déjà en file et le run se clôt avec l'erreur, pas avec un blocage."""
+        try:
+            await self._build_selected(selected, queue)
+        except Exception as exc:  # noqa: BLE001 — l'erreur est rapportée, le run clos
+            message = f"construction des blocs interrompue : {type(exc).__name__} : {exc}"
+            logger.exception(message)
+            self.report.errors.append(message)
+            self.say(message)
+        finally:
+            queue.put_nowait(None)
 
     def _token_counter(self) -> ServerTokenCounter:
         """Compteur exact du serveur pour trancher les découpages ; muet (`available`
@@ -615,13 +661,28 @@ class _Run:
         """
         if not specs:
             return
-        queue = iter(specs)
+        queue: asyncio.Queue[BlockSpec | None] = asyncio.Queue()
+        for spec in specs:
+            queue.put_nowait(spec)
+        queue.put_nowait(None)
+        await self._send_from(queue, workers=min(self.cfg.llm.max_in_flight, len(specs)))
+
+    async def _send_from(
+        self, queue: asyncio.Queue[BlockSpec | None], *, workers: int | None = None
+    ) -> None:
+        """Travailleurs qui prennent chaque bloc dans `queue` jusqu'à la sentinelle
+        None (remise en file pour les autres). La file peut encore se remplir
+        pendant qu'ils travaillent : c'est le recouvrement construction/envoi."""
         pacer = self._start_pacer()
 
         async def worker() -> None:
-            for spec in queue:
-                if self.cancelled():
+            while True:
+                spec = await queue.get()
+                if spec is None:
+                    queue.put_nowait(None)
                     return
+                if self.cancelled():
+                    continue  # on vide la file sans envoyer : les blocs restent `built`
                 if pacer is None:
                     await self._send_guarded(spec)
                     continue
@@ -639,8 +700,8 @@ class _Run:
                     )
                 await self._watch_preemptions(pacer)
 
-        workers = max(1, min(self.cfg.llm.max_in_flight, len(specs)))
-        issues = await asyncio.gather(*(worker() for _ in range(workers)), return_exceptions=True)
+        count = max(1, workers if workers is not None else self.cfg.llm.max_in_flight)
+        issues = await asyncio.gather(*(worker() for _ in range(count)), return_exceptions=True)
         for issue in issues:
             if isinstance(issue, BaseException):
                 logger.error("envoi interrompu : %s", issue)
