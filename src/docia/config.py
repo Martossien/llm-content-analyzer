@@ -65,7 +65,8 @@ class LLMConfig:
     modèle pour le run suivant. Hors : comportement fixe, `max_in_flight` blocs."""
     adaptive_start_tokens: int = 0
     """Budget de départ du mode adaptatif (tokens en vol). 0 = le dernier budget
-    mémorisé pour ce serveur et ce modèle, sinon deux blocs (`blocks.block_tokens`)."""
+    mémorisé pour ce serveur et ce modèle, sinon la moitié du plafond
+    (`max_in_flight` × plafond par fichier)."""
     timeout_s: int = 900
     max_retries: int = 3
     temperature: float = 0.0
@@ -271,7 +272,7 @@ class Config:
             errors.append("llm.thinking_budget_tokens doit être >= 0")
         if llm.adaptive_start_tokens < 0:
             errors.append(
-                "llm.adaptive_start_tokens doit être >= 0 (0 = mémorisé, sinon deux blocs) "
+                "llm.adaptive_start_tokens doit être >= 0 (0 = mémorisé, sinon moitié du plafond) "
                 f"(valeur: {llm.adaptive_start_tokens})"
             )
         if llm.reasoning_effort not in ("", "low", "medium", "xhigh"):

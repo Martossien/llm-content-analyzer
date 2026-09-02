@@ -7,6 +7,7 @@ Le serveur OpenAI factice (`tests/fake_openai.py`) rend une entrée par ligne
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -461,7 +462,8 @@ def test_adaptive_feeding_backs_off_on_vllm_preemptions(
         report = run_pipeline(db, cfg, progress=lines.append)
         assert (report.files_done, report.files_error) == (7, 0)
     assert any("détresse (1 préemption(s) vLLM)" in line for line in lines)
-    assert any(f"→ {cfg.blocks.block_tokens} tokens en vol" in line for line in lines)
+    # Au plancher, la détresse ne descend plus : « budget N → N ».
+    assert any(re.search(r"budget (\d+) → \1 tokens en vol", line) for line in lines)
 
 
 def test_pipeline_clamps_to_served_context(

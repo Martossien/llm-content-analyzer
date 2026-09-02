@@ -650,33 +650,46 @@ class _Run:
 
     def _start_pacer(self) -> Pacer | None:
         """Le régulateur du run (`llm.adaptive`), créé au premier envoi : il vit
-        pour les deux passes. Départ : `adaptive_start_tokens`, sinon le budget
-        mémorisé pour ce serveur et ce modèle, sinon deux blocs."""
+        pour les deux passes.
+
+        Plancher : le plus gros bloc possible (un segment entier), sinon un bloc
+        plus gros que le budget passerait seul et tout serait sérialisé. Départ :
+        `adaptive_start_tokens`, sinon le budget mémorisé pour ce serveur et ce
+        modèle, sinon la **moitié du plafond** — mesuré le 02/09 sur 4×3090 : partir
+        de deux blocs laissait vLLM à une requête en vol (génération 55 tok/s, cache
+        KV à 4 %) et la montée par crans de 25 % aurait mis 40 blocs à y remédier.
+        """
         cfg = self.cfg
         if not cfg.llm.adaptive or self.dry_run:
             return None
         if self.pacer is not None:
             return self.pacer
-        block = cfg.blocks.block_tokens
+        largest = max(self.file_cap, cfg.blocks.block_tokens)
+        ceiling = cfg.llm.max_in_flight * largest
         remembered = PacerMemory(docia_home() / PACER_FILE).load(self._pacer_key)
-        start = cfg.llm.adaptive_start_tokens or remembered or 2 * block
-        ceiling = cfg.llm.max_in_flight * max(self.file_cap, block)
+        start = cfg.llm.adaptive_start_tokens or remembered or ceiling // 2
         self.pacer = Pacer(
             budget_tokens=start,
-            min_tokens=block,
+            min_tokens=largest,
             max_tokens=ceiling,
-            on_decision=lambda message: self.say(f"alimentation adaptative : {message}"),
+            on_decision=lambda message: self.tell(f"alimentation adaptative : {message}"),
         )
         origin = (
             "réglé"
             if cfg.llm.adaptive_start_tokens
-            else ("mémorisé" if remembered else "deux blocs")
+            else ("mémorisé" if remembered else "moitié du plafond")
         )
-        self.say(
+        self.tell(
             f"alimentation adaptative : départ à {self.pacer.budget} tokens en vol ({origin}), "
-            f"plafond {ceiling} tokens / {cfg.llm.max_in_flight} requêtes"
+            f"plafond {ceiling} tokens / {cfg.llm.max_in_flight} requêtes, "
+            f"plancher {largest}"
         )
         return self.pacer
+
+    def tell(self, message: str) -> None:
+        """`say` + journal : ce qui doit rester lisible après coup dans `docia.log`."""
+        logger.info(message)
+        self.say(message)
 
     async def _watch_preemptions(self, pacer: Pacer) -> None:
         """Toutes les `PREEMPTIONS_POLL_S` : si vLLM a préempté depuis la dernière
