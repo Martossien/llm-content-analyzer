@@ -26,20 +26,20 @@ class FakeService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
-    def import_scan(self, csv_path: Path, *, strict: bool, _log: Any) -> None:
+    def import_scan(self, csv_path: Path, *, strict: bool, log: Any) -> None:  # noqa: ARG002 — signature de la couche service
         self.calls.append(("import_scan", (csv_path, strict)))
 
-    def plan(self, cfg: Config, _log: Any) -> None:
+    def plan(self, cfg: Config, log: Any) -> None:  # noqa: ARG002 — signature de la couche service
         self.calls.append(("plan", ()))
 
-    def run(self, cfg: Config, **kwargs: Any) -> None:
+    def run(self, cfg: Config, **kwargs: Any) -> None:  # noqa: ARG002 — signature de la couche service
         self.calls.append(("run", (kwargs.get("limit"), kwargs.get("dry_run"))))
 
-    def reanalyze(self, cfg: Config, mode: str, _log: Any) -> int:
+    def reanalyze(self, cfg: Config, mode: str, log: Any) -> int:  # noqa: ARG002 — signature de la couche service
         self.calls.append(("reanalyze", (mode,)))
         return 0
 
-    def quick(self, cfg: Config, target: Path, db_path: Path, _log: Any, cancel: Any) -> None:
+    def quick(self, cfg: Config, target: Path, db_path: Path, log: Any, cancel: Any) -> None:  # noqa: ARG002 — signature de la couche service
         self.calls.append(("quick", (target,)))
 
 
@@ -62,7 +62,7 @@ class ActingApp(FakeApp):
         work()
         return True
 
-    def open_campaign(self, db_path: str, *, touch: bool = True) -> None:
+    def open_campaign(self, db_path: str, *, touch: bool = True) -> None:  # noqa: ARG002
         self.opened.append(db_path)
 
     def remember_campaign(self, csv_path: str | None = None) -> None:
@@ -204,7 +204,7 @@ def test_tout_reanalyser_demande_confirmation(
 
 
 def test_relance_manquante_reste_dans_le_journal(accueil: Any) -> None:
-    def casse(cfg: Config, mode: str, log: Any) -> int:
+    def casse(*_a: Any, **_k: Any) -> int:
         raise RuntimeError("base verrouillée")
 
     accueil.app.service.reanalyze = casse  # type: ignore[method-assign]
@@ -243,4 +243,5 @@ def test_test_du_serveur(accueil: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_mod, "LLMClient", FakeClient)
     accueil._test_server()
     assert "injoignable" in accueil.server_result.options["text"]
-    assert accueil.app.logs and "injoignable" in accueil.app.logs[-1]
+    assert accueil.app.logs
+    assert "injoignable" in accueil.app.logs[-1]
