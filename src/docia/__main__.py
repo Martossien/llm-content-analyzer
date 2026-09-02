@@ -5,10 +5,15 @@ Sans argument → interface graphique (extra `docia[gui]`) ; avec arguments → 
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
 
 
 def main() -> None:
+    # DocFuse ≥ 0.2.2 extrait dans un pool de processus : dans `Docia.exe` (PyInstaller,
+    # onefile) chaque travailleur est un relancement de l'exe avec ses propres
+    # arguments, que `freeze_support` intercepte ici — avant tout aiguillage.
+    multiprocessing.freeze_support()
     if len(sys.argv) <= 1:
         try:
             from docia.gui import launch

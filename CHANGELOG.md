@@ -7,6 +7,10 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ## [Unreleased]
 
+_Rien pour l'instant._
+
+## [3.2.0] — 2026-09-02
+
 ### Ajouté
 
 - **Plafond par fichier `blocks.max_file_share`** (défaut 0,3 du contexte servi, moins la
@@ -54,6 +58,10 @@ antérieur à la v3 (POC 2025) est dans git.
   d'abord puis tout envoyé : sur une grande campagne, des heures de GPU inactif puis
   des heures de CPU inactif. La base reste servie par un seul fil ; une construction
   qui casse clôt le run avec l'erreur, les blocs déjà en file sont servis.
+- **DocFuse 0.2.2** (épingle `v0.2.2`) : extraction dans un pool de processus, deux
+  fois plus rapide sur un corpus de PDF (181 fichiers : 101 → 48 s), sortie identique.
+  `Docia.exe` appelle `multiprocessing.freeze_support()` à ses points d'entrée, comme
+  PyInstaller l'exige pour les travailleurs du pool.
 
 ### Modifié
 

@@ -12,6 +12,7 @@ import csv
 import json
 import logging
 import logging.handlers
+import multiprocessing
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -798,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
     lignes venu d'un `PRAGMA journal_mode=WAL`. Tout le reste (une vraie
     anomalie) remonte intact : on ne masque pas ce qu'on ne comprend pas.
     """
+    multiprocessing.freeze_support()  # travailleurs d'extraction DocFuse dans l'exe
     journal.utf8_console()
     journal.silence_third_party_warnings()
     parser = build_parser()
