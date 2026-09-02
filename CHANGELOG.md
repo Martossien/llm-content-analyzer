@@ -51,6 +51,10 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ### Corrigé
 
+- **Sous-répertoires non lus par le scanner annoncés** — smbeagle_enriched (≥ main du
+  02/09) compte les dossiers fermés par ACL et les jonctions ignorées dans le
+  manifeste (`counts.dirs_unreadable`, `unreadable_directories`) ; `docia scan` les
+  relaie en une ligne (journal et fenêtre) : leurs fichiers manquent à l'inventaire.
 - **Réanalyse ciblée sur une classification périmée** — `reanalyze --where
   security=C3` retenait « la dernière analyse » sans exiger qu'elle porte sur le
   contenu actuel (copie locale de la règle, sans `content_version`) : un fichier

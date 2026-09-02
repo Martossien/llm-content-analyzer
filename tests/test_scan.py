@@ -454,6 +454,21 @@ def test_run_scan_refuse_un_csv_plus_court_que_le_compte_annonce(tmp_path: Path)
         run_scan(ScanProfile(local_paths=[str(tmp_path)]), tmp_path / "scan.csv", exe=exe)
 
 
+def test_manifest_unreadable_compte_et_exemples() -> None:
+    """`counts.dirs_unreadable` et `unreadable_directories` (smbeagle_enriched ≥ 4.2.1) ;
+    un manifeste antérieur, ou une valeur farfelue, rend `(0, [])`."""
+    from docia.scan import manifest_unreadable
+
+    assert manifest_unreadable({}) == (0, [])
+    assert manifest_unreadable({"counts": {"dirs_unreadable": True}}) == (0, [])
+    assert manifest_unreadable({"counts": {"dirs_unreadable": 2}}) == (2, [])
+    assert manifest_unreadable(
+        {"counts": {"dirs_unreadable": 1}, "unreadable_directories": [r"D:\p\RH", ""]}
+    ) == (1, [r"D:\p\RH"])
+    # la liste est bornée par le scanner : le compte fait foi, jamais moins que la liste
+    assert manifest_unreadable({"unreadable_directories": ["a", "b"]}) == (2, ["a", "b"])
+
+
 def test_expected_file_count_fait_foi_sur_le_manifeste() -> None:
     """Le manifeste prime sur la progression, et son absence n'invente aucun écart."""
     from docia.scan import expected_file_count

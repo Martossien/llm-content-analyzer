@@ -170,6 +170,12 @@ class ScanResult:
     """Nombre de fichiers **annoncé** par le scanner ; 0 quand il n'a rien annoncé.
 
     Voir `expected_file_count` pour la source retenue et pourquoi."""
+    unreadable_dirs: int = 0
+    """Sous-répertoires que le scanner n'a **pas pu lire** (accès refusé, chemin trop long) :
+    leurs fichiers manquent à l'inventaire. Compté par smbeagle_enriched ≥ 4.2.1
+    (`counts.dirs_unreadable`) ; 0 avec un scanner antérieur, qui ne le disait pas."""
+    unreadable_examples: list[str] = field(default_factory=list)
+    """Premiers chemins non lus (`unreadable_directories` du manifeste), pour le journal."""
 
     @property
     def missing_files(self) -> int:
@@ -332,6 +338,20 @@ def manifest_skipped(manifest: dict[str, object]) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(item) for item in raw if str(item).strip()]
+
+
+def manifest_unreadable(manifest: dict[str, object]) -> tuple[int, list[str]]:
+    """(nombre, exemples) des sous-répertoires non lus déclarés par le manifeste.
+
+    Absents d'un scanner antérieur à 4.2.1 : `(0, [])` — l'absence de la clé n'invente
+    pas un périmètre amputé, comme pour `manifest_skipped`.
+    """
+    counts = manifest.get("counts")
+    raw = counts.get("dirs_unreadable") if isinstance(counts, dict) else None
+    number = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0
+    listed = manifest.get("unreadable_directories")
+    examples = [str(p) for p in listed if str(p).strip()] if isinstance(listed, list) else []
+    return max(number, len(examples)), examples
 
 
 def expected_file_count(manifest: dict[str, object], last_files: int) -> int:
@@ -633,6 +653,7 @@ def run_scan(
     # Le nombre de fichiers est **toujours** celui du CSV : le chiffre annoncé par la
     # progression n'est pas un décompte de lignes, et le faire passer pour tel a déjà
     # annoncé « scan terminé : 42 000 fichiers » sur un CSV de 0 octet.
+    unreadable_count, unreadable_examples = manifest_unreadable(manifest)
     result = ScanResult(
         csv_path=csv_out,
         manifest_path=manifest_out if manifest else None,
@@ -645,8 +666,25 @@ def run_scan(
         skipped=manifest_skipped(manifest),
         cancelled=followed.cancelled,
         expected_files=expected_file_count(manifest, followed.last_files),
+        unreadable_dirs=unreadable_count,
+        unreadable_examples=unreadable_examples[:5],
     )
     _check_outcome(result, returncode=proc.returncode)
+    if result.unreadable_dirs:
+        # Pas une cible écartée (le scan sort en 0), mais un trou dans l'inventaire :
+        # l'administrateur doit le lire avant de décider la moindre suppression.
+        examples = ", ".join(result.unreadable_examples)
+        more = (
+            f" et {result.unreadable_dirs - len(result.unreadable_examples)} autre(s)"
+            if result.unreadable_dirs > len(result.unreadable_examples)
+            else ""
+        )
+        message = (
+            f"scan : {result.unreadable_dirs} sous-répertoire(s) non lu(s) — accès refusé ou "
+            f"chemin illisible ({examples}{more}) : leurs fichiers sont absents de l'inventaire"
+        )
+        _notify_line(on_line, message)
+        logger.warning("%s", message)
     if result.skipped:
         _notify_line(
             on_line,
