@@ -408,10 +408,12 @@ class ReviewProgress:
 
     @property
     def reviewed(self) -> int:
+        """Fichiers vérifiés par un humain (validés + corrigés)."""
         return self.validated + self.corrected
 
     @property
     def percent_reviewed(self) -> float:
+        """Part des fichiers analysés qui ont été vérifiés."""
         return percent(self.reviewed, self.analyzed)
 
 

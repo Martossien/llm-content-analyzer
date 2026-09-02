@@ -50,12 +50,15 @@ class KpiTile:
                 w.bind("<Button-1>", lambda _e: on_click())
 
     def pack(self, **kwargs: Any) -> None:
+        """Place le widget (`pack`)."""
         self.frame.pack(**kwargs)
 
     def grid(self, **kwargs: Any) -> None:
+        """Place le widget (`grid`)."""
         self.frame.grid(**kwargs)
 
     def set(self, value: str, color: str | None = None) -> None:
+        """Met à jour la valeur affichée."""
         self.value_label.configure(text=value)
         if color:
             self.value_label.configure(text_color=color)
@@ -76,12 +79,15 @@ class Badge:
         )
 
     def set(self, text: str, key: str | None = None) -> None:
+        """Met à jour la valeur affichée."""
         self.label.configure(text=f" {text} ", fg_color=severity_color(key))
 
     def pack(self, **kwargs: Any) -> None:
+        """Place le widget (`pack`)."""
         self.label.pack(**kwargs)
 
     def grid(self, **kwargs: Any) -> None:
+        """Place le widget (`grid`)."""
         self.label.grid(**kwargs)
 
 
@@ -106,9 +112,11 @@ class Card:
         self.body.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
     def pack(self, **kwargs: Any) -> None:
+        """Place le widget (`pack`)."""
         self.frame.pack(**kwargs)
 
     def grid(self, **kwargs: Any) -> None:
+        """Place le widget (`grid`)."""
         self.frame.grid(**kwargs)
 
 
@@ -124,9 +132,11 @@ class BarChart:
         self._bg = "#ffffff"
 
     def pack(self, **kwargs: Any) -> None:
+        """Place le widget (`pack`)."""
         self.canvas.pack(**kwargs)
 
     def grid(self, **kwargs: Any) -> None:
+        """Place le widget (`grid`)."""
         self.canvas.grid(**kwargs)
 
     def draw(
@@ -306,6 +316,7 @@ class Table:
         self._apply_columns()
 
     def pack(self, **kwargs: Any) -> None:
+        """Place le widget (`pack`)."""
         self.frame.pack(**kwargs)
 
     def _sorter(self, col: int) -> Callable[[], None]:
@@ -411,9 +422,11 @@ class ReadOnlyText:
         self.box.configure(state="disabled")
 
     def pack(self, **kwargs: Any) -> None:
+        """Place le widget (`pack`)."""
         self.box.pack(**kwargs)
 
     def set(self, text: str) -> None:
+        """Met à jour la valeur affichée."""
         self.box.configure(state="normal")
         self.box.delete("1.0", "end")
         self.box.insert("end", text)

@@ -276,10 +276,12 @@ class _DatabaseCore:
         self.close()
 
     def close(self) -> None:
+        """Ferme la connexion (idempotent via `with`)."""
         self._conn.close()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        """`BEGIN` … `COMMIT`, `ROLLBACK` sur exception — sans jamais masquer l'erreur d'origine."""
         try:
             self._conn.execute("BEGIN")
             yield self._conn
@@ -325,6 +327,7 @@ class _DatabaseCore:
 
     @property
     def schema_version(self) -> int:
+        """Version de schéma lue dans `meta` (0 si la table est absente)."""
         row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         return int(row["value"]) if row else 0
 

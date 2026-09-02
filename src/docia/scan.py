@@ -106,6 +106,7 @@ class ScanProfile:
     extra_args: list[str] = field(default_factory=list)
 
     def validate(self) -> list[str]:
+        """Messages d'erreur du profil (vide = lançable) : cible manquante, chemin relatif, identifiants dépareillés."""
         errors: list[str] = []
         if not self.local_paths and not self.hosts:
             errors.append("indique au moins un dossier (local ou UNC monté) ou un serveur SMB")
@@ -122,6 +123,7 @@ class ScanProfile:
         return errors
 
     def targets(self) -> list[str]:
+        """Cibles demandées : dossiers locaux, sinon serveurs SMB."""
         return list(self.local_paths) or list(self.hosts)
 
 

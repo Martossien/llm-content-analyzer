@@ -38,6 +38,12 @@ antérieur à la v3 (POC 2025) est dans git.
 - **`service.py` devient le paquet `docia.service`** — `_common` (erreurs,
   résultats, constantes), `campaigns` (état, récentes), `backups`, `ingest`
   (import, scan, plan), `runs` (run, réanalyse, revue) ; façade qui réexporte tout.
+- **Fonctions denses découpées** — `config.validate` (une fonction par section),
+  `cli.cmd_prompt` (une fonction par sous-commande), `quick_analyze` (entrées /
+  analyse), `builder._run_docfuse` (`_usable_rows`), `parse._build_analysis`
+  (validation des domaines pilotée par une table), `tab_results._show`
+  (`detail_lines`, pure). Plus aucune fonction au-dessus de 21 de complexité.
+- **Docstrings** : 113 définitions publiques documentées (63 → 75 %).
 - **Le journal sort de `cli.py`** → `docia/journal.py` (console, `docia.log`,
   rotation, garde-fou des pannes attendues) ; `cli.py` passe de 1 041 à ~800 lignes
   et ne fait plus que dispatcher.
@@ -87,8 +93,10 @@ antérieur à la v3 (POC 2025) est dans git.
   serveur), l'écran Accueil et la **fenêtre entière** (`DociaApp` : onglets, mode
   administrateur, création de campagne, enregistrement du `docia.toml`, plantage
   de thread, travaux de fond) construits sur des doublures de `customtkinter` et
-  `tkinter` — `cli_tools` 34 → 70 %, `gui/tab_home` 14 → 68 %, `gui/app` 46 → 84 %,
-  projet 77 → 88 % (614 tests).
+  `tkinter` ; les actions de l'Accueil (choix de fichiers, import, préparation,
+  test du serveur, lancement, relance, arrêt, analyse rapide) et les commandes
+  `quick --dry-run`, `scan` (faux scanner) et `bench` — `cli_tools` 34 → 89 %,
+  `gui/tab_home` 14 → 93 %, `gui/app` 46 → 84 %, projet 77 → 90 %.
 - **`legacy/` retiré du dépôt** (POC 2025, 76 fichiers, 18 000 lignes) : l'historique git
   le garde ; le code vivant est `src/docia`.
 - `.coverage` ignoré par git.

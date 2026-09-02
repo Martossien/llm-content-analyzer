@@ -132,6 +132,7 @@ def format_duration(seconds: float | None) -> str:
 
 
 def format_int(value: int | float | None) -> str:
+    """Entier avec séparateur de milliers (`—` si None)."""
     if value is None:
         return "—"
     return f"{int(value):,}".replace(",", " ")

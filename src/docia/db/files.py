@@ -24,7 +24,10 @@ from docia.models import (
 
 class FilesOps(_DatabaseCore):
     # ------------------------------------------------------------------ scans
+    """Tables `scans` et `files` : scans importés, fichiers, sélection à analyser, statuts, plan."""
+
     def start_scan(self, csv_path: str, *, kind: str = "import") -> int:
+        """Ouvre une ligne `scans` (import ou scan piloté) et rend son identifiant."""
         cur = self._conn.execute(
             "INSERT INTO scans(csv_path, imported_at, kind) VALUES(?, ?, ?)",
             (csv_path, _now(), kind),
@@ -76,6 +79,7 @@ class FilesOps(_DatabaseCore):
         self._conn.commit()
 
     def last_scan(self) -> sqlite3.Row | None:
+        """Dernier scan importé, ou None sur une campagne vide."""
         row = self._conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
         return row if isinstance(row, sqlite3.Row) else None
 
@@ -263,6 +267,7 @@ class FilesOps(_DatabaseCore):
         )
 
     def get_file(self, file_id: int) -> FileRow | None:
+        """Une ligne `files` par identifiant, ou None si elle a disparu."""
         r = self._conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
         return self._file_row(r) if r else None
 
@@ -398,6 +403,7 @@ class FilesOps(_DatabaseCore):
         return [row for fid in file_ids if (row := found.get(int(fid))) is not None]
 
     def set_file_status(self, file_id: int, status: FileStatus, reason: str | None = None) -> None:
+        """Statut (et raison) d'un fichier, validé aussitôt."""
         self._conn.execute(
             "UPDATE files SET status=?, exclusion_reason=?, updated_at=? WHERE id=?",
             (str(status), reason, _now(), file_id),
@@ -407,6 +413,7 @@ class FilesOps(_DatabaseCore):
     def set_files_status(
         self, file_ids: Sequence[int], status: FileStatus, reason: str | None = None
     ) -> None:
+        """Même statut pour plusieurs fichiers, en une transaction."""
         now = _now()
         with self.transaction() as conn:
             conn.executemany(
@@ -460,6 +467,7 @@ class FilesOps(_DatabaseCore):
         return pending, excluded
 
     def reset_errors(self) -> int:
+        """Remet `pending` tous les fichiers en erreur ; rend leur nombre."""
         cur = self._conn.execute(
             "UPDATE files SET status='pending', exclusion_reason=NULL, updated_at=? WHERE status='error'",
             (_now(),),

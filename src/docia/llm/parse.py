@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -201,6 +201,7 @@ class _Index:
         self._bare = {b: bf for b, bf in bare_first.items() if bare_counts[b] == 1 and b}
 
     def match(self, ref: str) -> BlockFile | None:
+        """Fichier du bloc désigné par une référence rendue par le modèle, ou None."""
         found = self._exact.get(ref)
         if found is not None:
             return found
@@ -269,6 +270,63 @@ def _domain(entry: dict[str, Any], key: str) -> tuple[dict[str, Any] | None, str
     return block, ""
 
 
+_Details = tuple[dict[str, object] | None, str]
+"""(détails validés, `""`) ou (`None`, raison du rejet)."""
+
+
+def _details_security(block: dict[str, Any]) -> _Details:
+    justification = block.get("justification", "")
+    if not isinstance(justification, str):
+        return None, "`security.justification` doit être une chaîne"
+    return {"justification": justification}, ""
+
+
+def _details_rgpd(block: dict[str, Any]) -> _Details:
+    data_types = _as_str_list(block.get("data_types"))
+    if data_types is None:
+        return None, "`rgpd.data_types` doit être une liste de chaînes"
+    return {"data_types": data_types}, ""
+
+
+def _details_finance(block: dict[str, Any]) -> _Details:
+    amounts = _as_amounts(block.get("amounts"))
+    if amounts is None:
+        return None, "`finance.amounts` doit être une liste de montants valides"
+    return {"amounts": amounts}, ""
+
+
+def _details_legal(block: dict[str, Any]) -> _Details:
+    parties = _as_str_list(block.get("parties"))
+    if parties is None:
+        return None, "`legal.parties` doit être une liste de chaînes"
+    return {"parties": parties}, ""
+
+
+def _details_retention(block: dict[str, Any]) -> _Details:
+    required = block.get("required")
+    years = block.get("years")
+    justification = block.get("justification", "")
+    if not isinstance(required, bool):
+        return None, "`retention.required` doit être un booléen"
+    if isinstance(years, float) and years.is_integer():
+        years = int(years)
+    if not isinstance(years, int) or isinstance(years, bool) or not (0 <= years <= 100):
+        return None, "`retention.years` doit être un entier 0–100"
+    if not isinstance(justification, str):
+        return None, "`retention.justification` doit être une chaîne"
+    return {"required": required, "years": years, "justification": justification}, ""
+
+
+_DOMAINS: tuple[tuple[str, str, Sequence[str], Callable[[dict[str, Any]], _Details]], ...] = (
+    ("security", "classification", SECURITY_CLASSES, _details_security),
+    ("rgpd", "risk_level", RGPD_LEVELS, _details_rgpd),
+    ("finance", "document_type", FINANCE_TYPES, _details_finance),
+    ("legal", "contract_type", LEGAL_TYPES, _details_legal),
+    ("retention", "basis", RETENTION_BASIS, _details_retention),
+)
+"""Un domaine = (clé, champ étiquette, valeurs admises, validateur des détails)."""
+
+
 def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
     """Valide une entrée et construit son `FileAnalysis`, ou rend la raison du rejet."""
     for key in _REQUIRED_KEYS:
@@ -284,14 +342,7 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
     resume = _clip(resume)
 
     domains: dict[str, DomainAnalysis] = {}
-    specs = (
-        ("security", "classification", SECURITY_CLASSES),
-        ("rgpd", "risk_level", RGPD_LEVELS),
-        ("finance", "document_type", FINANCE_TYPES),
-        ("legal", "contract_type", LEGAL_TYPES),
-        ("retention", "basis", RETENTION_BASIS),
-    )
-    for key, label_key, allowed in specs:
+    for key, label_key, allowed, details_of in _DOMAINS:
         block, reason = _domain(entry, key)
         if block is None:
             return None, reason
@@ -301,41 +352,9 @@ def _build_analysis(entry: dict[str, Any]) -> tuple[FileAnalysis | None, str]:
         confidence = _as_confidence(block.get("confidence"))
         if confidence is None:
             return None, f"`{key}.confidence` doit être un entier 0–100"
-
-        details: dict[str, object]
-        if key == "security":
-            justification = block.get("justification", "")
-            if not isinstance(justification, str):
-                return None, "`security.justification` doit être une chaîne"
-            details = {"justification": justification}
-        elif key == "rgpd":
-            data_types = _as_str_list(block.get("data_types"))
-            if data_types is None:
-                return None, "`rgpd.data_types` doit être une liste de chaînes"
-            details = {"data_types": data_types}
-        elif key == "finance":
-            amounts = _as_amounts(block.get("amounts"))
-            if amounts is None:
-                return None, "`finance.amounts` doit être une liste de montants valides"
-            details = {"amounts": amounts}
-        elif key == "legal":
-            parties = _as_str_list(block.get("parties"))
-            if parties is None:
-                return None, "`legal.parties` doit être une liste de chaînes"
-            details = {"parties": parties}
-        else:
-            required = block.get("required")
-            years = block.get("years")
-            justification = block.get("justification", "")
-            if not isinstance(required, bool):
-                return None, "`retention.required` doit être un booléen"
-            if isinstance(years, float) and years.is_integer():
-                years = int(years)
-            if not isinstance(years, int) or isinstance(years, bool) or not (0 <= years <= 100):
-                return None, "`retention.years` doit être un entier 0–100"
-            if not isinstance(justification, str):
-                return None, "`retention.justification` doit être une chaîne"
-            details = {"required": required, "years": years, "justification": justification}
+        details, reason = details_of(block)
+        if details is None:
+            return None, reason
         # `_clip_deep` : justifications, types de données, parties et contextes de
         # montants partent aussi en base — aucun n'a de longueur bornée par le schéma.
         domains[key] = DomainAnalysis(

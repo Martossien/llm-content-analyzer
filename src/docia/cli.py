@@ -13,6 +13,7 @@ import json
 import logging
 import logging.handlers
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
 
@@ -55,6 +56,7 @@ class _Parser(argparse.ArgumentParser):
     """
 
     def error(self, message: str) -> NoReturn:
+        """Erreur d'arguments : rappelle où vont les options globales quand elles sont mal placées."""
         mal_placees = [opt for opt in GLOBAL_OPTIONS if opt in message]
         if mal_placees and message.startswith("unrecognized arguments"):
             option = mal_placees[0]
@@ -68,6 +70,7 @@ class _Parser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     # Annoté au type de base : les sous-parseurs restent des `ArgumentParser`
     # ordinaires, et `_Parser` ne sert qu'à enrichir le message du parseur racine.
+    """Parseur `docia` complet : options globales puis une sous-commande par action."""
     parser: argparse.ArgumentParser = _Parser(prog="docia", description="Doc-IA analyzer v3")
     parser.add_argument(
         "--config", "-c", type=Path, default=Path(DEFAULT_CONFIG_NAME), help="docia.toml"
@@ -265,6 +268,7 @@ def _require_existing_campaign(cfg: Config) -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    """`init` : écrit un `docia.toml` commenté (refuse d'écraser sans `--force`)."""
     target: Path = args.config
     if target.exists() and not args.force:
         print(f"{target} existe déjà (--force pour écraser)", file=sys.stderr)
@@ -313,6 +317,7 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_plan(_args: argparse.Namespace, cfg: Config) -> int:
+    """`plan` : exclusions et scores de priorité sur toute la base."""
     from docia.filter import plan_files, plan_progress_logger
 
     # Progression sur stderr, comme `ingest` : une préparation d'un million de
@@ -334,6 +339,7 @@ def cmd_plan(_args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
+    """`run` : envoie à la LLM ce qui reste à analyser ; 0 si tout est fait, 2 s'il reste des erreurs."""
     from docia.pipeline import run_pipeline
 
     with Database(cfg.db_path) as db:
@@ -362,6 +368,7 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
+    """`status` : compteurs, classes, revues et dernier run (texte ou `--json`)."""
     from dataclasses import asdict
 
     from docia.service import campaign_status
@@ -516,71 +523,100 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
-def cmd_prompt(args: argparse.Namespace, cfg: Config) -> int:
+def _prompt_list(db: Database, cfg: Config, _args: argparse.Namespace) -> int:
     from docia.llm.schema import load_system_prompt, prompt_hash
 
-    with Database(cfg.db_path) as db:
-        if args.prompt_cmd == "list":
-            active = db.active_prompt()
-            print(
-                f"  {'*' if active is None else ' '} (embarqué)  {prompt_hash(load_system_prompt(None), cfg.llm.model)}"
-            )
-            for r in db.list_prompts():
-                mark = "*" if r["active"] else " "
-                print(
-                    f"  {mark} {r['name']:<24} {r['hash']}  {r['chars']} car.  maj {r['updated_at']}"
-                )
-            return 0
-        if args.prompt_cmd == "show":
-            if args.name:
-                text = db.get_prompt(args.name)
-                if text is None:
-                    print(f"profil inconnu : {args.name}", file=sys.stderr)
-                    return 1
-            else:
-                from docia.pipeline import resolve_system_prompt
+    active = db.active_prompt()
+    print(
+        f"  {'*' if active is None else ' '} (embarqué)  {prompt_hash(load_system_prompt(None), cfg.llm.model)}"
+    )
+    for r in db.list_prompts():
+        mark = "*" if r["active"] else " "
+        print(f"  {mark} {r['name']:<24} {r['hash']}  {r['chars']} car.  maj {r['updated_at']}")
+    return 0
 
-                text = resolve_system_prompt(db, cfg)
-            print(text)
-            return 0
-        if args.prompt_cmd == "save":
-            if not args.file.exists():
-                print(f"fichier introuvable : {args.file}", file=sys.stderr)
-                return 1
-            text = args.file.read_text(encoding="utf-8")
-            if len(text.strip()) < 50:
-                print("prompt trop court (< 50 caractères)", file=sys.stderr)
-                return 1
-            db.save_prompt(args.name, text, activate=args.use)
-            print(f"profil « {args.name} » enregistré" + (" et activé" if args.use else ""))
-            return 0
-        if args.prompt_cmd == "use":
-            if not db.set_active_prompt(args.name):
-                print(f"profil inconnu : {args.name}", file=sys.stderr)
-                return 1
-            print(
-                f"profil actif : {args.name} — les fichiers déjà analysés avec un autre prompt seront réanalysés au prochain run"
-            )
-            return 0
-        if args.prompt_cmd == "reset":
-            db.set_active_prompt(None)
-            print("prompt embarqué actif")
-            return 0
-        if args.prompt_cmd == "export":
-            text = db.get_prompt(args.name) if args.name else load_system_prompt(None)
-            if text is None:
-                print(f"profil inconnu : {args.name}", file=sys.stderr)
-                return 1
-            args.file.write_text(text, encoding="utf-8")
-            print(f"→ {args.file}")
-            return 0
-        if args.prompt_cmd == "delete":
-            if not db.delete_prompt(args.name):
-                print(f"profil inconnu : {args.name}", file=sys.stderr)
-                return 1
-            print(f"profil « {args.name} » supprimé")
-            return 0
-    return 1
+
+def _prompt_show(db: Database, cfg: Config, args: argparse.Namespace) -> int:
+    if args.name:
+        text = db.get_prompt(args.name)
+        if text is None:
+            print(f"profil inconnu : {args.name}", file=sys.stderr)
+            return 1
+    else:
+        from docia.pipeline import resolve_system_prompt
+
+        text = resolve_system_prompt(db, cfg)
+    print(text)
+    return 0
+
+
+def _prompt_save(db: Database, _cfg: Config, args: argparse.Namespace) -> int:
+    if not args.file.exists():
+        print(f"fichier introuvable : {args.file}", file=sys.stderr)
+        return 1
+    text = args.file.read_text(encoding="utf-8")
+    if len(text.strip()) < 50:
+        print("prompt trop court (< 50 caractères)", file=sys.stderr)
+        return 1
+    db.save_prompt(args.name, text, activate=args.use)
+    print(f"profil « {args.name} » enregistré" + (" et activé" if args.use else ""))
+    return 0
+
+
+def _prompt_use(db: Database, _cfg: Config, args: argparse.Namespace) -> int:
+    if not db.set_active_prompt(args.name):
+        print(f"profil inconnu : {args.name}", file=sys.stderr)
+        return 1
+    print(
+        f"profil actif : {args.name} — les fichiers déjà analysés avec un autre prompt seront réanalysés au prochain run"
+    )
+    return 0
+
+
+def _prompt_reset(db: Database, _cfg: Config, _args: argparse.Namespace) -> int:
+    db.set_active_prompt(None)
+    print("prompt embarqué actif")
+    return 0
+
+
+def _prompt_export(db: Database, _cfg: Config, args: argparse.Namespace) -> int:
+    from docia.llm.schema import load_system_prompt
+
+    text = db.get_prompt(args.name) if args.name else load_system_prompt(None)
+    if text is None:
+        print(f"profil inconnu : {args.name}", file=sys.stderr)
+        return 1
+    args.file.write_text(text, encoding="utf-8")
+    print(f"→ {args.file}")
+    return 0
+
+
+def _prompt_delete(db: Database, _cfg: Config, args: argparse.Namespace) -> int:
+    if not db.delete_prompt(args.name):
+        print(f"profil inconnu : {args.name}", file=sys.stderr)
+        return 1
+    print(f"profil « {args.name} » supprimé")
+    return 0
+
+
+_PROMPT_COMMANDS: dict[str, Callable[[Database, Config, argparse.Namespace], int]] = {
+    "list": _prompt_list,
+    "show": _prompt_show,
+    "save": _prompt_save,
+    "use": _prompt_use,
+    "reset": _prompt_reset,
+    "export": _prompt_export,
+    "delete": _prompt_delete,
+}
+
+
+def cmd_prompt(args: argparse.Namespace, cfg: Config) -> int:
+    """`prompt list|show|save|use|reset|export|delete` : profils de prompt en base."""
+    handler = _PROMPT_COMMANDS.get(str(args.prompt_cmd))
+    if handler is None:
+        return 1
+    with Database(cfg.db_path) as db:
+        return handler(db, cfg, args)
 
 
 def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
@@ -744,6 +780,7 @@ def cmd_campaigns(_args: argparse.Namespace, _cfg: Config) -> int:
 
 
 def cmd_retry(_args: argparse.Namespace, cfg: Config) -> int:
+    """`retry` : remet à analyser les fichiers en erreur."""
     with Database(cfg.db_path) as db:
         n = db.reset_errors()
     print(f"{n} fichier(s) remis à analyser")

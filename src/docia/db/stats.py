@@ -14,6 +14,8 @@ from docia.models import (
 
 class StatsOps(_DatabaseCore):
     # ------------------------------------------------------------------ stats
+    """Compteurs et répartitions de la campagne (`docia status`, onglet Risque)."""
+
     def counts(self) -> dict[str, int]:
         """Compteurs de la campagne — `analyses` compte des **fichiers**, pas des lignes.
 

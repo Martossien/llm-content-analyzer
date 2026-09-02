@@ -114,8 +114,9 @@ class FakeApp:
     def current_tab(self) -> str:
         return self.tab
 
-    def show_tab(self, name: str, *, _admin: bool = False) -> None:
+    def show_tab(self, name: str, *, admin: bool = False) -> None:
         self.tab = name
+        self.admin_requested = admin
 
 
 @pytest.fixture

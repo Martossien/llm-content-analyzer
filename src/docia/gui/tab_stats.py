@@ -103,6 +103,7 @@ class _Section:
     def set_table(
         self, cols: list[str], rows: list[list[str]], summary: str, tags: list[str] | None = None
     ) -> None:
+        """Remplit le tableau d'une section (colonnes, lignes, résumé, couleurs)."""
         self.table.columns = cols
         self.table.set_rows(rows, tags)
         self.summary.configure(text=summary)
@@ -125,6 +126,8 @@ class _Section:
 
 
 class StatsTab(LazyScreen):
+    """Onglet Statistiques : hygiène, risque, conservation, exécution — calculés hors du thread Tk."""
+
     TAB_NAME = "Statistiques"
 
     def __init__(self, app: Any, parent: Any) -> None:
@@ -139,6 +142,7 @@ class StatsTab(LazyScreen):
         self._lazy_setup()
 
     def build(self) -> None:
+        """Construit les widgets de l'onglet (une fois)."""
         ctk, p = self.ctk, self.parent
         top = ctk.CTkFrame(p, fg_color="transparent")
         top.pack(fill="x", padx=8, pady=(6, 0))

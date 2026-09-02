@@ -37,6 +37,7 @@ class ConsoleFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        """Ligne console sans la pile d'appels (elle reste dans le fichier journal)."""
         saved = (record.exc_info, record.exc_text, record.stack_info)
         record.exc_info = record.exc_text = record.stack_info = None
         try:
@@ -126,6 +127,7 @@ class RotatingFileHandler(logging.handlers.RotatingFileHandler):
         self.rollover_failed = False
 
     def doRollover(self) -> None:  # noqa: N802 - nom imposé par logging
+        """Rotation ; si elle est impossible (fichier tenu par un autre processus), le journal continue sans rotation."""
         try:
             super().doRollover()
         except OSError as exc:

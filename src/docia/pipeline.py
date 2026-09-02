@@ -72,6 +72,8 @@ def output_reserve_tokens(llm: LLMConfig) -> int:
 
 @dataclass
 class RunReport:
+    """Bilan d'un run : fichiers et blocs comptés, tokens consommés, erreurs."""
+
     run_id: int
     files_resplit: int = 0
     """Fichiers re-découpés en seconde passe après un comptage exact trop long."""
@@ -91,6 +93,7 @@ class RunReport:
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
+        """Bilan sous forme de dictionnaire (sortie `--json`, événements)."""
         return asdict(self)
 
 
@@ -238,10 +241,12 @@ class _Run:
     # ---------------------------------------------------------------- utilitaires
     @property
     def run_id(self) -> int:
+        """Identifiant de la ligne `runs` de ce run."""
         return self.report.run_id
 
     @property
     def model(self) -> str:
+        """Modèle configuré pour ce run."""
         return self.cfg.llm.model
 
     def close(self, status: str) -> None:

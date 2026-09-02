@@ -101,6 +101,7 @@ class ScopeAlert:
 
     @property
     def incomplete(self) -> bool:
+        """Vrai dès qu'un scan de la campagne a laissé un trou (cible écartée, arrêt, CSV tronqué)."""
         return bool(self.gaps)
 
     @property
@@ -114,6 +115,7 @@ class ScopeAlert:
 
     @property
     def cancelled_scans(self) -> int:
+        """Nombre de scans arrêtés en cours de route."""
         return sum(1 for gap in self.gaps if gap.cancelled)
 
     @property

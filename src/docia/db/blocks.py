@@ -15,7 +15,10 @@ from docia.models import (
 
 class BlocksOps(_DatabaseCore):
     # ------------------------------------------------------------------ runs
+    """Tables `runs`, `blocks` et `block_files` : un run, ses blocs envoyés à la LLM, l'issue par fichier."""
+
     def start_run(self, *, model: str, prompt_hash: str, config_json: str) -> int:
+        """Ouvre une ligne `runs` (modèle, empreinte du prompt, config figée) et rend son identifiant."""
         cur = self._conn.execute(
             "INSERT INTO runs(started_at, model, prompt_hash, config_json) VALUES(?,?,?,?)",
             (_now(), model, prompt_hash, config_json),
@@ -24,6 +27,7 @@ class BlocksOps(_DatabaseCore):
         return int(cur.lastrowid or 0)
 
     def finish_run(self, run_id: int, status: str = "done") -> None:
+        """Clôt un run avec son statut (`done`, `error`, `cancelled`, `dry-run`)."""
         self._conn.execute(
             "UPDATE runs SET finished_at=?, status=? WHERE id=?", (_now(), status, run_id)
         )
@@ -31,6 +35,7 @@ class BlocksOps(_DatabaseCore):
 
     # ------------------------------------------------------------------ blocks
     def create_block(self, run_id: int, spec: BlockSpec, *, prompt_hash: str, model: str) -> int:
+        """Enregistre un bloc construit et ses fichiers (passés `queued`), en une transaction."""
         with self.transaction() as conn:
             cur = conn.execute(
                 """INSERT INTO blocks(run_id, path, tokens_estimated, tokens_with_margin, file_count, oversized,
@@ -72,6 +77,7 @@ class BlocksOps(_DatabaseCore):
         return block_id
 
     def mark_block_sent(self, block_id: int) -> None:
+        """Le bloc part vers la LLM : statut `sent`, tentative comptée."""
         self._conn.execute(
             "UPDATE blocks SET status='sent', attempts=attempts+1, sent_at=? WHERE id=?",
             (_now(), block_id),
@@ -79,6 +85,7 @@ class BlocksOps(_DatabaseCore):
         self._conn.commit()
 
     def mark_block_done(self, block_id: int, usage: LLMUsage | None) -> None:
+        """Le bloc a une réponse exploitable : statut `done`, consommation de tokens."""
         self._conn.execute(
             """UPDATE blocks SET status='done', completed_at=?, usage_prompt_tokens=?, usage_completion_tokens=?,
                latency_ms=?, error=NULL WHERE id=?""",
@@ -93,6 +100,7 @@ class BlocksOps(_DatabaseCore):
         self._conn.commit()
 
     def mark_block_error(self, block_id: int, error: str) -> None:
+        """Le bloc a échoué : statut `error` et message (tronqué à 2 000 caractères)."""
         self._conn.execute(
             "UPDATE blocks SET status='error', completed_at=?, error=? WHERE id=?",
             (_now(), error[:2000], block_id),
@@ -145,6 +153,7 @@ class BlocksOps(_DatabaseCore):
         return total, noms
 
     def set_block_file_outcome(self, block_id: int, file_id: int, outcome: str) -> None:
+        """Issue d'un fichier dans un bloc (`done`, `failed: …`, `segment done`…)."""
         self._conn.execute(
             "UPDATE block_files SET outcome=? WHERE block_id=? AND file_id=?",
             (outcome, block_id, file_id),

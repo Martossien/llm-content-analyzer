@@ -15,12 +15,15 @@ EFFORTS = ("low", "medium", "xhigh")
 
 
 class LLMTab:
+    """Onglet administrateur « Serveur & performances » : réglages LLM, test, diagnostic, banc."""
+
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
         self.ctk = app.ctk
 
     def build(self) -> None:
+        """Construit les widgets de l'onglet (une fois)."""
         ctk, p = self.ctk, self.parent
         c: Config = self.app.config
         ctk.CTkLabel(

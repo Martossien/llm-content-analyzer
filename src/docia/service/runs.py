@@ -30,6 +30,7 @@ class _Pace:
         self.files_at_first_done = 0
 
     def note_block_done(self, files_done: int) -> None:
+        """Premier bloc terminé : début du régime établi pour le débit."""
         if self.first_done_at is None:
             self.first_done_at = time.monotonic()
             self.files_at_first_done = files_done
@@ -47,6 +48,7 @@ class _Pace:
         return None
 
     def eta_s(self, files_done: int, files_error: int, files_total: int) -> float | None:
+        """Secondes restantes estimées, ou None faute de débit ou de reste."""
         rate = self.rate_per_s(files_done)
         remaining = files_total - files_done - files_error
         if rate is None or rate <= 0.0 or remaining <= 0:
@@ -54,6 +56,7 @@ class _Pace:
         return round(remaining / rate, 1)
 
     def elapsed_s(self) -> float:
+        """Secondes écoulées depuis le début du run."""
         return round(time.monotonic() - self.started, 3)
 
 

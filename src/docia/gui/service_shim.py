@@ -27,18 +27,22 @@ Log = Callable[[str], None]
 
 
 def load_recent() -> list[RecentCampaign]:
+    """Campagnes récentes (façade GUI de `service.recent_campaigns`)."""
     return service.recent_campaigns()
 
 
 def remember_recent(db_path: str, csv_path: str | None = None) -> None:
+    """Place une campagne en tête des récentes."""
     service.remember_campaign(Path(db_path), Path(csv_path) if csv_path else None)
 
 
 def default_backup_dir(db_path: Path) -> Path:
+    """Dossier de sauvegardes par défaut d'une base."""
     return backup_dir_for(db_path)
 
 
 def list_backups(db_path: Path) -> list[Path]:
+    """Sauvegardes d'une base, de la plus récente à la plus ancienne."""
     return service.list_backups(db_path)
 
 
@@ -92,6 +96,8 @@ class GuiService:
         cancel: Any,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> None:
+        """Lance un run et relaie ses événements au journal de la fenêtre."""
+
         def forward(event: RunEvent) -> None:
             if event.message:
                 log(event.message)
@@ -129,6 +135,7 @@ class GuiService:
             log(f"   {e}")
 
     def quick(self, cfg: Config, target: Path, db_path: Path, log: Log, cancel: Any) -> None:
+        """Analyse rapide d'un fichier ou dossier, résultats dans le journal."""
         from docia.quick import quick_analyze
 
         rep = quick_analyze(cfg, [target], db_path=db_path, progress=log, cancel=cancel)
@@ -171,8 +178,10 @@ class GuiService:
 
     # ---- sauvegarde
     def backup(self, db_path: Path, out_dir: Path | None = None) -> Path:
+        """Sauvegarde horodatée de la base, rend le fichier écrit."""
         with self._open_db() as db:
             return service.backup_database(db_path, out_dir=out_dir, db=db)
 
     def restore(self, db_path: Path, source: Path) -> Path:
+        """Restaure une sauvegarde par-dessus la base (copie de sûreté prise avant)."""
         return service.restore_database(db_path, source)

@@ -74,6 +74,8 @@ TAB_NAME = "Résultats"
 
 
 class ResultsTab(LazyScreen):
+    """Onglet Résultats : tableau filtrable, fiche d'un fichier, validation/correction."""
+
     TAB_NAME = "Résultats"
 
     def __init__(self, app: Any, parent: Any) -> None:
@@ -85,6 +87,7 @@ class ResultsTab(LazyScreen):
         self._lazy_setup()
 
     def build(self) -> None:
+        """Construit les widgets de l'onglet (une fois)."""
         ctk, p = self.ctk, self.parent
         filters = ctk.CTkFrame(p, fg_color="transparent")
         filters.pack(fill="x", padx=8, pady=(8, 4))
@@ -326,27 +329,7 @@ class ResultsTab(LazyScreen):
             )
             + (f" · {rec['segments']} segments" if (rec["segments"] or 0) > 1 else "")
         )
-        lines = [f"Résumé : {rec['resume'] or '—'}"]
-        if rec["security_justification"]:
-            lines.append(f"Sécurité : {rec['security_justification']}")
-        if rec["rgpd_data_types"]:
-            lines.append(f"Données personnelles : {pretty_list(rec['rgpd_data_types'])}")
-        if rec["finance_document_type"] and rec["finance_document_type"] != "none":
-            lines.append(
-                f"Finance : {rec['finance_document_type']} — {pretty_amounts(rec['finance_amounts'])}"
-            )
-        if rec["legal_contract_type"] and rec["legal_contract_type"] != "none":
-            lines.append(
-                f"Juridique : {rec['legal_contract_type']} — {pretty_list(rec['legal_parties'])}"
-            )
-        if rec["retention_justification"]:
-            lines.append(f"Conservation : {rec['retention_justification']}")
-        if rec["review_comment"]:
-            lines.append(
-                f"Commentaire de vérification : {rec['review_comment']} ({rec['reviewer'] or ''})"
-            )
-        if rec["exclusion_reason"]:
-            lines.append(f"Motif : {rec['exclusion_reason']}")
+        lines = detail_lines(rec)
         self.detail_label.configure(text="\n".join(lines))
         self.corr_sec_var.set(rec["corrected_security"] or "")
         self.corr_rgpd_var.set(rec["corrected_rgpd"] or "")
@@ -469,3 +452,29 @@ def _display_order(r: Any) -> tuple[int, int, str]:
     if sec:
         return (0, _SEVERITY_ORDER.get(sec, 5), str(r["name"]).lower())
     return ({"error": 1, "done": 2}.get(status, 3), 0, str(r["name"]).lower())
+
+
+def detail_lines(rec: Any) -> list[str]:
+    """Lignes de la fiche d'un fichier (résumé, justifications, revue) — fonction pure."""
+    lines = [f"Résumé : {rec['resume'] or '—'}"]
+    if rec["security_justification"]:
+        lines.append(f"Sécurité : {rec['security_justification']}")
+    if rec["rgpd_data_types"]:
+        lines.append(f"Données personnelles : {pretty_list(rec['rgpd_data_types'])}")
+    if rec["finance_document_type"] and rec["finance_document_type"] != "none":
+        lines.append(
+            f"Finance : {rec['finance_document_type']} — {pretty_amounts(rec['finance_amounts'])}"
+        )
+    if rec["legal_contract_type"] and rec["legal_contract_type"] != "none":
+        lines.append(
+            f"Juridique : {rec['legal_contract_type']} — {pretty_list(rec['legal_parties'])}"
+        )
+    if rec["retention_justification"]:
+        lines.append(f"Conservation : {rec['retention_justification']}")
+    if rec["review_comment"]:
+        lines.append(
+            f"Commentaire de vérification : {rec['review_comment']} ({rec['reviewer'] or ''})"
+        )
+    if rec["exclusion_reason"]:
+        lines.append(f"Motif : {rec['exclusion_reason']}")
+    return lines

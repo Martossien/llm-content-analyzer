@@ -29,6 +29,8 @@ class FileStatus(StrEnum):
 
 
 class BlockStatus(StrEnum):
+    """Cycle de vie d'un bloc : construit, envoyé, terminé, en erreur."""
+
     BUILT = "built"
     SENT = "sent"
     DONE = "done"
@@ -142,6 +144,7 @@ class BlockFile:
 
     @property
     def is_segment(self) -> bool:
+        """Vrai si ce fichier est une partie d'un gros fichier découpé (K > 1)."""
         return self.segment_count > 1
 
 
@@ -158,6 +161,7 @@ class BlockSpec:
 
     @property
     def text(self) -> str:
+        """Contenu du bloc `.md` relu depuis le disque (jamais gardé en mémoire)."""
         return self.path.read_text(encoding="utf-8")
 
 
@@ -189,6 +193,8 @@ class FileAnalysis:
 
 @dataclass(frozen=True)
 class LLMUsage:
+    """Consommation d'une requête : tokens de prompt et de sortie, latence, modèle."""
+
     prompt_tokens: int
     completion_tokens: int
     latency_ms: int

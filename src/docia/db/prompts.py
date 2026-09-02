@@ -9,6 +9,8 @@ from docia.db.core import REVIEW_STATUSES, _DatabaseCore, _now
 
 class PromptsOps(_DatabaseCore):
     # ------------------------------------------------------------------ prompts
+    """Tables `prompts` et `reviews` : profils de prompt nommés, vérification humaine."""
+
     def save_prompt(self, name: str, text: str, *, activate: bool = False) -> int:
         """Crée ou met à jour un profil de prompt nommé."""
         import hashlib
@@ -30,6 +32,7 @@ class PromptsOps(_DatabaseCore):
         return int(row["id"])
 
     def list_prompts(self) -> list[sqlite3.Row]:
+        """Profils enregistrés (nom, empreinte, actif, taille, dates), par nom."""
         return list(
             self._conn.execute(
                 "SELECT id, name, hash, active, length(text) AS chars, created_at, updated_at"
@@ -38,6 +41,7 @@ class PromptsOps(_DatabaseCore):
         )
 
     def get_prompt(self, name: str) -> str | None:
+        """Texte d'un profil, ou None s'il n'existe pas."""
         row = self._conn.execute("SELECT text FROM prompts WHERE name=?", (name,)).fetchone()
         return str(row["text"]) if row else None
 
@@ -56,6 +60,7 @@ class PromptsOps(_DatabaseCore):
         return (str(row["name"]), str(row["text"])) if row else None
 
     def delete_prompt(self, name: str) -> bool:
+        """Supprime un profil ; False s'il n'existait pas."""
         cur = self._conn.execute("DELETE FROM prompts WHERE name=?", (name,))
         self._conn.commit()
         return cur.rowcount == 1
@@ -96,6 +101,7 @@ class PromptsOps(_DatabaseCore):
         self._conn.commit()
 
     def review_counts(self) -> dict[str, int]:
+        """Nombre de fichiers par statut de vérification (`to_review`, `validated`, `corrected`)."""
         out = dict.fromkeys(REVIEW_STATUSES, 0)
         for r in self._conn.execute("SELECT status, COUNT(*) AS n FROM reviews GROUP BY status"):
             out[str(r["status"])] = int(r["n"])

@@ -27,6 +27,8 @@ _EXPORTS = (
 
 
 class ReportsTab:
+    """Onglet Rapports : rapport HTML, classeur, Power BI, sauvegardes."""
+
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
@@ -34,6 +36,7 @@ class ReportsTab:
         self._buttons: list[Any] = []
 
     def build(self) -> None:
+        """Construit les widgets de l'onglet (une fois)."""
         ctk, p = self.ctk, self.parent
         wrap = ctk.CTkFrame(p, fg_color="transparent")
         wrap.pack(fill="both", expand=True, padx=8, pady=8)
@@ -118,6 +121,7 @@ class ReportsTab:
         self.app.off_refresh(self.refresh)
 
     def refresh(self) -> None:
+        """Rafraîchit la liste des sauvegardes et l'état de la campagne."""
         if not self.app.db_path().exists():
             self.backups_label.configure(text="aucune campagne ouverte")
             return

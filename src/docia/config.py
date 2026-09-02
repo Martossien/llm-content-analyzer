@@ -45,6 +45,8 @@ Un fichier isolé plus gros que ce budget est traité **seul**, jamais écarté.
 
 @dataclass
 class LLMConfig:
+    """Section `[llm]` : serveur, modèle, budgets de tokens, raisonnement, patience."""
+
     transport: str = "vllm"
     """`vllm` (OpenAI-compatible direct) ou `openwebui` (API native, fichiers texte inline)."""
     base_url: str = "http://127.0.0.1:8000/v1"
@@ -83,11 +85,14 @@ class LLMConfig:
     (bulletins de paie C3 → C2). `xhigh` n'est sûr qu'avec le budget imposé."""
 
     def resolved_api_key(self) -> str:
+        """Clé API effective : config, puis `DOCIA_API_KEY`, puis un jeton factice."""
         return self.api_key or os.environ.get("DOCIA_API_KEY", "") or "dummy"
 
 
 @dataclass
 class BlocksConfig:
+    """Section `[blocks]` : taille des blocs, marge, moteur de comptage, mémoire par lot."""
+
     block_tokens: int = 32_000
     """Plafond par bloc (tokens avec marge). 16–64K recommandé (banc du 30/08)."""
     margin: float = 0.15
@@ -135,6 +140,8 @@ class BlocksConfig:
 
 @dataclass
 class FilterConfig:
+    """Section `[filter]` : extensions, tailles et dossiers exclus de l'analyse."""
+
     excluded_extensions: list[str] = field(
         default_factory=lambda: [
             ".tmp",
@@ -205,6 +212,8 @@ class ScanConfig:
 
 @dataclass
 class Config:
+    """Configuration complète d'une campagne (`docia.toml`), validée par `validate()`."""
+
     db_path: str = "docia.sqlite"
     llm: LLMConfig = field(default_factory=LLMConfig)
     blocks: BlocksConfig = field(default_factory=BlocksConfig)
@@ -214,79 +223,86 @@ class Config:
     """Vide = prompt embarqué `docia/prompts/docia_v3.md`."""
 
     def validate(self) -> list[str]:
-        errors: list[str] = []
-        if self.llm.transport not in ("vllm", "openwebui"):
-            errors.append(
-                f"llm.transport doit être 'vllm' ou 'openwebui' (valeur: {self.llm.transport})"
-            )
-        if not self.llm.base_url.startswith(("http://", "https://")):
-            errors.append(
-                f"llm.base_url doit commencer par http(s):// (valeur: {self.llm.base_url})"
-            )
-        if not (1 <= self.llm.max_in_flight <= 256):
-            errors.append(
-                f"llm.max_in_flight doit être entre 1 et 256 (valeur: {self.llm.max_in_flight})"
-            )
-        if self.llm.timeout_s < 10:
-            errors.append("llm.timeout_s doit être >= 10")
-        if not (1_000 <= self.blocks.block_tokens <= 1_000_000):
-            errors.append(
-                f"blocks.block_tokens hors plage 1000–1000000 (valeur: {self.blocks.block_tokens})"
-            )
-        if not (0.0 <= self.blocks.margin <= 1.0):
-            errors.append("blocks.margin doit être entre 0 et 1")
-        if self.blocks.tokenizer_engine not in ("approx", "mistral", "openai"):
-            errors.append(f"blocks.tokenizer_engine inconnu : {self.blocks.tokenizer_engine}")
-        if self.blocks.batch_files < 1:
-            errors.append("blocks.batch_files doit être >= 1")
-        if self.blocks.batch_bytes < 0:
-            errors.append(
-                "blocks.batch_bytes doit être >= 0 (0 = aucun plafond mémoire) "
-                f"(valeur: {self.blocks.batch_bytes})"
-            )
-        if self.llm.thinking_budget_tokens < 0:
-            errors.append("llm.thinking_budget_tokens doit être >= 0")
-        if self.llm.reasoning_effort not in ("", "low", "medium", "xhigh"):
-            errors.append(f"llm.reasoning_effort inconnu : {self.llm.reasoning_effort}")
-        if self.llm.max_context_tokens < self.blocks.block_tokens:
-            errors.append(
-                "llm.max_context_tokens doit être >= blocks.block_tokens "
-                f"({self.llm.max_context_tokens} < {self.blocks.block_tokens})"
-            )
-        if self.llm.max_retries < 0:
-            errors.append(f"llm.max_retries doit être >= 0 (valeur: {self.llm.max_retries})")
-        if self.llm.max_tokens_per_file < 1:
-            errors.append(
-                f"llm.max_tokens_per_file doit être >= 1 (valeur: {self.llm.max_tokens_per_file})"
-            )
-        # `[filter]` n'était pas validé du tout : `docia plan` excluait les 60 000
-        # fichiers en annonçant « 0 à analyser » sans que rien ne pointe la config,
-        # que `docia.toml` soit édité à la main ou produit par `docia init`.
-        if self.filter.min_size_bytes < 0:
-            errors.append(
-                f"filter.min_size_bytes doit être >= 0 (valeur: {self.filter.min_size_bytes})"
-            )
-        if self.filter.max_size_bytes < 1:
-            errors.append(
-                f"filter.max_size_bytes doit être >= 1 (valeur: {self.filter.max_size_bytes})"
-            )
-        if self.filter.min_size_bytes > self.filter.max_size_bytes:
-            errors.append(
-                "filter.min_size_bytes doit être <= filter.max_size_bytes "
-                f"({self.filter.min_size_bytes} > {self.filter.max_size_bytes})"
-            )
-        for name, values in (
-            ("filter.excluded_extensions", self.filter.excluded_extensions),
-            ("filter.excluded_dir_markers", self.filter.excluded_dir_markers),
-        ):
-            wrong = [v for v in values if not isinstance(v, str)]
-            if wrong:
-                errors.append(f"{name} ne doit contenir que du texte (valeur : {wrong[0]!r})")
+        """Messages d'erreur de la configuration (vide = valable), section par section."""
+        errors = [*self._validate_llm(), *self._validate_blocks(), *self._validate_filter()]
         if not self.db_path.strip():
             errors.append("db_path ne peut pas être vide")
         return errors
 
+    def _validate_llm(self) -> list[str]:
+        llm, errors = self.llm, []
+        if llm.transport not in ("vllm", "openwebui"):
+            errors.append(
+                f"llm.transport doit être 'vllm' ou 'openwebui' (valeur: {llm.transport})"
+            )
+        if not llm.base_url.startswith(("http://", "https://")):
+            errors.append(f"llm.base_url doit commencer par http(s):// (valeur: {llm.base_url})")
+        if not (1 <= llm.max_in_flight <= 256):
+            errors.append(
+                f"llm.max_in_flight doit être entre 1 et 256 (valeur: {llm.max_in_flight})"
+            )
+        if llm.timeout_s < 10:
+            errors.append("llm.timeout_s doit être >= 10")
+        if llm.thinking_budget_tokens < 0:
+            errors.append("llm.thinking_budget_tokens doit être >= 0")
+        if llm.reasoning_effort not in ("", "low", "medium", "xhigh"):
+            errors.append(f"llm.reasoning_effort inconnu : {llm.reasoning_effort}")
+        if llm.max_context_tokens < self.blocks.block_tokens:
+            errors.append(
+                "llm.max_context_tokens doit être >= blocks.block_tokens "
+                f"({llm.max_context_tokens} < {self.blocks.block_tokens})"
+            )
+        if llm.max_retries < 0:
+            errors.append(f"llm.max_retries doit être >= 0 (valeur: {llm.max_retries})")
+        if llm.max_tokens_per_file < 1:
+            errors.append(
+                f"llm.max_tokens_per_file doit être >= 1 (valeur: {llm.max_tokens_per_file})"
+            )
+        return errors
+
+    def _validate_blocks(self) -> list[str]:
+        blocks, errors = self.blocks, []
+        if not (1_000 <= blocks.block_tokens <= 1_000_000):
+            errors.append(
+                f"blocks.block_tokens hors plage 1000–1000000 (valeur: {blocks.block_tokens})"
+            )
+        if not (0.0 <= blocks.margin <= 1.0):
+            errors.append("blocks.margin doit être entre 0 et 1")
+        if blocks.tokenizer_engine not in ("approx", "mistral", "openai"):
+            errors.append(f"blocks.tokenizer_engine inconnu : {blocks.tokenizer_engine}")
+        if blocks.batch_files < 1:
+            errors.append("blocks.batch_files doit être >= 1")
+        if blocks.batch_bytes < 0:
+            errors.append(
+                "blocks.batch_bytes doit être >= 0 (0 = aucun plafond mémoire) "
+                f"(valeur: {blocks.batch_bytes})"
+            )
+        return errors
+
+    def _validate_filter(self) -> list[str]:
+        """`[filter]` n'était pas validé du tout : `docia plan` excluait les 60 000
+        fichiers en annonçant « 0 à analyser » sans que rien ne pointe la config."""
+        flt, errors = self.filter, []
+        if flt.min_size_bytes < 0:
+            errors.append(f"filter.min_size_bytes doit être >= 0 (valeur: {flt.min_size_bytes})")
+        if flt.max_size_bytes < 1:
+            errors.append(f"filter.max_size_bytes doit être >= 1 (valeur: {flt.max_size_bytes})")
+        if flt.min_size_bytes > flt.max_size_bytes:
+            errors.append(
+                "filter.min_size_bytes doit être <= filter.max_size_bytes "
+                f"({flt.min_size_bytes} > {flt.max_size_bytes})"
+            )
+        for name, values in (
+            ("filter.excluded_extensions", flt.excluded_extensions),
+            ("filter.excluded_dir_markers", flt.excluded_dir_markers),
+        ):
+            wrong = [v for v in values if not isinstance(v, str)]
+            if wrong:
+                errors.append(f"{name} ne doit contenir que du texte (valeur : {wrong[0]!r})")
+        return errors
+
     def work_dir(self) -> Path:
+        """Dossier des blocs `.md` : `blocks.work_dir` ou `<base>.blocks/`."""
         if self.blocks.work_dir:
             return Path(self.blocks.work_dir)
         db = Path(self.db_path)

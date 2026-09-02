@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from docfuse.core.context_counter import estimate_tokens
 from docfuse.core.orchestrator import run_analysis
@@ -211,41 +212,7 @@ def _run_docfuse(
         if row is not None:
             outcomes.setdefault(row.id, f"ignoré par DocFuse : {reason}")
 
-    # Fichiers exploitables, par indice dans `result.files` (aligné sur les
-    # `file_indices` des parties).
-    rows_by_index: dict[int, FileRow] = {}
-    index_by_ref = {f.relative_path: i for i, f in enumerate(result.files)}
-    for index, extracted in enumerate(result.files):
-        row = _row_for(rows_by_key, extracted.path)
-        if row is None:
-            logger.warning("Fichier rendu par DocFuse sans ligne connue : %s", extracted.path)
-            continue
-        original_ref = extracted.extra_metadata.get("duplicate_of")
-        if original_ref:
-            # Doublon exact (D-064 DocFuse) : le texte est remplacé par un renvoi.
-            # On n'envoie pas le renvoi à la LLM ; le pipeline copie l'analyse
-            # de l'original.
-            original = rows_by_index.get(index_by_ref.get(original_ref, -1))
-            if original is None:
-                orig_idx = index_by_ref.get(original_ref)
-                original = (
-                    _row_for(rows_by_key, result.files[orig_idx].path)
-                    if orig_idx is not None
-                    else None
-                )
-            if original is not None:
-                duplicates[row.id] = original.id
-                continue
-            outcomes.setdefault(row.id, f"doublon de {original_ref} (original hors lot)")
-            continue
-        if not extracted.status.is_extracted():
-            detail = extracted.error_message or str(extracted.status)
-            outcomes.setdefault(row.id, f"extraction en erreur : {detail}")
-            continue
-        if not extracted.text.strip():
-            outcomes.setdefault(row.id, "vide")
-            continue
-        rows_by_index[index] = row
+    rows_by_index = _usable_rows(result, rows_by_key, outcomes, duplicates)
 
     parts = split_by_budget(result)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -300,6 +267,51 @@ def _run_docfuse(
             )
         )
     return blocks
+
+
+def _usable_rows(
+    result: Any,
+    rows_by_key: dict[str, FileRow],
+    outcomes: dict[int, str],
+    duplicates: dict[int, int],
+) -> dict[int, FileRow]:
+    """Lignes exploitables, par indice dans `result.files` (aligné sur les
+    `file_indices` des parties). Les doublons exacts, les extractions en erreur et
+    les fichiers vides sont écartés avec leur raison dans `outcomes`."""
+    rows_by_index: dict[int, FileRow] = {}
+    index_by_ref = {f.relative_path: i for i, f in enumerate(result.files)}
+    for index, extracted in enumerate(result.files):
+        row = _row_for(rows_by_key, extracted.path)
+        if row is None:
+            logger.warning("Fichier rendu par DocFuse sans ligne connue : %s", extracted.path)
+            continue
+        original_ref = extracted.extra_metadata.get("duplicate_of")
+        if original_ref:
+            # Doublon exact (D-064 DocFuse) : le texte est remplacé par un renvoi.
+            # On n'envoie pas le renvoi à la LLM ; le pipeline copie l'analyse
+            # de l'original.
+            original = rows_by_index.get(index_by_ref.get(original_ref, -1))
+            if original is None:
+                orig_idx = index_by_ref.get(original_ref)
+                original = (
+                    _row_for(rows_by_key, result.files[orig_idx].path)
+                    if orig_idx is not None
+                    else None
+                )
+            if original is not None:
+                duplicates[row.id] = original.id
+                continue
+            outcomes.setdefault(row.id, f"doublon de {original_ref} (original hors lot)")
+            continue
+        if not extracted.status.is_extracted():
+            detail = extracted.error_message or str(extracted.status)
+            outcomes.setdefault(row.id, f"extraction en erreur : {detail}")
+            continue
+        if not extracted.text.strip():
+            outcomes.setdefault(row.id, "vide")
+            continue
+        rows_by_index[index] = row
+    return rows_by_index
 
 
 def _segment_blocks(

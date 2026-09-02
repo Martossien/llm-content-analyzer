@@ -15,12 +15,15 @@ _EMBEDDED = "(embarqué)"
 
 
 class PromptTab:
+    """Onglet administrateur « Prompt » : profils en base, édition, import/export."""
+
     def __init__(self, app: Any, parent: Any) -> None:
         self.app = app
         self.parent = parent
         self.ctk = app.ctk
 
     def build(self) -> None:
+        """Construit les widgets de l'onglet (une fois)."""
         ctk, p = self.ctk, self.parent
         top = ctk.CTkFrame(p, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(10, 4))
@@ -126,6 +129,7 @@ class PromptTab:
         )
 
     def refresh(self) -> None:
+        """Recharge la liste des profils et le profil actif depuis la base."""
         names = [_EMBEDDED]
         active = None
         if self.app.db_path().exists():

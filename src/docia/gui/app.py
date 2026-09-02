@@ -128,6 +128,7 @@ class _JournalToWindow(logging.Handler):
         self.setFormatter(logging.Formatter("%(levelname)s %(name)s : %(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Reprend dans la fenêtre un enregistrement des couches basses (au-delà du seuil)."""
         if getattr(record, WINDOW_SKIP, False):
             return
         try:
@@ -391,6 +392,7 @@ class DociaApp:
             self._tab_changed()  # `CTkTabview.set` n'appelle pas `command`
 
     def show_tab(self, name: str, *, admin: bool = False) -> None:
+        """Affiche un onglet (active le mode administrateur si l'onglet en dépend)."""
         if admin and not self.admin_var.get():
             self.admin_var.set(True)
             self._toggle_admin()
@@ -417,6 +419,7 @@ class DociaApp:
 
     # ------------------------------------------------------------ campagne
     def db_path(self) -> Path:
+        """Chemin de la campagne courante (champ vidé = celui de la config)."""
         return Path(self._db_path.strip() or self.config.db_path)
 
     def open_db(self) -> Database:
@@ -431,9 +434,11 @@ class DociaApp:
         return Database(self.db_path())
 
     def backup_dir(self) -> Path:
+        """Dossier de sauvegardes choisi, sinon celui par défaut de la base."""
         return self._backup_dir or default_backup_dir(self.db_path())
 
     def set_backup_dir(self, path: Path) -> None:
+        """Dossier de sauvegardes choisi par l'utilisateur."""
         self._backup_dir = path
 
     def create_campaign(self, db_path: str) -> bool:
@@ -536,6 +541,7 @@ class DociaApp:
         self.log(f"campagne : {db_path}")
 
     def remember_campaign(self, csv_path: str | None = None) -> None:
+        """Place la campagne courante en tête des récentes (si sa base existe)."""
         if self.db_path().exists():
             remember_recent(str(self.db_path()), csv_path)
 
@@ -678,20 +684,25 @@ class DociaApp:
         threading.Thread(target=worker, name=f"docia-{name}", daemon=True).start()
 
     def is_busy(self) -> bool:
+        """Vrai tant qu'un travail exclusif (scan, run…) est en cours."""
         return bool(self._worker and self._worker.is_alive())
 
     def on_busy(self, listener: Callable[[bool], None], owner: Any = None) -> None:
+        """Abonne un rappel aux changements d'occupation (retiré si son widget disparaît)."""
         self._busy_listeners.append((listener, owner if owner is not None else _owner_of(listener)))
 
     def off_busy(self, listener: Callable[[bool], None]) -> None:
+        """Désabonne un rappel d'occupation."""
         self._busy_listeners = [e for e in self._busy_listeners if e[0] != listener]
 
     def on_refresh(self, listener: Callable[[], None], owner: Any = None) -> None:
+        """Abonne un rappel aux rafraîchissements globaux."""
         self._refresh_listeners.append(
             (listener, owner if owner is not None else _owner_of(listener))
         )
 
     def off_refresh(self, listener: Callable[[], None]) -> None:
+        """Désabonne un rappel de rafraîchissement."""
         self._refresh_listeners = [e for e in self._refresh_listeners if e[0] != listener]
 
     def _dispatch(self, listeners: list[Any], call: Callable[[Any], None], what: str) -> None:
@@ -737,6 +748,7 @@ class DociaApp:
 
     # ------------------------------------------------------------ journal
     def log(self, message: str) -> None:
+        """Ligne de journal de la fenêtre, appelable depuis n'importe quel thread."""
         self._log_queue.put(message)
 
     def ui(self, action: Callable[[], object]) -> None:
@@ -810,6 +822,7 @@ class DociaApp:
             self.refresh_all()
 
     def run(self) -> None:
+        """Boucle Tk ; rend au processus ses crochets d'exception à la fermeture."""
         try:
             self.root.mainloop()
         finally:

@@ -223,6 +223,7 @@ class QuickReport:
     extraction_errors: int = 0
 
     def as_dict(self) -> dict[str, object]:
+        """Rapport sous forme de dictionnaire (sortie `--json`)."""
         return asdict(self)
 
     def _denied_lines(self) -> list[str]:
@@ -332,24 +333,9 @@ def quick_analyze(
     if missing:
         return failed("chemin introuvable : " + ", ".join(missing[:5]))
 
-    unreadable: list[str] = []
-    denied: list[str] = []
-    rows = list(
-        csv_rows_from_paths([p.resolve() for p in paths], unreadable=unreadable, denied_dirs=denied)
-    )
-    report.unreadable = len(unreadable)
-    report.denied_dirs = len(denied)
-    report.requested = len(rows)
-    if denied:
-        say(f"{len(denied)} dossier(s) refusé(s) : {', '.join(denied[:3])}")
-    if not rows:
-        return failed(
-            f"aucun fichier lisible ({len(unreadable)} illisible(s), "
-            f"{len(denied)} dossier(s) refusé(s))"
-            if unreadable or denied
-            else "aucun fichier à analyser"
-        )
-    say(f"{len(rows)} fichier(s) repéré(s)")
+    rows = _gather_inputs(paths, report, say)
+    if rows is None:
+        return failed(report.message)
 
     temp_dir: Path | None = None
     if db_path is None:
@@ -367,29 +353,17 @@ def quick_analyze(
 
     try:
         with Database(db_file) as db:
-            scan_id = db.start_scan(f"quick:{paths[0]}")
-            new, updated, unchanged = db.upsert_files(rows, scan_id)
-            db.finish_scan(
-                scan_id,
-                total=len(rows),
-                new=new,
-                updated=updated,
-                unchanged=unchanged,
-                invalid=len(unreadable),
+            _analyze_rows(
+                db,
+                local,
+                rows,
+                report,
+                paths,
+                progress=progress,
+                cancel=cancel,
+                dry_run=dry_run,
+                say=say,
             )
-            plan = plan_files(db, local.filter)
-            say(f"à analyser : {plan.pending} — exclus : {plan.excluded}")
-            run = run_pipeline(db, local, progress=progress, cancel=cancel, dry_run=dry_run)
-            report.llm_errors = list(run.errors)
-            report.dry_run = dry_run
-            report.blocks_built = run.blocks_built
-            report.extraction_errors = run.files_error
-            wanted = {path_key(row.path) for row in rows}
-            report.files = [
-                _result(record)
-                for record in db.latest_analyses()
-                if path_key(str(record["path"])) in wanted
-            ]
     except sqlite3.Error as exc:
         return failed(f"base inutilisable ({db_file}) : {exc}")
     finally:
@@ -407,6 +381,70 @@ def quick_analyze(
     if report.llm_errors and report.analyzed == 0:
         return failed(report.llm_errors[0])
     return report
+
+
+def _gather_inputs(
+    paths: Sequence[Path], report: QuickReport, say: ProgressCallback
+) -> list[SmbeagleRow] | None:
+    """Lignes « scan » des chemins demandés ; `None` (et `report.message`) s'il n'y a rien à lire."""
+    unreadable: list[str] = []
+    denied: list[str] = []
+    rows = list(
+        csv_rows_from_paths([p.resolve() for p in paths], unreadable=unreadable, denied_dirs=denied)
+    )
+    report.unreadable = len(unreadable)
+    report.denied_dirs = len(denied)
+    report.requested = len(rows)
+    if denied:
+        say(f"{len(denied)} dossier(s) refusé(s) : {', '.join(denied[:3])}")
+    if not rows:
+        report.message = (
+            f"aucun fichier lisible ({len(unreadable)} illisible(s), "
+            f"{len(denied)} dossier(s) refusé(s))"
+            if unreadable or denied
+            else "aucun fichier à analyser"
+        )
+        return None
+    say(f"{len(rows)} fichier(s) repéré(s)")
+    return rows
+
+
+def _analyze_rows(
+    db: Database,
+    local: Config,
+    rows: list[SmbeagleRow],
+    report: QuickReport,
+    paths: Sequence[Path],
+    *,
+    progress: ProgressCallback | None,
+    cancel: threading.Event | None,
+    dry_run: bool,
+    say: ProgressCallback,
+) -> None:
+    """Import des lignes, préparation, run, puis relecture des fiches demandées."""
+    scan_id = db.start_scan(f"quick:{paths[0]}")
+    new, updated, unchanged = db.upsert_files(rows, scan_id)
+    db.finish_scan(
+        scan_id,
+        total=len(rows),
+        new=new,
+        updated=updated,
+        unchanged=unchanged,
+        invalid=report.unreadable,
+    )
+    plan = plan_files(db, local.filter)
+    say(f"à analyser : {plan.pending} — exclus : {plan.excluded}")
+    run = run_pipeline(db, local, progress=progress, cancel=cancel, dry_run=dry_run)
+    report.llm_errors = list(run.errors)
+    report.dry_run = dry_run
+    report.blocks_built = run.blocks_built
+    report.extraction_errors = run.files_error
+    wanted = {path_key(row.path) for row in rows}
+    report.files = [
+        _result(record)
+        for record in db.latest_analyses()
+        if path_key(str(record["path"])) in wanted
+    ]
 
 
 def _result(record: sqlite3.Row) -> QuickFileResult:

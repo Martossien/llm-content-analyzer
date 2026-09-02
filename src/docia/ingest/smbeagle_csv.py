@@ -582,11 +582,13 @@ class _ImportTally:
     errors: list[CsvLineError] = field(default_factory=list)
 
     def note_error(self, error: CsvLineError) -> None:
+        """Une ligne illisible : comptée invalide, raison conservée (bornée)."""
         self.invalid += 1
         if len(self.errors) < MAX_KEPT_ERRORS:
             self.errors.append(error)
 
     def note_row(self, row: SmbeagleRow) -> None:
+        """Une ligne lue : total, taille illisible ou nulle, chemin non décodable."""
         self.total += 1
         if row.size_unreadable:
             self.size_defaulted += 1
@@ -596,6 +598,7 @@ class _ImportTally:
             self.mojibake += 1
 
     def note_written(self, new: int, updated: int, unchanged: int) -> None:
+        """Cumule le bilan d'un lot écrit (nouveaux, modifiés, inchangés)."""
         self.new += new
         self.updated += updated
         self.unchanged += unchanged

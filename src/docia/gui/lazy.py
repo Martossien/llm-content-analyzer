@@ -54,6 +54,7 @@ class LazyScreen:
 
     # ------------------------------------------------------------------ visibilité
     def visible(self) -> bool:
+        """Vrai si l'onglet de cet écran est celui affiché."""
         current = self.app.current_tab()
         return bool(current == self.TAB_NAME or (current == "" and self.FIRST_TAB))
 

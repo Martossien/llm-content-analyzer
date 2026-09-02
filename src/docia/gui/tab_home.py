@@ -26,6 +26,8 @@ from docia.scan import scope_warnings
 
 
 class HomeTab(LazyScreen):
+    """Onglet Accueil : tuiles, quatre étapes (source, serveur, analyse, consultation), relance, analyse rapide."""
+
     TAB_NAME = "Accueil"
     FIRST_TAB = True  # affiché à l'ouverture, avant que `current_tab()` rende un nom
 
@@ -38,6 +40,7 @@ class HomeTab(LazyScreen):
 
     # ------------------------------------------------------------------ build
     def build(self) -> None:
+        """Construit les widgets de l'onglet (une fois)."""
         ctk, p = self.ctk, self.parent
         scroll = ctk.CTkScrollableFrame(p, fg_color="transparent")
         scroll.pack(fill="both", expand=True)

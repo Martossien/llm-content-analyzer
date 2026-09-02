@@ -248,6 +248,7 @@ class BenchReport:
         return self.thinking_completion_tokens > 0 and self.plain_completion_tokens > 0
 
     def as_dict(self) -> dict[str, object]:
+        """Rapport sous forme de dictionnaire (sortie `--json`)."""
         return asdict(self)
 
     def as_lines(self) -> list[str]:
