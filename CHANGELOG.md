@@ -41,7 +41,14 @@ antérieur à la v3 (POC 2025) est dans git.
   préemptions vLLM lues dans `/metrics`). `max_in_flight` devient le plafond en
   requêtes ; le budget trouvé est mémorisé par serveur + modèle (`pacer.json`) pour
   le run suivant ; la barre d'avancement affiche « en vol N / budget B tokens · débit ».
-  Régulateur pur (`llm/pacer.py`), testé à froid sur un serveur simulé.
+  Régulateur pur (`llm/pacer.py`), testé à froid sur un serveur simulé, puis contre
+  vLLM sur 4×3090 (181 fichiers, 105 blocs, 0 erreur) : départ à la moitié du plafond
+  (partir de deux blocs sérialisait tout), fenêtres d'au moins deux latences médianes,
+  référence lissée, descente confirmée sur deux fenêtres, fenêtres écartées quand le
+  budget ne contraint pas — le débit brut d'une fenêtre variant de 579 à 3 797 tok/s
+  selon le contenu des blocs.
+- **Prompt** : un document seulement *cité* dans le texte d'un fichier n'a pas
+  d'entrée (le modèle en inventait pour les pièces jointes nommées dans des échanges).
 
 ### Modifié
 

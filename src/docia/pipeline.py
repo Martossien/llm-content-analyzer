@@ -627,10 +627,16 @@ class _Run:
                     continue
                 tokens = spec.tokens_with_margin
                 await pacer.acquire(tokens)
+                started = time.monotonic()
                 try:
                     outcome = await self._send_guarded(spec)
                 finally:
-                    pacer.release(tokens, ok=outcome == "done", strain=outcome == "transport")
+                    pacer.release(
+                        tokens,
+                        ok=outcome == "done",
+                        strain=outcome == "transport",
+                        latency_s=time.monotonic() - started,
+                    )
                 await self._watch_preemptions(pacer)
 
         workers = max(1, min(self.cfg.llm.max_in_flight, len(specs)))
@@ -672,7 +678,8 @@ class _Run:
             budget_tokens=start,
             min_tokens=largest,
             max_tokens=ceiling,
-            on_decision=lambda message: self.tell(f"alimentation adaptative : {message}"),
+            # Le régulateur journalise déjà chaque décision : ici la console seulement.
+            on_decision=lambda message: self.say(f"alimentation adaptative : {message}"),
         )
         origin = (
             "réglé"

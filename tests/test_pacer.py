@@ -24,6 +24,7 @@ def serveur_simule(
     """`blocs` blocs rendus par un serveur qui tient `debit` tokens/s au budget courant."""
     for _ in range(blocs):
         horloge.now += tokens / debit
+        pacer.mark_busy()  # le budget contraint : la fenêtre est concluante
         pacer.release(tokens, ok=True)
 
 
@@ -44,7 +45,9 @@ def test_montee_tant_que_le_debit_suit_puis_palier_sous_l_optimum() -> None:
         trajet.append(pacer.budget)
     assert trajet[0] == int(50_000 * UP)  # premier relevé : montée
     assert max(trajet) < 2_000_000  # jamais parti au plafond : le débit a cessé de suivre
-    assert 200_000 <= pacer.budget <= 340_000, trajet  # au coude (optimum 300 K)
+    # Au coude (optimum 300 K) : la médiane des dernières fenêtres, car les sondes
+    # périodiques font osciller d'un cran autour.
+    assert 200_000 <= sorted(trajet[-10:])[5] <= 360_000, trajet
     assert pacer.stats().throughput_tok_s is not None
     assert pacer.decisions == 25
 
@@ -104,6 +107,47 @@ def test_detresse_divise_le_budget_sans_attendre_la_fenetre() -> None:
     pacer.distress("préemptions")
     pacer.distress("préemptions")
     assert pacer.budget == 30_000  # jamais sous le plancher
+
+
+def test_fenetre_non_concluante_quand_le_budget_ne_contraint_pas() -> None:
+    """File vide ou plafond de requêtes atteint avant les tokens : le débit mesuré
+    ne dépend pas du budget, la fenêtre est écartée et le budget ne bouge pas."""
+    horloge = Horloge()
+    pacer = Pacer(budget_tokens=200_000, min_tokens=20_000, max_tokens=800_000, clock=horloge)
+    for _ in range(3 * WINDOW):
+        horloge.now += 10.0
+        pacer.release(10_000, ok=True)  # sans mark_busy
+    assert (pacer.budget, pacer.decisions, pacer.inconclusive) == (200_000, 0, 3)
+
+
+def test_une_fenetre_doit_durer_au_moins_deux_latences() -> None:
+    """Cinq blocs lancés bien avant qui se terminent en rafale ne font pas une
+    mesure : la fenêtre attend d'avoir duré deux latences médianes."""
+    horloge = Horloge()
+    pacer = Pacer(budget_tokens=200_000, min_tokens=20_000, max_tokens=800_000, clock=horloge)
+    for _ in range(WINDOW):
+        horloge.now += 1.0
+        pacer.mark_busy()
+        pacer.release(10_000, ok=True, latency_s=100.0)  # 5 s écoulées, latence 100 s
+    assert pacer.decisions == 0
+    horloge.now += 200.0
+    pacer.mark_busy()
+    pacer.release(10_000, ok=True, latency_s=100.0)
+    assert pacer.decisions == 1
+
+
+def test_une_seule_fenetre_lente_ne_fait_pas_descendre_en_palier() -> None:
+    """Le débit brut varie du simple au sextuple selon le contenu des blocs
+    (mesure du 02/09) : en palier, il faut deux fenêtres en baisse pour descendre."""
+    horloge = Horloge()
+    pacer = Pacer(budget_tokens=200_000, min_tokens=20_000, max_tokens=200_000, clock=horloge)
+    for _ in range(4):
+        serveur_simule(pacer, horloge, 3_000.0)  # plafond atteint → palier
+    assert pacer.budget == 200_000
+    serveur_simule(pacer, horloge, 1_000.0)  # une fenêtre de blocs coûteux
+    assert pacer.budget == 200_000
+    serveur_simule(pacer, horloge, 1_000.0)  # confirmée : descente
+    assert pacer.budget < 200_000
 
 
 def test_un_bloc_en_erreur_ne_compte_pas_dans_le_debit() -> None:
