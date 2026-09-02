@@ -178,6 +178,10 @@ class ScanResult:
     (`counts.dirs_unreadable`) ; 0 avec un scanner antérieur, qui ne le disait pas."""
     unreadable_examples: list[str] = field(default_factory=list)
     """Premiers chemins non lus (`unreadable_directories` du manifeste), pour le journal."""
+    unreadable_files: int = 0
+    """Fichiers que le scanner a **sautés en cours d'examen** (disparus ou refusés entre
+    l'énumération et la lecture) : absents de l'inventaire. Compté par smbeagle_enriched
+    ≥ 4.4.0 (`counts.files_unreadable`) ; 0 avec un scanner antérieur."""
 
     @property
     def missing_files(self) -> int:
@@ -354,6 +358,14 @@ def manifest_unreadable(manifest: dict[str, object]) -> tuple[int, list[str]]:
     listed = manifest.get("unreadable_directories")
     examples = [str(p) for p in listed if str(p).strip()] if isinstance(listed, list) else []
     return max(number, len(examples)), examples
+
+
+def manifest_unreadable_files(manifest: dict[str, object]) -> int:
+    """Fichiers sautés en cours d'examen déclarés par le manifeste (`counts.files_unreadable`,
+    smbeagle_enriched ≥ 4.4.0) ; 0 si la clé manque ou n'est pas un entier."""
+    counts = manifest.get("counts")
+    raw = counts.get("files_unreadable") if isinstance(counts, dict) else None
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0
 
 
 def expected_file_count(manifest: dict[str, object], last_files: int) -> int:
@@ -670,6 +682,7 @@ def run_scan(
         expected_files=expected_file_count(manifest, followed.last_files),
         unreadable_dirs=unreadable_count,
         unreadable_examples=unreadable_examples[:5],
+        unreadable_files=manifest_unreadable_files(manifest),
     )
     _check_outcome(result, returncode=proc.returncode)
     if result.unreadable_dirs:
@@ -684,6 +697,14 @@ def run_scan(
         message = (
             f"scan : {result.unreadable_dirs} sous-répertoire(s) non lu(s) — accès refusé ou "
             f"chemin illisible ({examples}{more}) : leurs fichiers sont absents de l'inventaire"
+        )
+        _notify_line(on_line, message)
+        logger.warning("%s", message)
+    if result.unreadable_files:
+        message = (
+            f"scan : {result.unreadable_files} fichier(s) sauté(s) en cours d'examen — disparus "
+            "ou refusés entre l'énumération et la lecture : absents de l'inventaire "
+            "(relancer le scanner avec -v pour les chemins)"
         )
         _notify_line(on_line, message)
         logger.warning("%s", message)

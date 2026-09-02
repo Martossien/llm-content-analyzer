@@ -41,7 +41,10 @@ commit de `main`). La 4.2.0 scannait le mauvais dossier sur un chemin mal formé
 `0` pour une taille non collectée (campagne vidée « fichier trop petit »), présentait un
 périmètre amputé comme complet et sortait en code 3 sur toute racine de plus de 20
 sous-dossiers. Depuis 4.3.0 le manifeste nomme aussi les sous-dossiers que le scanner n'a
-pas pu lire, et `docia scan` le relaie. `docia doctor` affiche le scanner trouvé.
+pas pu lire, et `docia scan` le relaie. La **4.4.0** examine les fichiers d'un répertoire en
+parallèle (`--file-workers`, défaut 8 : 20 000 fichiers en 2 s au lieu de 19) et compte les
+fichiers sautés en cours d'examen (`counts.files_unreadable`), relayés aussi. `docia doctor`
+affiche le scanner trouvé.
 
 ## Principe
 

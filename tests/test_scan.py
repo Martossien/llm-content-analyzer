@@ -469,6 +469,16 @@ def test_manifest_unreadable_compte_et_exemples() -> None:
     assert manifest_unreadable({"unreadable_directories": ["a", "b"]}) == (2, ["a", "b"])
 
 
+def test_manifest_unreadable_files_compte_les_fichiers_sautes() -> None:
+    """`counts.files_unreadable` (smbeagle_enriched ≥ 4.4.0) ; clé absente ou farfelue : 0."""
+    from docia.scan import manifest_unreadable_files
+
+    assert manifest_unreadable_files({}) == 0
+    assert manifest_unreadable_files({"counts": {"files_unreadable": True}}) == 0
+    assert manifest_unreadable_files({"counts": {"files_unreadable": -1}}) == 0
+    assert manifest_unreadable_files({"counts": {"files_unreadable": 3}}) == 3
+
+
 def test_expected_file_count_fait_foi_sur_le_manifeste() -> None:
     """Le manifeste prime sur la progression, et son absence n'invente aucun écart."""
     from docia.scan import expected_file_count

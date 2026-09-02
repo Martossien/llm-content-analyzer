@@ -7,7 +7,13 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ## [Unreleased]
 
-_Rien pour l'instant._
+### Ajouté
+
+- **Fichiers sautés par le scanner** : `counts.files_unreadable` du manifeste
+  (smbeagle_enriched ≥ 4.4.0 — fichiers disparus ou refusés entre l'énumération et la
+  lecture) est lu et annoncé dans le journal et la fenêtre, comme les sous-répertoires
+  non lus. smbeagle_enriched 4.4.0 examine les fichiers d'un répertoire en parallèle
+  (`--file-workers`, défaut 8) : 20 000 fichiers en 2,1 s au lieu de 19,3 s.
 
 ## [3.2.0] — 2026-09-02
 
