@@ -16,7 +16,7 @@ lecture des résultats, vérification humaine, FAQ.
 1. Copier dans un même dossier : **`Docia.exe`** (artefact `Docia-windows-x64` de la
    [CI](../../actions)) et **`SMBeagle.exe`** (artefact `windows-x64` de la
    [CI de smbeagle_enriched](https://github.com/Martossien/smbeagle_enriched/actions) —
-   voir [Compatibilité du scanner](#compatibilité-du-scanner) pour la version à prendre).
+   release **≥ 4.3.0** — voir [Compatibilité du scanner](#compatibilité-du-scanner)).
 2. Lancer `Docia.exe` (double-clic = interface ; en console, `Docia.exe doctor` vérifie que tout
    est en place : DocFuse, pdfium, **OCR Tesseract embarqué** — rien d'autre à installer, ni .NET
    ni Tesseract). Le diagnostic fait un **vrai essai d'OCR** et affiche, en cas d'échec, le
@@ -36,14 +36,12 @@ dossier (`\\serveur\partage\Finance`), avec le compte de la session (droit de le
 
 ## Compatibilité du scanner
 
-Prenez l'artefact `windows-x64` du **dernier commit de `main`** de smbeagle_enriched, pas
-la dernière release publiée. La release **v4.2.0 (30/08/2026)** a trois défauts corrigés
-depuis sur `main`, vérifiés le 01/09 : elle scanne le mauvais dossier quand le chemin est
-mal formé au lieu de le refuser (code 2) ; elle écrit une taille de `0` quand elle n'a pas
-été collectée, ce qui vide la campagne en silence (« fichier trop petit ») ; elle rend `0`
-sur un partage fermé par ACL et présente un périmètre amputé comme complet (désormais code
-4 et `skipped` dans le manifeste). `docia doctor` affiche le scanner trouvé ; `docia scan`
-refuse un CSV incomplet.
+Prenez la release **≥ 4.3.0** de smbeagle_enriched (ou l'artefact `windows-x64` du dernier
+commit de `main`). La 4.2.0 scannait le mauvais dossier sur un chemin mal formé, écrivait
+`0` pour une taille non collectée (campagne vidée « fichier trop petit »), présentait un
+périmètre amputé comme complet et sortait en code 3 sur toute racine de plus de 20
+sous-dossiers. Depuis 4.3.0 le manifeste nomme aussi les sous-dossiers que le scanner n'a
+pas pu lire, et `docia scan` le relaie. `docia doctor` affiche le scanner trouvé.
 
 ## Principe
 

@@ -93,9 +93,8 @@ PDF scanné généré, GUI `--smoke`). Arrêter vLLM après chaque mesure.
 - `docia.toml` peut porter un BOM ; `update_toml` relit ce qu'il écrit et refuse
   d'écrire une configuration infidèle.
 - Le `.md` d'un bloc `built` ne doit jamais être effacé (reprise impossible sinon).
-- DocFuse est **épinglé par commit** dans `pyproject.toml` : après une livraison
-  DocFuse, pousser DocFuse **puis** remonter l'épingle ici, sinon la CI et l'exe
-  n'en voient rien.
+- DocFuse est **épinglé par tag** (`v0.2.1`) dans `pyproject.toml` : après une release
+  DocFuse, remonter l'épingle ici, sinon la CI et l'exe n'en voient rien.
 
 ## 7. En attente
 

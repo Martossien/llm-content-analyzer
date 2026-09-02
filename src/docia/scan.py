@@ -174,7 +174,7 @@ class ScanResult:
     Voir `expected_file_count` pour la source retenue et pourquoi."""
     unreadable_dirs: int = 0
     """Sous-répertoires que le scanner n'a **pas pu lire** (accès refusé, chemin trop long) :
-    leurs fichiers manquent à l'inventaire. Compté par smbeagle_enriched ≥ 4.2.1
+    leurs fichiers manquent à l'inventaire. Compté par smbeagle_enriched ≥ 4.3.0
     (`counts.dirs_unreadable`) ; 0 avec un scanner antérieur, qui ne le disait pas."""
     unreadable_examples: list[str] = field(default_factory=list)
     """Premiers chemins non lus (`unreadable_directories` du manifeste), pour le journal."""
@@ -345,7 +345,7 @@ def manifest_skipped(manifest: dict[str, object]) -> list[str]:
 def manifest_unreadable(manifest: dict[str, object]) -> tuple[int, list[str]]:
     """(nombre, exemples) des sous-répertoires non lus déclarés par le manifeste.
 
-    Absents d'un scanner antérieur à 4.2.1 : `(0, [])` — l'absence de la clé n'invente
+    Absents d'un scanner antérieur à 4.3.0 : `(0, [])` — l'absence de la clé n'invente
     pas un périmètre amputé, comme pour `manifest_skipped`.
     """
     counts = manifest.get("counts")

@@ -7,6 +7,10 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ## [Unreleased]
 
+_Rien pour l'instant._
+
+## [3.1.0] — 2026-09-02
+
 ### Modifié
 
 - **Le run est une machine à étapes** — `pipeline._execute` (501 lignes, complexité
@@ -51,7 +55,7 @@ antérieur à la v3 (POC 2025) est dans git.
   passés en anglais ; les docstrings restent en français.
 - README : la mise en garde sur smbeagle v4.2.0 quitte l'étape 1 de l'installation
   pour une section « Compatibilité du scanner ».
-- **DocFuse épinglé sur un commit** dans `pyproject.toml` (build reproductible :
+- **DocFuse épinglé sur un tag** (`v0.2.1`) dans `pyproject.toml` (build reproductible :
   un push sur `DocFuse@main` ne peut plus casser la CI ni l'exe). Remonter
   l'épingle fait partie de toute livraison DocFuse (voir `AGENTS.md`).
 

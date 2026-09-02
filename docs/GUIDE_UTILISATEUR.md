@@ -331,9 +331,9 @@ nature (envoyé par requête / local au poste / descriptif du serveur) : [`docs/
   ne ferme pas les guillemets sous Windows). Le scanner refuse désormais explicitement (code 2)
   tout chemin qui n'est pas complet, au lieu de scanner silencieusement le mauvais dossier —
   c'est le piège le plus courant, car un fragment comme `Documents` existe souvent dans le
-  dossier depuis lequel on lance la commande. Ce refus explicite est postérieur à la release
-  **v4.2.0** du scanner : avec ce binaire-là, le mauvais dossier est encore scanné en silence —
-  prenez le `SMBeagle.exe` du dernier commit de `main` (voir README, installation). Pour scanner
+  dossier depuis lequel on lance la commande. Ce refus explicite existe depuis la release
+  **4.3.0** du scanner (prenez celle-là ou plus récente ; la 4.2.0 scannait encore le mauvais
+  dossier en silence). Pour scanner
   plusieurs dossiers, les valeurs se suivent : `--local-path "D:\un" "E:\deux"`. Depuis
   l'interface, rien de tout cela ne se pose.
 - *Un mail `.msg` ressort vide ou en erreur* → les mails français dont l'encodage est mal
