@@ -50,14 +50,17 @@ RESPLIT_SAFETY = 0.9
 """Après un `BlockTooLongError`, budget de re-découpage = place réelle / ratio × 0.9."""
 
 
-def segment_budget(cfg: Config) -> int:
-    """Budget de tokens (avec marge) d'un segment de gros fichier."""
-    room = cfg.llm.max_context_tokens - output_reserve_tokens(cfg.llm)
+def segment_budget(cfg: Config, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
+    """Budget de tokens (avec marge) d'un segment de gros fichier.
+
+    `prompt_tokens` : réserve pour le prompt système (mesurée par le client quand le
+    serveur sait compter, voir `LLMClient.prompt_reserve`)."""
+    room = cfg.llm.max_context_tokens - output_reserve_tokens(cfg.llm, prompt_tokens)
     safety = SEGMENT_SAFETY.get(cfg.blocks.tokenizer_engine, SEGMENT_SAFETY["approx"])
     return max(2_000, int(room * safety))
 
 
-def output_reserve_tokens(llm: LLMConfig) -> int:
+def output_reserve_tokens(llm: LLMConfig, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
     """Tokens à garder libres sous `llm.max_context_tokens` pour qu'un segment qui
     occupe presque tout le contexte laisse la place au prompt système et à la
     réponse — raisonnement compris, et même après le renvoi avec budget doublé
@@ -65,9 +68,7 @@ def output_reserve_tokens(llm: LLMConfig) -> int:
     single = llm.max_tokens_floor + llm.max_tokens_per_file
     if llm.enable_thinking:
         single += llm.thinking_budget_tokens
-    return SYSTEM_PROMPT_RESERVE_TOKENS + 2 * min(
-        single, llm.max_tokens_cap + llm.thinking_budget_tokens
-    )
+    return prompt_tokens + 2 * min(single, llm.max_tokens_cap + llm.thinking_budget_tokens)
 
 
 @dataclass
@@ -425,6 +426,7 @@ class _Run:
         """
         assert self.client is not None
         cfg = self.cfg
+        prompt_reserve = self.client.prompt_reserve
         if not self.dry_run:
             served = await self.client.server_max_model_len()
             if served is not None and served != cfg.llm.max_context_tokens:
@@ -437,7 +439,7 @@ class _Run:
                     # Le serveur sert moins que prévu : les blocs doivent être bâtis
                     # à sa mesure, sinon TOUS dépassent le plafond et toute la
                     # campagne part en erreur sans avoir envoyé une seule requête.
-                    budget = segment_budget(cfg)
+                    budget = segment_budget(cfg, prompt_reserve)
                     cfg.blocks.max_file_tokens = min(cfg.blocks.max_file_tokens or budget, budget)
                     if cfg.blocks.block_tokens > cfg.blocks.max_file_tokens:
                         cfg.blocks.block_tokens = cfg.blocks.max_file_tokens
@@ -447,7 +449,7 @@ class _Run:
                         )
         if cfg.blocks.max_file_tokens <= 0:
             # Réserve pour le prompt système et la réponse JSON du fichier découpé.
-            cfg.blocks.max_file_tokens = segment_budget(cfg)
+            cfg.blocks.max_file_tokens = segment_budget(cfg, prompt_reserve)
         if not self.dry_run and not await self.client.health():
             self.close("error")
             message = f"serveur LLM injoignable : {cfg.llm.base_url}"

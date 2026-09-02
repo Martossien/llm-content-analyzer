@@ -332,7 +332,7 @@ def test_reasoning_effort_in_template_kwargs(tmp_path: Path) -> None:
 def test_max_tokens_clamped_to_served_context(tmp_path: Path) -> None:
     """Un segment qui frôle le plafond servi ne demande jamais plus que la place restante."""
     from docia.config import LLMConfig
-    from docia.llm.client import _MIN_OUTPUT_TOKENS, _SYSTEM_PROMPT_TOKENS, LLMClient
+    from docia.llm.client import _MIN_OUTPUT_TOKENS, LLMClient
     from docia.models import BlockFile, BlockSpec
 
     block = tmp_path / "b.md"
@@ -346,7 +346,7 @@ def test_max_tokens_clamped_to_served_context(tmp_path: Path) -> None:
         tokens_with_margin=258_000,
     )
     payload = client.build_payload(big)
-    assert payload["max_tokens"] == 262_144 - 258_000 - _SYSTEM_PROMPT_TOKENS
+    assert payload["max_tokens"] == 262_144 - 258_000 - client.prompt_reserve
     doubled = client.build_payload(big, max_tokens=payload["max_tokens"] * 2)
     assert doubled["max_tokens"] == payload["max_tokens"]
     tiny = BlockSpec(

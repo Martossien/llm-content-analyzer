@@ -204,6 +204,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"count": int(len(prompt) * self.state.tokens_per_char)})
             return
         if self.path not in ("/v1/chat/completions", "/api/chat/completions"):
+            # Le corps doit être lu même pour répondre 404 : en HTTP/1.1 (keep-alive), un
+            # corps laissé dans le tube devient la « ligne de requête » suivante et la
+            # prochaine requête du même client reçoit 400 Bad Request.
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self._send_text(404, "not found")
             return
         length = int(self.headers.get("Content-Length", "0"))

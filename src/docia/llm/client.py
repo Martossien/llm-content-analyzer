@@ -22,7 +22,22 @@ from docia.models import BlockSpec, LLMResult, LLMUsage
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_TOKENS = 1_500
+"""Plancher de la réserve pour le prompt système, quand il n'a pas encore été mesuré."""
+_TEMPLATE_TOKENS = 300
+"""Gabarit de conversation (rôles, balises de raisonnement) : ajouté au prompt mesuré."""
 _MIN_OUTPUT_TOKENS = 512
+
+
+def estimate_prompt_tokens(text: str) -> int:
+    """Estimation prudente (≈ 3 caractères par token en français) du prompt système.
+
+    Sert avant le comptage exact du serveur, et à sa place quand `/tokenize` n'existe
+    pas (open-webui). La réserve était une constante (1 500) : un profil de prompt
+    plus long que prévu — c'est le but des profils — faisait refuser au comptage
+    exact des blocs que le découpage croyait tenir, et chaque bloc était re-découpé.
+    """
+    return max(_SYSTEM_PROMPT_TOKENS, len(text) // 3)
+
 
 CONNECT_TIMEOUT_S = 10.0
 """Un serveur injoignable doit se voir vite ; la génération, elle, peut être longue."""
@@ -110,6 +125,8 @@ class LLMClient:
         self.system_prompt = system_prompt
         self._semaphore = asyncio.Semaphore(cfg.max_in_flight)
         self._client: httpx.AsyncClient | None = None
+        self.prompt_tokens = estimate_prompt_tokens(system_prompt)
+        """Tokens du prompt système : estimés, puis mesurés par le serveur à l'ouverture."""
 
     # -- cycle de vie ----------------------------------------------------
 
@@ -125,7 +142,15 @@ class LLMClient:
             max_keepalive_connections=max(self.cfg.max_in_flight, 5),
         )
         self._client = httpx.AsyncClient(timeout=timeout, limits=limits)
+        measured = await self.count_tokens(self.system_prompt)
+        if measured is not None:
+            self.prompt_tokens = measured
         return self
+
+    @property
+    def prompt_reserve(self) -> int:
+        """Tokens à garder pour le prompt système et le gabarit, sous `max_context_tokens`."""
+        return self.prompt_tokens + _TEMPLATE_TOKENS
 
     async def __aexit__(
         self,
@@ -164,7 +189,7 @@ class LLMClient:
     def clamp_to_context(self, max_tokens: int, spec: BlockSpec) -> int:
         """Jamais plus que la place restante sous `max_context_tokens` (= `--max-model-len`
         servi) après le bloc et le prompt système ; sinon vLLM refuse la requête."""
-        room = self.cfg.max_context_tokens - spec.tokens_with_margin - _SYSTEM_PROMPT_TOKENS
+        room = self.cfg.max_context_tokens - spec.tokens_with_margin - self.prompt_reserve
         return max(_MIN_OUTPUT_TOKENS, min(max_tokens, room))
 
     def build_payload(self, spec: BlockSpec, *, max_tokens: int | None = None) -> dict[str, Any]:
@@ -239,7 +264,7 @@ class LLMClient:
     def prompt_room(self, spec: BlockSpec) -> int:
         """Tokens de prompt admissibles pour ce bloc : contexte servi moins la réponse
         (raisonnement compris) moins une marge de gabarit."""
-        return self.cfg.max_context_tokens - self.max_tokens_for(spec) - _SYSTEM_PROMPT_TOKENS // 3
+        return self.cfg.max_context_tokens - self.max_tokens_for(spec) - _TEMPLATE_TOKENS
 
     async def count_tokens(self, text: str) -> int | None:
         """Comptage exact par le serveur (`POST /tokenize`, vLLM) ; None si indisponible
@@ -311,7 +336,7 @@ class LLMClient:
 
     def _truncation_diagnosis(self, spec: BlockSpec, budget: int) -> str:
         """Message d'échec quand doubler le budget ne changerait rien (clamp saturé)."""
-        room = self.cfg.max_context_tokens - spec.tokens_with_margin - _SYSTEM_PROMPT_TOKENS
+        room = self.cfg.max_context_tokens - spec.tokens_with_margin - self.prompt_reserve
         return (
             f"réponse tronquée à {budget} tokens et le budget ne peut pas augmenter : le bloc "
             f"occupe {spec.tokens_with_margin} des {self.cfg.max_context_tokens} tokens de "

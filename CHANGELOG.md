@@ -7,7 +7,27 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ## [Unreleased]
 
-_Rien pour l'instant._
+### Modifié
+
+- **Prompt système embarqué révisé** (649 → 1 200 mots) : définitions calibrées de
+  C0–C3 et des niveaux RGPD par type de donnée, « ce que le document *est* » pour
+  finance/juridique, repères français de durées de conservation, résumé utile à un
+  lecteur pressé, calibration explicite de `confidence`, consignes pour les segments
+  (ne pas baisser la classe faute de contexte) et pour le texte OCR. Le `prompt_hash`
+  change : les campagnes existantes seront réanalysées au prochain `run` (comportement
+  voulu, voir `docia prompt`).
+
+### Corrigé
+
+- **La réserve pour le prompt système était une constante** (1 500 tokens) : un profil
+  de prompt plus long — c'est leur raison d'être — faisait refuser au comptage exact
+  des blocs que le découpage croyait tenir, et chaque bloc était re-découpé. Le client
+  mesure le prompt (`/tokenize`, sinon estimation) et le pipeline, le banc et le
+  plafond de réponse s'en servent (`LLMClient.prompt_reserve`).
+- Le banc (`docia bench`) taillait ses blocs à `servi / 2` sans compter le prompt ni
+  la réponse ; il utilise le même budget que le pipeline.
+- Faux serveur de test : un corps laissé dans le tube sur une réponse 404 rendait la
+  requête suivante « 400 Bad Request » (keep-alive).
 
 ## [3.1.0] — 2026-09-02
 

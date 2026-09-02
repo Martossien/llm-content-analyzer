@@ -9,6 +9,7 @@ from pathlib import Path
 from docia.bench import BenchReport, build_bench_blocks, run_bench, synthetic_french
 from docia.cli_tools import register
 from docia.config import Config
+from tests.conftest import prompt_court
 
 
 def _config(tmp_path: Path, base_url: str) -> Config:
@@ -191,6 +192,7 @@ def test_le_banc_s_aligne_sur_le_contexte_reellement_servi(tmp_path: Path, fake_
     fake_server.max_model_len = 4_000
     cfg = _config(tmp_path, fake_server.base_url_vllm)
     cfg.llm.max_context_tokens = 262_144  # la machine de référence, pas celle-ci
+    cfg.prompt_path = str(prompt_court(tmp_path))
 
     report = run_bench(cfg, blocks=1, block_tokens=100_000)
 

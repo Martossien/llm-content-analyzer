@@ -32,6 +32,7 @@ from docia.llm.client import LLMClient, LLMError
 from docia.llm.parse import ParseError, parse_block_response
 from docia.llm.schema import load_system_prompt
 from docia.models import BlockFile, BlockSpec
+from docia.pipeline import segment_budget
 
 logger = logging.getLogger(__name__)
 
@@ -397,8 +398,14 @@ async def _bench(
                 if served < llm.max_context_tokens:
                     llm.max_context_tokens = served
                     report.context_tokens = served
-                    block_tokens = min(block_tokens, max(_MIN_BENCH_BLOCK_TOKENS, served // 2))
-                    report.block_tokens = block_tokens
+            # Le bloc doit tenir avec le prompt système (mesuré par le client) et la
+            # réponse : `served // 2` l'ignorait, et un prompt de 2 000 tokens sur un
+            # petit contexte faisait refuser chaque bloc au comptage exact.
+            budget = segment_budget(replace(cfg, llm=llm), client.prompt_reserve)
+            if block_tokens > budget:
+                block_tokens = max(_MIN_BENCH_BLOCK_TOKENS, budget)
+                report.block_tokens = block_tokens
+                say(f"blocs ramenés à {block_tokens} tokens pour tenir dans le contexte servi")
 
             say(f"fabrication de {blocks} bloc(s) de ~{block_tokens} tokens…")
             specs = build_bench_blocks(

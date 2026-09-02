@@ -24,6 +24,7 @@ from docia.filter import plan_files
 from docia.ingest.smbeagle_csv import import_csv
 from docia.models import FileStatus
 from docia.pipeline import run_pipeline
+from tests.conftest import prompt_court
 from tests.fake_openai import block_text_from_payload, extract_sources, make_entry
 
 Responder = Callable[[dict[str, Any], int, list[str]], tuple[int, str, bytes]]
@@ -379,6 +380,7 @@ def test_le_contexte_servi_est_connu_avant_le_decoupage(
     csv_path = corpus(tmp_path, gros={"rapport.txt": texte_volumineux(60)})
     serveur.max_model_len = 4_000
     cfg = config(tmp_path, serveur.base_url, max_context_tokens=262_144)
+    cfg.prompt_path = str(prompt_court(tmp_path))
     with Database(cfg.db_path) as db:
         prepare(db, cfg, csv_path)
         run1 = run_pipeline(db, cfg)
