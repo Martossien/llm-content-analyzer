@@ -23,12 +23,14 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from docia.blocks.builder import BuildResult, build_blocks
+from docia.blocks.policy import SegmentPolicy
 from docia.config import Config, LLMConfig
 from docia.db import Database
 from docia.llm.aggregate import aggregate_segments
 from docia.llm.client import BlockTooLongError, LLMClient, LLMError
 from docia.llm.parse import ParsedBlock, ParseError, parse_block_response
 from docia.llm.schema import load_system_prompt, prompt_hash
+from docia.llm.tokenize import ServerTokenCounter
 from docia.models import BlockFile, BlockSpec, FileStatus
 
 logger = logging.getLogger(__name__)
@@ -50,14 +52,23 @@ RESPLIT_SAFETY = 0.9
 """Après un `BlockTooLongError`, budget de re-découpage = place réelle / ratio × 0.9."""
 
 
-def segment_budget(cfg: Config, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
-    """Budget de tokens (avec marge) d'un segment de gros fichier.
+def file_cap(cfg: Config, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
+    """Plafond **exact** (tokens réels du serveur) d'un fichier seul : la part
+    `blocks.max_file_share` du contexte, une fois réservés le prompt système et la
+    réponse. Au-dessus, le fichier est découpé en segments (`blocks/policy.py`).
 
     `prompt_tokens` : réserve pour le prompt système (mesurée par le client quand le
     serveur sait compter, voir `LLMClient.prompt_reserve`)."""
     room = cfg.llm.max_context_tokens - output_reserve_tokens(cfg.llm, prompt_tokens)
+    return max(2_000, int(room * cfg.blocks.max_file_share))
+
+
+def segment_budget(cfg: Config, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
+    """Le même plafond en tokens **estimés** (avec marge, moteur local), dévalué par
+    le facteur de sécurité du moteur : budget d'un segment quand le serveur ne sait
+    pas compter, seuil de candidature au découpage sinon."""
     safety = SEGMENT_SAFETY.get(cfg.blocks.tokenizer_engine, SEGMENT_SAFETY["approx"])
-    return max(2_000, int(room * safety))
+    return max(2_000, int(file_cap(cfg, prompt_tokens) * safety))
 
 
 def output_reserve_tokens(llm: LLMConfig, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
@@ -230,6 +241,8 @@ class _Run:
         """Fichiers dont un bloc est ENCORE refusé au comptage exact après re-découpage :
         plus rien ne peut les faire passer, ils partent en `error` avec la raison."""
         self.second_pass = False
+        self.file_cap = 0
+        """Plafond exact par fichier (`file_cap`), fixé une fois le contexte servi connu."""
         self.engaged: set[int] = set()
         """Fichiers embarqués dans un bloc de ce run (repris ou construit) : ils doivent
         tous finir `done` ou `error`, sinon le run le dit (voir `_finish`)."""
@@ -420,7 +433,8 @@ class _Run:
 
     async def _negotiate_context(self) -> bool:
         """2. Le contexte réellement servi fait foi, et il doit être connu AVANT de
-        découper : le budget d'un segment (`max_file_tokens`) en dérive.
+        découper : le plafond par fichier (`file_cap`) et le budget estimé d'un
+        segment (`max_file_tokens`) en dérivent.
 
         Rend False — run clos en erreur — si le serveur est injoignable.
         """
@@ -447,9 +461,22 @@ class _Run:
                             f"blocs ramenés à {cfg.blocks.block_tokens} tokens "
                             "pour tenir dans le contexte servi"
                         )
+        self.file_cap = file_cap(cfg, prompt_reserve)
         if cfg.blocks.max_file_tokens <= 0:
             # Réserve pour le prompt système et la réponse JSON du fichier découpé.
             cfg.blocks.max_file_tokens = segment_budget(cfg, prompt_reserve)
+        else:
+            # Réglage explicite : il vaut aussi plafond exact, sinon le compte du
+            # serveur passerait outre ce que l'opérateur a demandé.
+            self.file_cap = min(self.file_cap, cfg.blocks.max_file_tokens)
+        if cfg.blocks.block_tokens > cfg.blocks.max_file_tokens:
+            # La part par fichier est une part par REQUÊTE : un bloc multi-fichiers
+            # plus gros qu'elle ferait la même chose au débit du serveur.
+            cfg.blocks.block_tokens = cfg.blocks.max_file_tokens
+            self.say(
+                f"blocs ramenés à {cfg.blocks.block_tokens} tokens : part par requête "
+                f"blocks.max_file_share={cfg.blocks.max_file_share:g} du contexte servi"
+            )
         if not self.dry_run and not await self.client.health():
             self.close("error")
             message = f"serveur LLM injoignable : {cfg.llm.base_url}"
@@ -476,18 +503,30 @@ class _Run:
         self.say(f"{len(selected)} fichier(s) à analyser")
 
         batch_size = cfg.blocks.batch_files
-        for start in range(0, len(selected), batch_size):
-            if self.cancelled():
-                self.say("annulation demandée : construction des blocs interrompue")
-                break
-            batch = self.db.files_by_ids(selected[start : start + batch_size])
-            label = f"b{start // batch_size + 1:04d}"
-            built = build_blocks(batch, cfg.blocks, self.work_dir, batch_label=label)
-            self._register_built(built, first_pass=True)
-            self.say(
-                f"lot {label} : {len(built.blocks)} bloc(s), "
-                f"{len(built.failed)} échec(s) d'extraction"
-            )
+        with self._token_counter() as counter:
+            policy = SegmentPolicy(self.file_cap, counter if counter.available else None)
+            for start in range(0, len(selected), batch_size):
+                if self.cancelled():
+                    self.say("annulation demandée : construction des blocs interrompue")
+                    break
+                batch = self.db.files_by_ids(selected[start : start + batch_size])
+                label = f"b{start // batch_size + 1:04d}"
+                built = build_blocks(
+                    batch, cfg.blocks, self.work_dir, batch_label=label, policy=policy
+                )
+                self._register_built(built, first_pass=True)
+                self.say(
+                    f"lot {label} : {len(built.blocks)} bloc(s), "
+                    f"{len(built.failed)} échec(s) d'extraction"
+                )
+
+    def _token_counter(self) -> ServerTokenCounter:
+        """Compteur exact du serveur pour trancher les découpages ; muet (`available`
+        faux) en `--dry-run`, où aucun serveur n'est requis."""
+        assert self.client is not None
+        if self.dry_run:
+            return ServerTokenCounter(replace(self.cfg.llm, transport="none"))
+        return self.client.token_counter()
 
     def _register_built(self, built: BuildResult, *, first_pass: bool) -> list[BlockSpec]:
         """Enregistre en base les blocs d'un lot construit, compte les échecs

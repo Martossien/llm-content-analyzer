@@ -41,6 +41,8 @@ def _write(tmp_path: Path, text: str) -> Path:
         ),
         ('db_path = ""\n', "db_path ne peut pas être vide"),
         ("[llm]\nmax_retries = -5\n", "llm.max_retries doit être >= 0"),
+        ("[blocks]\nmax_file_share = 1.5\n", "blocks.max_file_share doit être entre 0.05 et 1"),
+        ("[blocks]\nmax_file_tokens = -1\n", "blocks.max_file_tokens doit être >= 0"),
         ("[llm]\nmax_tokens_per_file = 0\n", "llm.max_tokens_per_file doit être >= 1"),
         (
             "[filter]\nexcluded_extensions = [1, 2]\n",
@@ -127,14 +129,14 @@ def _commentaires(texte: str) -> list[str]:
 
 
 def test_enregistrer_preserve_les_commentaires_de_docia_init(tmp_path: Path) -> None:
-    """Le défaut le plus grave de la fenêtre : « Enregistrer » effaçait les 21 commentaires.
+    """Le défaut le plus grave de la fenêtre : « Enregistrer » effaçait les 22 commentaires.
 
     Dont l'avertissement — une mention RSSI — qui prévient que `<campagne>.blocks/`
     conserve le texte intégral des documents analysés, OCR compris, en clair sur le
     disque. Un administrateur cliquait une fois, et le suivant ne le lisait jamais.
     """
     gabarit = default_toml()
-    assert len(_commentaires(gabarit)) == 21
+    assert len(_commentaires(gabarit)) == 22
     cfg = load_config(_write(tmp_path, gabarit))
     cfg.llm.model = "un-autre-modele"
 

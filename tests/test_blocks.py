@@ -333,8 +333,103 @@ def test_oversized_file_is_split_into_complete_segments(tmp_path: Path) -> None:
     for b in segs:
         text = b.path.read_text(encoding="utf-8")
         assert f"## SOURCE: gros.txt [partie {b.files[0].segment_index}/{k}]" in text
-        rebuilt += text.split("---\n", 3)[-1].rsplit("\n\n---", 1)[0].lstrip("\n")
+        rebuilt += segment_text(text)
     assert rebuilt.replace("\n", "") == big.read_text(encoding="utf-8").replace("\n", "")
+
+
+def segment_text(block: str) -> str:
+    """Le texte propre d'un bloc segment : sans les en-têtes DocFuse ni l'en-tête
+    partagé (début du document recopié à partir de la partie 2)."""
+    from docia.blocks.builder import SEGMENT_HEADER_CLOSE
+
+    body = block.split("---\n", 3)[-1].rsplit("\n\n---", 1)[0]
+    if SEGMENT_HEADER_CLOSE in body:
+        body = body.split(SEGMENT_HEADER_CLOSE, 1)[1]
+    return body.lstrip("\n")
+
+
+def test_segments_after_the_first_carry_the_document_head(tmp_path: Path) -> None:
+    """Un segment pris au milieu d'un document ne sait pas de quoi il est la suite :
+    chaque partie ≥ 2 s'ouvre sur le début du document, balisé « pour contexte »,
+    dans le budget du segment. La partie 1 n'en a pas (elle EST le début)."""
+    from docia.blocks.builder import SEGMENT_HEADER_CLOSE, SEGMENT_HEADER_OPEN
+    from docia.config import BlocksConfig
+
+    big = tmp_path / "contrat.txt"
+    big.write_text(
+        "CONTRAT DE PRESTATION entre Alpha SAS et Beta SARL\n\n"
+        + "".join(f"Article {i} : " + ("clause " * 40) + "\n\n" for i in range(300)),
+        encoding="utf-8",
+    )
+    cfg = BlocksConfig(block_tokens=1_000, max_file_tokens=3_000)
+    result = build_blocks([_row(1, big)], cfg, tmp_path / "work", batch_label="b")
+
+    segs = [b for b in result.blocks if b.files[0].is_segment]
+    assert len(segs) >= 3
+    first, *rest = (b.path.read_text(encoding="utf-8") for b in segs)
+    assert SEGMENT_HEADER_OPEN not in first
+    for text in rest:
+        head = text.split(SEGMENT_HEADER_OPEN, 1)[1].split(SEGMENT_HEADER_CLOSE, 1)[0]
+        assert "CONTRAT DE PRESTATION entre Alpha SAS et Beta SARL" in head
+        assert text.count("## SOURCE: ") == 1
+    # L'en-tête est compté dans le budget : aucun segment ne dépasse le plafond.
+    assert all(b.tokens_with_margin <= 3_000 for b in segs)
+
+
+def test_exact_count_decides_whole_or_calibrated_segments(tmp_path: Path) -> None:
+    """Le serveur sait compter : un fichier estimé trop long mais qui tient
+    réellement part entier ; un fichier vraiment trop long est découpé sur le
+    rapport estimation/réel mesuré, pas sur le facteur de sécurité forfaitaire."""
+    from docia.blocks.policy import SegmentPolicy
+    from docia.config import BlocksConfig
+
+    big = tmp_path / "gros.txt"
+    big.write_text("".join(f"Paragraphe {i} : " + ("mot " * 40) + "\n\n" for i in range(400)))
+    cfg = BlocksConfig(block_tokens=1_000, max_file_tokens=3_000)
+    asked: list[int] = []
+
+    def counter(text: str) -> int | None:
+        asked.append(len(text))
+        return len(text) // 10  # tokenizer très économe : le fichier tient
+
+    whole = build_blocks(
+        [_row(1, big)],
+        cfg,
+        tmp_path / "w1",
+        batch_label="b",
+        policy=SegmentPolicy(cap_exact=8_000, count_exact=counter),
+    )
+    assert asked == [len(big.read_text(encoding="utf-8"))]
+    assert [b.files[0].is_segment for b in whole.blocks] == [False]
+    assert whole.blocks[0].tokens_with_margin >= 3_000  # l'estimation, conservée
+
+    # Compte exact = estimation locale : segments calibrés sur ce rapport (≈ 1),
+    # donc chacun proche du plafond exact — moins de segments qu'en aveugle.
+    def exact(text: str) -> int | None:
+        return len(text) // 4
+
+    blind = build_blocks([_row(1, big)], cfg, tmp_path / "w2", batch_label="b")
+    calibrated = build_blocks(
+        [_row(1, big)],
+        cfg,
+        tmp_path / "w3",
+        batch_label="b",
+        policy=SegmentPolicy(cap_exact=6_000, count_exact=exact),
+    )
+    assert calibrated.blocks[0].files[0].is_segment
+    assert len(calibrated.blocks) < len(blind.blocks)
+    # Chaque segment tient sous le plafond EXACT (compte du serveur sur le bloc écrit).
+    assert all(exact(b.path.read_text(encoding="utf-8")) <= 6_000 for b in calibrated.blocks)
+
+    # Serveur muet : comportement historique, sur le plafond estimé.
+    silent = build_blocks(
+        [_row(1, big)],
+        cfg,
+        tmp_path / "w4",
+        batch_label="b",
+        policy=SegmentPolicy(cap_exact=6_000, count_exact=lambda _t: None),
+    )
+    assert len(silent.blocks) == len(blind.blocks)
 
 
 # -- découpage d'un très gros fichier : coût linéaire ---------------------

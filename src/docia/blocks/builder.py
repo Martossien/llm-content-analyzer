@@ -28,6 +28,7 @@ from docfuse.models.extraction_result import ExtractedFile
 from docfuse.output.markdown_writer import write_markdown_corpus
 from docfuse.output.source_header import build_source_header
 
+from docia.blocks.policy import SegmentPolicy, plan_file
 from docia.config import BlocksConfig
 from docia.models import BlockFile, BlockSpec, FileRow, path_key
 
@@ -35,6 +36,19 @@ logger = logging.getLogger(__name__)
 
 SOURCE_PREFIX = "## SOURCE: "
 """Préfixe de la ligne d'en-tête DocFuse qui porte le `file_ref`."""
+
+SEGMENT_HEADER_CHARS = 1_500
+"""Longueur (caractères, ≈ 400 tokens) du début du document recopié en tête de
+chaque segment après le premier, entre `SEGMENT_HEADER_OPEN` et
+`SEGMENT_HEADER_CLOSE`. Titre, en-tête, objet, parties : c'est ce qui manque le
+plus à un segment pris au milieu d'un contrat ou d'un rapport, et ce qui le fait
+sous-classer. 0 = pas d'en-tête partagé."""
+
+SEGMENT_HEADER_OPEN = (
+    "[[EN-TÊTE DU DOCUMENT — début du même fichier, fourni pour contexte ; "
+    "déjà analysé dans la partie 1, ne pas le ré-analyser]]"
+)
+SEGMENT_HEADER_CLOSE = "[[FIN DE L'EN-TÊTE — suite du document]]"
 
 
 @dataclass(frozen=True)
@@ -100,6 +114,7 @@ def build_blocks(
     *,
     batch_label: str,
     lang: str = "fr",
+    policy: SegmentPolicy | None = None,
 ) -> BuildResult:
     """Construit les blocs `.md` d'un lot de fichiers.
 
@@ -116,6 +131,8 @@ def build_blocks(
         work_dir: Dossier des `.md` (créé au besoin) ; rien n'est écrit ailleurs.
         batch_label: Préfixe des noms de blocs (`<label>_001.md`).
         lang: Langue DocFuse (en-têtes et raisons d'exclusion).
+        policy: Plafond exact par fichier et compteur du serveur (`blocks/policy.py`) ;
+            None = décision sur la seule estimation locale.
 
     Returns:
         Les blocs prêts à envoyer et les fichiers écartés avec leur raison.
@@ -162,7 +179,9 @@ def build_blocks(
         # Un seul sous-lot : le libellé — donc les noms de blocs — ne change pas.
         label = batch_label if len(chunks) == 1 else f"{batch_label}s{number:02d}"
         blocks.extend(
-            _run_docfuse(chunk, cfg, work_dir, rows_by_key, outcomes, duplicates, label, lang)
+            _run_docfuse(
+                chunk, cfg, work_dir, rows_by_key, outcomes, duplicates, label, lang, policy
+            )
         )
 
     placed = {block_file.file_id for block in blocks for block_file in block.files}
@@ -195,6 +214,7 @@ def _run_docfuse(
     duplicates: dict[int, int],
     batch_label: str,
     lang: str,
+    policy: SegmentPolicy | None,
 ) -> list[BlockSpec]:
     """Extrait, découpe et écrit les blocs ; alimente `outcomes` et `duplicates`."""
     set_language(lang)
@@ -219,27 +239,29 @@ def _run_docfuse(
 
     blocks: list[BlockSpec] = []
     for part in parts:
-        if (
-            part.oversized
-            and cfg.max_file_tokens > 0
-            and part.tokens_with_margin > cfg.max_file_tokens
-            and len(part.file_indices) == 1
-            and part.file_indices[0] in rows_by_index
-        ):
-            # Fichier plus grand que le contexte du modèle : segments complets,
-            # un bloc par segment, agrégés ensuite par le pipeline (jamais tronqué).
+        exact_tokens: int | None = None
+        if _segment_candidate(part, cfg, rows_by_index):
+            # Fichier seul au-dessus du plafond estimé : le serveur tranche quand il
+            # sait compter. Trop long pour de vrai → segments complets, un bloc par
+            # segment, agrégés ensuite par le pipeline (jamais tronqué).
             index = part.file_indices[0]
-            blocks.extend(
-                _segment_blocks(
-                    result.files[index],
-                    rows_by_index[index],
-                    cfg,
-                    work_dir,
-                    f"{batch_label}_{part.index:03d}",
-                    engine=result.engine,
+            extracted = result.files[index]
+            plan = plan_file(extracted.text, part.tokens_with_margin, cfg.max_file_tokens, policy)
+            logger.info("%s : %s", extracted.relative_path, plan.reason)
+            if plan.piece_budget is not None:
+                blocks.extend(
+                    _segment_blocks(
+                        extracted,
+                        rows_by_index[index],
+                        cfg,
+                        work_dir,
+                        f"{batch_label}_{part.index:03d}",
+                        piece_budget=plan.piece_budget,
+                        engine=result.engine,
+                    )
                 )
-            )
-            continue
+                continue
+            exact_tokens = plan.exact_tokens
         block_files = [
             BlockFile(
                 file_id=rows_by_index[index].id,
@@ -262,11 +284,24 @@ def _run_docfuse(
                 path=path,
                 files=block_files,
                 tokens_estimated=part.tokens_estimated,
-                tokens_with_margin=part.tokens_with_margin,
+                # Le compte du serveur, s'il est connu, prime : il calibre le
+                # `max_tokens` (`clamp_to_context`) et la patience de lecture.
+                tokens_with_margin=max(part.tokens_with_margin, exact_tokens or 0),
                 oversized=part.oversized,
             )
         )
     return blocks
+
+
+def _segment_candidate(part: Any, cfg: BlocksConfig, rows_by_index: dict[int, FileRow]) -> bool:
+    """Une partie DocFuse = un seul fichier exploitable, estimé au-dessus du plafond."""
+    return bool(
+        part.oversized
+        and cfg.max_file_tokens > 0
+        and part.tokens_with_margin > cfg.max_file_tokens
+        and len(part.file_indices) == 1
+        and part.file_indices[0] in rows_by_index
+    )
 
 
 def _usable_rows(
@@ -321,12 +356,18 @@ def _segment_blocks(
     work_dir: Path,
     label: str,
     *,
+    piece_budget: int,
     engine: object,
 ) -> list[BlockSpec]:
-    """Découpe le texte d'un fichier en K segments ≤ `cfg.max_file_tokens` (tokens
-    avec marge), aux limites de paragraphes, et écrit un bloc par segment avec
-    `## SOURCE: <ref> [partie i/K]`. Chaque segment est complet : la réunion des
-    K segments est exactement le texte extrait."""
+    """Découpe le texte d'un fichier en K segments ≤ `piece_budget` (tokens avec
+    marge, en-tête partagé compris), aux limites de paragraphes, et écrit un bloc
+    par segment avec `## SOURCE: <ref> [partie i/K]`. Chaque segment est complet :
+    la réunion des K segments est exactement le texte extrait.
+
+    Les segments 2..K reçoivent en tête le début du document (`SEGMENT_HEADER_CHARS`),
+    balisé pour que la LLM s'en serve comme contexte sans le ré-analyser : les
+    segments restent indépendants (envoyés en parallèle, agrégés par le pipeline)
+    mais chacun sait de quel document il est la suite."""
     from copy import copy
 
     from docfuse.core.tokenizers.base import TokenizerEngine
@@ -334,8 +375,11 @@ def _segment_blocks(
     text: str = extracted.text
     relative_path: str = extracted.relative_path
     eng = engine if isinstance(engine, TokenizerEngine) else None
-    # Budget de texte par segment : le plafond moins l'en-tête SOURCE (~80 tokens).
-    budget = max(500, cfg.max_file_tokens - 200)
+    # Budget de texte par segment : le plafond moins l'en-tête SOURCE (~80 tokens)
+    # et moins l'en-tête partagé, qui s'ajoute à chaque segment après le premier.
+    head = _document_head(text, piece_budget, cfg.margin, eng)
+    head_tokens = estimate_tokens(head, cfg.margin, eng).tokens_with_margin if head else 0
+    budget = max(500, piece_budget - 200 - head_tokens)
     pieces = _split_text(text, budget, cfg.margin, eng)
     k = len(pieces)
     specs: list[BlockSpec] = []
@@ -343,10 +387,11 @@ def _segment_blocks(
         seg = copy(extracted)
         seg.text = piece
         seg.relative_path = f"{relative_path} [partie {i}/{k}]"
-        est = estimate_tokens(piece, cfg.margin, eng)
+        content = piece if i == 1 or not head else _with_document_head(head, piece)
+        est = estimate_tokens(content, cfg.margin, eng)
         header = build_source_header(seg, cfg.margin, est.tokens_estimated, est.tokens_with_margin)
         path = work_dir / f"{label}_seg{i:03d}.md"
-        body = f"# Corpus DocFuse — segment {i}/{k}\n\n---\n\n{header}\n\n{piece}\n\n---\n"
+        body = f"# Corpus DocFuse — segment {i}/{k}\n\n---\n\n{header}\n\n{content}\n\n---\n"
         path.write_bytes(body.encode("utf-8"))
         block_file = BlockFile(
             file_id=row.id,
@@ -373,6 +418,32 @@ def _segment_blocks(
         sum(s.tokens_with_margin for s in specs),
     )
     return specs
+
+
+def _document_head(text: str, piece_budget: int, margin: float, engine: object) -> str:
+    """Début du document recopié en tête des segments 2..K : `SEGMENT_HEADER_CHARS`
+    caractères au plus, coupés à une fin de ligne, et jamais plus du quart du
+    budget d'un segment (sinon l'en-tête mangerait le texte à analyser)."""
+    from docfuse.core.tokenizers.base import TokenizerEngine
+
+    eng = engine if isinstance(engine, TokenizerEngine) else None
+    if SEGMENT_HEADER_CHARS <= 0:
+        return ""
+    limit = min(SEGMENT_HEADER_CHARS, len(text))
+    if limit >= len(text):
+        return ""  # le document entier tiendrait dans l'en-tête : il n'est pas découpé
+    head = text[:limit]
+    cut = head.rfind("\n", limit // 2)
+    if cut > 0:
+        head = head[:cut]
+    while head and estimate_tokens(head, margin, eng).tokens_with_margin > piece_budget // 4:
+        head = head[: len(head) // 2]
+    return head.rstrip()
+
+
+def _with_document_head(head: str, piece: str) -> str:
+    """Segment i ≥ 2 : en-tête partagé balisé, puis le texte propre du segment."""
+    return f"{SEGMENT_HEADER_OPEN}\n{head}\n{SEGMENT_HEADER_CLOSE}\n\n{piece}"
 
 
 def _split_text(text: str, budget_tokens: int, margin: float, engine: object) -> list[str]:

@@ -17,6 +17,7 @@ import httpx
 
 from docia.config import LLMConfig
 from docia.llm.schema import response_format
+from docia.llm.tokenize import ServerTokenCounter, parse_token_count, tokenize_url
 from docia.models import BlockSpec, LLMResult, LLMUsage
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,11 @@ class LLMClient:
             "Content-Type": "application/json",
         }
 
+    def token_counter(self) -> ServerTokenCounter:
+        """Compteur synchrone pour le builder (`blocks/policy.py`), avec les mêmes
+        en-têtes d'authentification que ce client ; à fermer après usage."""
+        return ServerTokenCounter(self.cfg, headers=self._headers())
+
     def max_tokens_for(self, spec: BlockSpec) -> int:
         """Budget de sortie : plancher + quota par fichier, plafonné."""
         wanted = self.cfg.max_tokens_floor + self.cfg.max_tokens_per_file * len(spec.files)
@@ -269,26 +275,16 @@ class LLMClient:
     async def count_tokens(self, text: str) -> int | None:
         """Comptage exact par le serveur (`POST /tokenize`, vLLM) ; None si indisponible
         (autre transport, endpoint absent, erreur réseau) — on ne bloque jamais dessus."""
-        if self.cfg.transport != "vllm":
+        url = tokenize_url(self.cfg)
+        if url is None:
             return None
-        base = self.cfg.base_url.rstrip("/")
-        root = base[: -len("/v1")] if base.endswith("/v1") else base
         try:
             response = await self._http.post(
-                f"{root}/tokenize",
-                json={"model": self.cfg.model, "prompt": text},
-                headers=self._headers(),
+                url, json={"model": self.cfg.model, "prompt": text}, headers=self._headers()
             )
         except httpx.HTTPError:
             return None
-        if response.status_code != 200:
-            return None
-        try:
-            data = response.json()
-        except ValueError:
-            return None
-        count = data.get("count") if isinstance(data, dict) else None
-        return int(count) if isinstance(count, int) else None
+        return parse_token_count(response)
 
     async def check_fits(self, spec: BlockSpec) -> None:
         """Lève `BlockTooLongError` si le comptage exact dépasse la place disponible."""

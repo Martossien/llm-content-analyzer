@@ -114,10 +114,23 @@ class BlocksConfig:
     dès que `filter.max_size_bytes` laisse passer de gros fichiers)."""
     work_dir: str = ""
     """Dossier des blocs `.md` ; vide = `<db>.blocks/` à côté de la base."""
+    max_file_share: float = 0.3
+    """Part du contexte servi (moins la réserve prompt + réponse) qu'un fichier seul
+    peut occuper avant d'être découpé en segments : `pipeline.file_cap`.
+
+    Découper coûte en qualité (chaque segment est classé sans le reste), mais un
+    fichier qui prend tout le contexte coûte en débit : le préremplissage est
+    superlinéaire en longueur et le cache KV d'une seule requête de 200 K tokens
+    (≈ 26 Go sur Qwen3.8-27B) évince les autres requêtes en vol. 0,3 sur un
+    contexte de 262 K ≈ 73 K tokens : au-dessus du plus gros document bureautique
+    courant, en dessous de ce qui fait s'effondrer le débit. 1,0 = comportement
+    d'avant le 02/09 (un fichier peut prendre tout le contexte)."""
     max_file_tokens: int = 0
-    """Budget (tokens avec marge) au-delà duquel un fichier seul est découpé en
-    segments. 0 = dérivé du pipeline : `llm.max_context_tokens` moins une réserve
-    pour le prompt et la réponse."""
+    """Plafond **estimé** (tokens avec marge, moteur `tokenizer_engine`) au-delà
+    duquel un fichier seul est candidat au découpage. 0 = dérivé de
+    `max_file_share` et du contexte servi (`pipeline.segment_budget`), dévalué par
+    le facteur de sécurité du moteur. Quand le serveur sait compter (vLLM), c'est
+    son compte exact qui tranche entre « entier » et « découpé » (`blocks/policy.py`)."""
     keep_blocks: bool = True
     """Conserve les blocs `.md` après le run — **ils contiennent le texte intégral
     des documents analysés**, en clair, sur le disque du poste.
@@ -268,6 +281,14 @@ class Config:
             )
         if not (0.0 <= blocks.margin <= 1.0):
             errors.append("blocks.margin doit être entre 0 et 1")
+        if not (0.05 <= blocks.max_file_share <= 1.0):
+            errors.append(
+                f"blocks.max_file_share doit être entre 0.05 et 1 (valeur: {blocks.max_file_share})"
+            )
+        if blocks.max_file_tokens < 0:
+            errors.append(
+                f"blocks.max_file_tokens doit être >= 0 (valeur: {blocks.max_file_tokens})"
+            )
         if blocks.tokenizer_engine not in ("approx", "mistral", "openai"):
             errors.append(f"blocks.tokenizer_engine inconnu : {blocks.tokenizer_engine}")
         if blocks.batch_files < 1:
@@ -414,6 +435,7 @@ tokenizer_engine = "openai"        # openai (o200k, précis) | mistral | approx 
 batch_files = 200                  # rythme d'extraction (nombre de fichiers par appel DocFuse)
 batch_bytes = 67108864             # 64 Mio : plafond MÉMOIRE d'un lot (cumul des tailles source ; pic ≈ 5× ce budget) ; 0 = aucun
 work_dir = ""                      # vide = <db>.blocks/
+max_file_share = 0.3               # part du contexte qu'un fichier seul peut prendre avant découpage en segments (1.0 = tout)
 keep_blocks = true                 # ATTENTION : les blocs .md contiennent le TEXTE INTÉGRAL des documents, en clair, dans work_dir — false les efface au fil du run
 
 [filter]

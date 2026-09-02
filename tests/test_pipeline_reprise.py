@@ -424,12 +424,19 @@ def test_un_fichier_qui_ne_tient_jamais_finit_en_erreur_et_le_run_le_dit(
 
 
 def test_le_redecoupage_se_calcule_sur_la_place_reellement_disponible(
-    tmp_path: Path, serveur: ServeurProgrammable
+    tmp_path: Path, serveur: ServeurProgrammable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Comptage exact deux fois plus gros que l'estimation : la seconde passe doit
-    re-découper sur `BlockTooLongError.room` et le fichier finir `done` dans le run."""
+    re-découper sur `BlockTooLongError.room` et le fichier finir `done` dans le run.
+
+    Compteur du builder muet et part par fichier à 1 : c'est le filet de la seconde
+    passe qu'on éprouve, pas le découpage calibré du premier coup (`test_policy`)."""
+    from docia.llm.tokenize import ServerTokenCounter
+
+    monkeypatch.setattr(ServerTokenCounter, "__call__", lambda _self, _text: None)
     csv_path = corpus(tmp_path, petits=1, gros={"enorme.txt": texte_volumineux(200)})
     cfg = config(tmp_path, serveur.base_url, block_tokens=8_000, max_context_tokens=12_000)
+    cfg.blocks.max_file_share = 1.0
     serveur.tokens_par_caractere = 0.5  # deux fois plus de tokens que l'estimation octets/4
     with Database(cfg.db_path) as db:
         prepare(db, cfg, csv_path)

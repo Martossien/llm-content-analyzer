@@ -7,6 +7,31 @@ antérieur à la v3 (POC 2025) est dans git.
 
 ## [Unreleased]
 
+### Ajouté
+
+- **Plafond par fichier `blocks.max_file_share`** (défaut 0,3 du contexte servi, moins la
+  réserve prompt + réponse ; « Part du contexte par fichier » dans l'onglet Serveur) :
+  un fichier seul — et donc une requête — ne prend plus tout le contexte. Sur 262 K,
+  ≈ 73 K tokens : au-dessus du plus gros document bureautique courant, en dessous de
+  ce qui écroule le débit de vLLM (préremplissage superlinéaire, cache KV d'une
+  requête de 200 K ≈ 26 Go qui évince les autres). `block_tokens` y est borné aussi.
+  `1.0` rend l'ancien comportement.
+- **Comptage exact avant de découper** (`blocks/policy.py`, `llm/tokenize.py`) : quand
+  l'estimation locale dépasse le plafond, le builder demande le compte réel au
+  serveur (`POST /tokenize`, vLLM). Un fichier qui tient part **entier** (l'estimation
+  se trompait) ; un fichier trop long est découpé en segments **calibrés** sur le
+  rapport estimation/réel mesuré sur ce fichier, à la place du facteur de sécurité
+  forfaitaire (0,6 en `approx`, 0,85 en `openai`) : moins de segments, et plus de
+  seconde passe dans le cas courant. Serveur muet (open-webui, `--dry-run`, 404) :
+  comportement d'avant, sans blocage.
+- **En-tête partagé des segments** : à partir de la partie 2, chaque segment d'un
+  fichier découpé s'ouvre sur le début du document (≈ 1 500 caractères, balisé
+  `[[EN-TÊTE DU DOCUMENT …]]`, compté dans le budget du segment). Un segment pris au
+  milieu d'un contrat sait de quoi il est la suite (titre, parties, objet) au lieu
+  d'être sous-classé faute de contexte ; les segments restent indépendants et
+  parallèles, l'agrégation ne change pas. Le prompt le dit à la LLM (le `prompt_hash`
+  change, avec la révision ci-dessous).
+
 ### Modifié
 
 - **Prompt système embarqué révisé** (649 → 1 200 mots) : définitions calibrées de

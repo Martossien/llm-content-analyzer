@@ -295,10 +295,19 @@ def test_exact_duplicate_inherits_original_analysis(
 
 
 def test_big_file_resplit_when_exact_count_exceeds_context(
-    fake_server: FakeOpenAIServer, corpus: tuple[Path, Path], tmp_path: Path
+    fake_server: FakeOpenAIServer,
+    corpus: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Le comptage exact du serveur dépasse l'estimation : les segments trop longs ne sont
-    pas envoyés, le fichier est re-découpé dans le même run et finit `done` — jamais `error`."""
+    pas envoyés, le fichier est re-découpé dans le même run et finit `done` — jamais `error`.
+
+    Le compteur du builder est rendu muet : c'est la seconde passe qu'on éprouve ici
+    (elle reste le filet quand le rapport estimation/réel varie au sein d'un fichier)."""
+    from docia.llm.tokenize import ServerTokenCounter
+
+    monkeypatch.setattr(ServerTokenCounter, "__call__", lambda _self, _text: None)
     src, csv_path = corpus
     (src / "enorme.txt").write_text(
         "".join(f"Paragraphe {i} : " + "texte volumineux " * 30 + "\n\n" for i in range(600)),
@@ -311,6 +320,7 @@ def test_big_file_resplit_when_exact_count_exceeds_context(
     cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
     cfg.llm.max_context_tokens = 12_000
     cfg.llm.enable_thinking = False
+    cfg.blocks.max_file_share = 1.0  # un segment peut prendre tout le contexte
     fake_server.tokens_per_char = 0.5  # deux fois plus de tokens que l'estimation octets/4
     with Database(cfg.db_path) as db:
         import_csv(db, csv_path)
@@ -324,6 +334,62 @@ def test_big_file_resplit_when_exact_count_exceeds_context(
         assert big["segments"] >= 2
         assert big["security_classification"]
     assert fake_server.tokenize_calls >= 2
+
+
+def _corpus_avec_gros_fichier(corpus: tuple[Path, Path], paragraphes: int) -> Path:
+    src, csv_path = corpus
+    (src / "enorme.txt").write_text(
+        "".join(
+            f"Paragraphe {i} : " + "texte volumineux " * 30 + "\n\n" for i in range(paragraphes)
+        ),
+        encoding="utf-8",
+    )
+    csv_path.write_text(
+        csv_path.read_text(encoding="utf-8") + _csv_line(src / "enorme.txt", "hashBIG") + "\n",
+        encoding="utf-8",
+    )
+    return csv_path
+
+
+def test_exact_count_before_splitting_avoids_the_second_pass(
+    fake_server: FakeOpenAIServer, corpus: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Même scénario (serveur deux fois plus gourmand que l'estimation), mais le builder
+    demande le compte exact AVANT de découper : segments calibrés du premier coup,
+    aucun bloc refusé, aucune seconde passe."""
+    csv_path = _corpus_avec_gros_fichier(corpus, 600)
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 12_000
+    cfg.llm.enable_thinking = False
+    fake_server.tokens_per_char = 0.5
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg)
+        assert (report.files_resplit, report.blocks_error) == (0, 0)
+        assert (report.files_done, report.files_error) == (7, 0)
+        big = {r["name"]: r for r in db.latest_analyses()}["enorme.txt"]
+        assert big["segments"] >= 2
+
+
+def test_file_estimated_too_long_but_counted_short_is_sent_whole(
+    fake_server: FakeOpenAIServer, corpus: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """L'estimation locale dépasse le plafond, le serveur compte bien moins : le
+    fichier part entier — découper aurait coûté du contexte pour rien."""
+    csv_path = _corpus_avec_gros_fichier(corpus, 120)
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 60_000  # plafond par fichier ≈ 16 000 tokens réels
+    cfg.llm.enable_thinking = False
+    fake_server.tokens_per_char = 0.05  # tokenizer cinq fois plus économe que octets/4
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg)
+        assert (report.files_done, report.files_error, report.files_resplit) == (7, 0, 0)
+        big = {r["name"]: r for r in db.latest_analyses()}["enorme.txt"]
+        assert big["segments"] == 1
+    assert fake_server.tokenize_calls >= 1
 
 
 def test_pipeline_clamps_to_served_context(

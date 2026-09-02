@@ -47,6 +47,7 @@ class LLMTab:
         self.batch_var = ctk.StringVar(value=str(c.blocks.batch_files))
         # Exposé en mégaoctets : personne ne saisit 268435456 dans un champ.
         self.batch_mb_var = ctk.StringVar(value=str(c.blocks.batch_bytes // (1024 * 1024)))
+        self.share_var = ctk.StringVar(value=str(round(c.blocks.max_file_share * 100)))
 
         def cell(r: int, col: int, label: str, widget: Any) -> None:
             ctk.CTkLabel(grid, text=label).grid(
@@ -109,6 +110,12 @@ class LLMTab:
             1,
             "Dates d'accès",
             ctk.CTkCheckBox(grid, text="préservées pendant le scan", variable=self.preserve_var),
+        )
+        cell(
+            8,
+            0,
+            "Part du contexte par fichier (%)",
+            ctk.CTkEntry(grid, textvariable=self.share_var, width=60),
         )
         self.effort_var = ctk.StringVar(value=c.llm.reasoning_effort or "xhigh")
         cell(
@@ -210,6 +217,8 @@ class LLMTab:
             * 1024
             * 1024
         )
+        share = parse_int(self.share_var.get(), round(cfg.blocks.max_file_share * 100), minimum=5)
+        cfg.blocks.max_file_share = min(share, 100) / 100
 
     def _test(self) -> None:
         app = self.app
