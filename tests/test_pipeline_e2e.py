@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -305,7 +306,7 @@ def test_big_file_resplit_when_exact_count_exceeds_context(
 
     Le compteur du builder est rendu muet : c'est la seconde passe qu'on éprouve ici
     (elle reste le filet quand le rapport estimation/réel varie au sein d'un fichier)."""
-    from docia.llm.tokenize import ServerTokenCounter
+    from docia.llm.server import ServerTokenCounter
 
     monkeypatch.setattr(ServerTokenCounter, "__call__", lambda _self, _text: None)
     src, csv_path = corpus
@@ -390,6 +391,77 @@ def test_file_estimated_too_long_but_counted_short_is_sent_whole(
         big = {r["name"]: r for r in db.latest_analyses()}["enorme.txt"]
         assert big["segments"] == 1
     assert fake_server.tokenize_calls >= 1
+
+
+# ----------------------------------- alimentation adaptative (llm.adaptive)
+
+
+def test_adaptive_feeding_runs_to_completion_and_remembers_its_budget(
+    fake_server: FakeOpenAIServer, corpus: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Mode adaptatif de bout en bout : le run se termine comme en mode fixe, les
+    événements portent le budget et les tokens en vol, et le budget trouvé est
+    mémorisé pour ce serveur et ce modèle."""
+    from docia.home import docia_home
+    from docia.llm.pacer import PACER_FILE, PacerMemory
+    from docia.service import run_campaign
+
+    csv_path = _corpus_avec_gros_fichier(corpus, 300)
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 12_000
+    cfg.llm.enable_thinking = False
+    cfg.llm.adaptive = True
+    fake_server.handler_delay = 0.01
+    events: list[Any] = []
+    lines: list[str] = []
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_campaign(db, cfg, on_event=events.append)
+        assert (report.files_done, report.files_error) == (7, 0)
+        assert report.blocks_done >= 10
+    assert any(e.budget_tokens > 0 for e in events)
+    assert any(e.throughput_tok_s for e in events if e.kind == "block_done")
+    memory = PacerMemory(docia_home() / PACER_FILE)
+    remembered = memory.load(PacerMemory.key(cfg.llm.base_url, cfg.llm.model))
+    assert remembered is not None
+    assert remembered >= cfg.blocks.block_tokens
+    # Le run suivant (autre prompt : tout à refaire) repart du budget mémorisé.
+    autre_prompt = tmp_path / "prompt2.md"
+    autre_prompt.write_text("Classe chaque document. Réponds en JSON.", encoding="utf-8")
+    cfg.prompt_path = str(autre_prompt)
+    with Database(cfg.db_path) as db:
+        db.set_files_status(list(range(1, 8)), FileStatus.PENDING)
+        run_pipeline(db, cfg, progress=lines.append)
+    assert any(f"départ à {remembered} tokens en vol (mémorisé)" in line for line in lines)
+
+
+def test_adaptive_feeding_backs_off_on_vllm_preemptions(
+    fake_server: FakeOpenAIServer,
+    corpus: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Le compteur `vllm:num_preemptions_total` grimpe entre deux lectures : détresse,
+    budget divisé — jusqu'au plancher d'un bloc — et le run se termine quand même."""
+    import docia.pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "PREEMPTIONS_POLL_S", 0.0)
+    csv_path = _corpus_avec_gros_fichier(corpus, 300)
+    cfg = _config(tmp_path, fake_server.base_url_vllm, block_tokens=8_000)
+    cfg.llm.max_context_tokens = 12_000
+    cfg.llm.enable_thinking = False
+    cfg.llm.adaptive = True
+    cfg.llm.adaptive_start_tokens = 200_000
+    fake_server.preemptions_step = 1
+    lines: list[str] = []
+    with Database(cfg.db_path) as db:
+        import_csv(db, csv_path)
+        plan_files(db, cfg.filter)
+        report = run_pipeline(db, cfg, progress=lines.append)
+        assert (report.files_done, report.files_error) == (7, 0)
+    assert any("détresse (1 préemption(s) vLLM)" in line for line in lines)
+    assert any(f"→ {cfg.blocks.block_tokens} tokens en vol" in line for line in lines)
 
 
 def test_pipeline_clamps_to_served_context(

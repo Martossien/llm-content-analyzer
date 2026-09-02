@@ -32,6 +32,17 @@ antérieur à la v3 (POC 2025) est dans git.
   parallèles, l'agrégation ne change pas. Le prompt le dit à la LLM (le `prompt_hash`
   change, avec la révision ci-dessous).
 
+- **Alimentation adaptative `llm.adaptive`** (défaut faux ; case « Alimentation
+  adaptative » dans l'onglet Serveur) : le run régule les **tokens en vol** et cherche
+  le budget qui maximise le débit du serveur, quel qu'il soit et même s'il change en
+  cours de campagne — montée par crans tant que le débit ne baisse pas, retour au cran
+  d'avant et palier quand il baisse, descente si le serveur ralentit, sondes de moins
+  en moins fréquentes, budget divisé par deux sur détresse (coupure, délai dépassé,
+  préemptions vLLM lues dans `/metrics`). `max_in_flight` devient le plafond en
+  requêtes ; le budget trouvé est mémorisé par serveur + modèle (`pacer.json`) pour
+  le run suivant ; la barre d'avancement affiche « en vol N / budget B tokens · débit ».
+  Régulateur pur (`llm/pacer.py`), testé à froid sur un serveur simulé.
+
 ### Modifié
 
 - **Prompt système embarqué révisé** (649 → 1 200 mots) : définitions calibrées de

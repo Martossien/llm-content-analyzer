@@ -114,6 +114,10 @@ class FakeOpenAIServer(ThreadingHTTPServer):
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
         self.tokens_per_char: float = 0.25
+        self.preemptions: int | None = 0
+        """Valeur servie dans `/metrics` (`vllm:num_preemptions_total`) ; None = pas de page."""
+        self.preemptions_step: int = 0
+        """Incrément du compteur à chaque lecture de `/metrics` (simule un serveur qui préempte)."""
         self.max_model_len: int | None = None
         self.tokenize_calls: int = 0
         self.mode: str = "ok"
@@ -189,6 +193,15 @@ class _Handler(BaseHTTPRequestHandler):
             if self.state.max_model_len is not None:
                 entry["max_model_len"] = self.state.max_model_len
             self._send_json(200, {"object": "list", "data": [entry]})
+        elif self.path == "/metrics" and self.state.preemptions is not None:
+            self._send_text(
+                200,
+                "# HELP vllm:num_preemptions_total Cumulative number of preemption\n"
+                "# TYPE vllm:num_preemptions_total counter\n"
+                f'vllm:num_preemptions_total{{model_name="qwen38"}} {self.state.preemptions}.0\n'
+                'vllm:num_requests_waiting{model_name="qwen38"} 0.0\n',
+            )
+            self.state.preemptions += self.state.preemptions_step
         else:
             self._send_text(404, "not found")
 

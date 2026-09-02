@@ -55,6 +55,17 @@ class LLMConfig:
     """Vide = lue dans `DOCIA_API_KEY` ; `dummy` suffit pour vLLM sans `--api-key`."""
     model: str = "qwen38"
     max_in_flight: int = 8
+    """Requêtes en vol au plus (sémaphore du client) ; en mode adaptatif, le plafond."""
+    adaptive: bool = False
+    """Alimentation adaptative (`llm/pacer.py`) : au lieu d'envoyer `max_in_flight`
+    blocs quoi qu'il arrive, le run régule les **tokens en vol** et cherche le
+    budget qui maximise le débit du serveur — montée tant que le débit suit, recul
+    quand il baisse (autre usage du GPU, cache KV saturé, préemptions vLLM),
+    sonde périodique en palier. Le budget trouvé est mémorisé par serveur et
+    modèle pour le run suivant. Hors : comportement fixe, `max_in_flight` blocs."""
+    adaptive_start_tokens: int = 0
+    """Budget de départ du mode adaptatif (tokens en vol). 0 = le dernier budget
+    mémorisé pour ce serveur et ce modèle, sinon deux blocs (`blocks.block_tokens`)."""
     timeout_s: int = 900
     max_retries: int = 3
     temperature: float = 0.0
@@ -258,6 +269,11 @@ class Config:
             errors.append("llm.timeout_s doit être >= 10")
         if llm.thinking_budget_tokens < 0:
             errors.append("llm.thinking_budget_tokens doit être >= 0")
+        if llm.adaptive_start_tokens < 0:
+            errors.append(
+                "llm.adaptive_start_tokens doit être >= 0 (0 = mémorisé, sinon deux blocs) "
+                f"(valeur: {llm.adaptive_start_tokens})"
+            )
         if llm.reasoning_effort not in ("", "low", "medium", "xhigh"):
             errors.append(f"llm.reasoning_effort inconnu : {llm.reasoning_effort}")
         if llm.max_context_tokens < self.blocks.block_tokens:
@@ -421,6 +437,7 @@ base_url = "http://127.0.0.1:8000/v1"   # open-webui : "http://serveur:8080/api"
 api_key = ""                       # vide = variable DOCIA_API_KEY (ou "dummy" pour vLLM)
 model = "qwen38"
 max_in_flight = 8
+adaptive = false                   # true : régule les tokens en vol pour le meilleur débit (max_in_flight = plafond)
 timeout_s = 900
 max_retries = 3
 max_context_tokens = 262144        # = --max-model-len du serveur (262144 = natif Qwen3.8) ; la sortie est réservée en dessous ; fichier plus grand → segments agrégés

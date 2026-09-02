@@ -497,10 +497,18 @@ class HomeTab(LazyScreen):
             f"blocs {event.blocks_done}/{event.blocks_total}"
         )
         rate = f"{event.files_per_hour:,.0f}".replace(",", " ") if event.files_per_hour else "—"
-        self.run_eta.configure(
-            text=f"écoulé {format_duration(event.elapsed_s)} · {rate} fichiers/h · "
+        text = (
+            f"écoulé {format_duration(event.elapsed_s)} · {rate} fichiers/h · "
             f"restant ≈ {format_duration(event.eta_s)}"
         )
+        if getattr(event, "budget_tokens", 0):
+            debit = event.throughput_tok_s
+            text += (
+                f" · en vol {format_int(event.tokens_in_flight)} / "
+                f"{format_int(event.budget_tokens)} tokens"
+                + (f" · {format_int(int(debit))} tok/s" if debit else "")
+            )
+        self.run_eta.configure(text=text)
 
     def _stop(self) -> None:
         self.app.cancel.set()

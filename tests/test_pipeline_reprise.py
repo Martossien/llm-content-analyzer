@@ -431,7 +431,7 @@ def test_le_redecoupage_se_calcule_sur_la_place_reellement_disponible(
 
     Compteur du builder muet et part par fichier à 1 : c'est le filet de la seconde
     passe qu'on éprouve, pas le découpage calibré du premier coup (`test_policy`)."""
-    from docia.llm.tokenize import ServerTokenCounter
+    from docia.llm.server import ServerTokenCounter
 
     monkeypatch.setattr(ServerTokenCounter, "__call__", lambda _self, _text: None)
     csv_path = corpus(tmp_path, petits=1, gros={"enorme.txt": texte_volumineux(200)})

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from docia.blocks.policy import MIN_PIECE_BUDGET, PIECE_SAFETY, SegmentPolicy, plan_file
 from docia.config import LLMConfig
-from docia.llm.tokenize import ServerTokenCounter, tokenize_url
+from docia.llm.server import ServerTokenCounter, tokenize_url
 from tests.fake_openai import FakeOpenAIServer
 
 

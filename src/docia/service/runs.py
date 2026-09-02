@@ -66,6 +66,12 @@ def _as_int(payload: dict[str, object], key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
+def _as_float(payload: dict[str, object], key: str) -> float | None:
+    """Réel d'un événement du pipeline (None si absent ou inattendu)."""
+    value = payload.get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 _EVENT_KINDS = {
     "start": "info",
     "info": "info",
@@ -114,6 +120,9 @@ def run_campaign(
             elapsed_s=pace.elapsed_s(),
             eta_s=pace.eta_s(files_done, files_error, files_total),
             files_per_hour=_per_hour(pace.rate_per_s(files_done)),
+            tokens_in_flight=_as_int(payload, "tokens_in_flight"),
+            budget_tokens=_as_int(payload, "budget_tokens"),
+            throughput_tok_s=_as_float(payload, "throughput_tok_s"),
         )
         try:
             on_event(event)

@@ -21,16 +21,19 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 from docia.blocks.builder import BuildResult, build_blocks
 from docia.blocks.policy import SegmentPolicy
 from docia.config import Config, LLMConfig
 from docia.db import Database
+from docia.home import docia_home
 from docia.llm.aggregate import aggregate_segments
-from docia.llm.client import BlockTooLongError, LLMClient, LLMError
+from docia.llm.client import BlockTooLongError, LLMClient, LLMError, LLMTransportError
+from docia.llm.pacer import PACER_FILE, Pacer, PacerMemory
 from docia.llm.parse import ParsedBlock, ParseError, parse_block_response
 from docia.llm.schema import load_system_prompt, prompt_hash
-from docia.llm.tokenize import ServerTokenCounter
+from docia.llm.server import ServerTokenCounter
 from docia.models import BlockFile, BlockSpec, FileStatus
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,13 @@ du 30/08 : 202 388 estimés → 266 402 réels) ; o200k/tekken restent à ±15 %
 exact (`/tokenize`) avant envoi et la seconde passe corrigent le reste."""
 RESPLIT_SAFETY = 0.9
 """Après un `BlockTooLongError`, budget de re-découpage = place réelle / ratio × 0.9."""
+PREEMPTIONS_POLL_S = 30.0
+"""Mode adaptatif : intervalle de lecture de `/metrics` (préemptions vLLM)."""
+
+SendOutcome = Literal["done", "skipped", "lost", "too_long", "transport", "error"]
+"""Ce qu'est devenu un bloc envoyé — ce que le régulateur a besoin de savoir :
+`done` compte dans le débit, `transport` (coupure ou délai dépassé après les
+tentatives) est un signal de détresse, le reste est neutre."""
 
 
 def file_cap(cfg: Config, prompt_tokens: int = SYSTEM_PROMPT_RESERVE_TOKENS) -> int:
@@ -243,6 +253,11 @@ class _Run:
         self.second_pass = False
         self.file_cap = 0
         """Plafond exact par fichier (`file_cap`), fixé une fois le contexte servi connu."""
+        self.pacer: Pacer | None = None
+        """Régulateur des tokens en vol (`llm.adaptive`), créé au premier envoi."""
+        self._pacer_key = PacerMemory.key(cfg.llm.base_url, cfg.llm.model)
+        self._preemptions_seen: int | None = None
+        self._preemptions_checked_at = 0.0
         self.engaged: set[int] = set()
         """Fichiers embarqués dans un bloc de ce run (repris ou construit) : ils doivent
         tous finir `done` ou `error`, sinon le run le dit (voir `_finish`)."""
@@ -288,6 +303,13 @@ class _Run:
             "finished": False,
             "cancelled": False,
         }
+        if self.pacer is not None:
+            stats = self.pacer.stats()
+            payload.update(
+                tokens_in_flight=stats.tokens_in_flight,
+                budget_tokens=stats.budget_tokens,
+                throughput_tok_s=stats.throughput_tok_s,
+            )
         payload.update(extra)
         self.on_progress(payload)
 
@@ -594,15 +616,22 @@ class _Run:
         if not specs:
             return
         queue = iter(specs)
+        pacer = self._start_pacer()
 
         async def worker() -> None:
             for spec in queue:
                 if self.cancelled():
                     return
+                if pacer is None:
+                    await self._send_guarded(spec)
+                    continue
+                tokens = spec.tokens_with_margin
+                await pacer.acquire(tokens)
                 try:
-                    await self._send_one(spec)
-                except Exception as exc:  # noqa: BLE001
-                    self._fail_block(spec, f"erreur inattendue : {type(exc).__name__} : {exc}")
+                    outcome = await self._send_guarded(spec)
+                finally:
+                    pacer.release(tokens, ok=outcome == "done", strain=outcome == "transport")
+                await self._watch_preemptions(pacer)
 
         workers = max(1, min(self.cfg.llm.max_in_flight, len(specs)))
         issues = await asyncio.gather(*(worker() for _ in range(workers)), return_exceptions=True)
@@ -611,37 +640,97 @@ class _Run:
                 logger.error("envoi interrompu : %s", issue)
                 self.report.errors.append(f"envoi interrompu : {type(issue).__name__} : {issue}")
 
-    async def _send_one(self, spec: BlockSpec) -> None:
+    async def _send_guarded(self, spec: BlockSpec) -> SendOutcome:
+        """`_send_one` sans jamais laisser passer une exception (voir `_send`)."""
+        try:
+            return await self._send_one(spec)
+        except Exception as exc:  # noqa: BLE001
+            self._fail_block(spec, f"erreur inattendue : {type(exc).__name__} : {exc}")
+            return "error"
+
+    def _start_pacer(self) -> Pacer | None:
+        """Le régulateur du run (`llm.adaptive`), créé au premier envoi : il vit
+        pour les deux passes. Départ : `adaptive_start_tokens`, sinon le budget
+        mémorisé pour ce serveur et ce modèle, sinon deux blocs."""
+        cfg = self.cfg
+        if not cfg.llm.adaptive or self.dry_run:
+            return None
+        if self.pacer is not None:
+            return self.pacer
+        block = cfg.blocks.block_tokens
+        remembered = PacerMemory(docia_home() / PACER_FILE).load(self._pacer_key)
+        start = cfg.llm.adaptive_start_tokens or remembered or 2 * block
+        ceiling = cfg.llm.max_in_flight * max(self.file_cap, block)
+        self.pacer = Pacer(
+            budget_tokens=start,
+            min_tokens=block,
+            max_tokens=ceiling,
+            on_decision=lambda message: self.say(f"alimentation adaptative : {message}"),
+        )
+        origin = (
+            "réglé"
+            if cfg.llm.adaptive_start_tokens
+            else ("mémorisé" if remembered else "deux blocs")
+        )
+        self.say(
+            f"alimentation adaptative : départ à {self.pacer.budget} tokens en vol ({origin}), "
+            f"plafond {ceiling} tokens / {cfg.llm.max_in_flight} requêtes"
+        )
+        return self.pacer
+
+    async def _watch_preemptions(self, pacer: Pacer) -> None:
+        """Toutes les `PREEMPTIONS_POLL_S` : si vLLM a préempté depuis la dernière
+        lecture, c'est que le cache KV déborde — détresse, sans attendre que le
+        débit s'effondre à la fenêtre suivante."""
+        assert self.client is not None
+        now = time.monotonic()
+        if now - self._preemptions_checked_at < PREEMPTIONS_POLL_S:
+            return
+        self._preemptions_checked_at = now
+        total = await self.client.preemptions()
+        if total is None:
+            return
+        seen = self._preemptions_seen
+        self._preemptions_seen = total
+        if seen is not None and total > seen:
+            pacer.distress(f"{total - seen} préemption(s) vLLM")
+
+    def _remember_pace(self) -> None:
+        """Le budget trouvé sert de départ au prochain run sur ce serveur."""
+        if self.pacer is not None and self.pacer.decisions > 0:
+            PacerMemory(docia_home() / PACER_FILE).save(self._pacer_key, self.pacer.budget)
+
+    async def _send_one(self, spec: BlockSpec) -> SendOutcome:
         """Un bloc : contrôles, envoi, persistance de la réponse."""
         assert spec.block_id is not None
         assert self.client is not None
         if self.cancelled():
-            return  # reste `built`, repris au prochain run
+            return "skipped"  # reste `built`, repris au prochain run
         if self._segments_already_analyzed(spec):
             self._skip_analyzed_segments(spec)
-            return
+            return "skipped"
         if not spec.path.is_file():
             self._lose_block(spec, f"bloc introuvable sur le disque : {spec.path}")
-            return
+            return "lost"
         self.db.mark_block_sent(spec.block_id)
         try:
             result = await self.client.analyze_block(spec)
         except BlockTooLongError as exc:
             self._defer_too_long(spec, exc)
-            return
+            return "too_long"
         except OSError as exc:
             if spec.path.is_file():
                 raise  # ce n'est pas la perte du bloc : au traitement générique
             self._lose_block(spec, f"bloc introuvable sur le disque : {exc}")
-            return
+            return "lost"
         except LLMError as exc:
             self._fail_block(spec, f"LLM : {exc}")
-            return
+            return "transport" if isinstance(exc, LLMTransportError) else "error"
         try:
             parsed = parse_block_response(result.content, spec.files)
         except ParseError as exc:
             self._fail_block(spec, f"réponse illisible : {exc}")
-            return
+            return "error"
         for bf in spec.files:
             self._store_file_result(spec.block_id, bf, parsed)
         if parsed.unknown_refs:
@@ -659,6 +748,7 @@ class _Run:
         )
         self.say(message)
         self.emit("block_done", message)
+        return "done"
 
     def _skip_analyzed_segments(self, spec: BlockSpec) -> None:
         """Bloc repris dont tous les segments sont déjà en base : non renvoyé."""
@@ -819,6 +909,7 @@ class _Run:
                 f"erreur (à reprendre) : {', '.join(examples)}{more}"
             )
             self.say(self.report.errors[-1])
+        self._remember_pace()
         self.close("done" if not self.report.errors else "error")
         self.emit("finished", f"run {self.run_id} terminé", finished=True)
         return self.report

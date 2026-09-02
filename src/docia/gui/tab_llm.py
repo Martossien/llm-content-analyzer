@@ -48,6 +48,7 @@ class LLMTab:
         # Exposé en mégaoctets : personne ne saisit 268435456 dans un champ.
         self.batch_mb_var = ctk.StringVar(value=str(c.blocks.batch_bytes // (1024 * 1024)))
         self.share_var = ctk.StringVar(value=str(round(c.blocks.max_file_share * 100)))
+        self.adaptive_var = ctk.BooleanVar(value=c.llm.adaptive)
 
         def cell(r: int, col: int, label: str, widget: Any) -> None:
             ctk.CTkLabel(grid, text=label).grid(
@@ -116,6 +117,16 @@ class LLMTab:
             0,
             "Part du contexte par fichier (%)",
             ctk.CTkEntry(grid, textvariable=self.share_var, width=60),
+        )
+        cell(
+            8,
+            1,
+            "Alimentation adaptative",
+            ctk.CTkCheckBox(
+                grid,
+                text="cherche le meilleur débit (requêtes en vol = plafond)",
+                variable=self.adaptive_var,
+            ),
         )
         self.effort_var = ctk.StringVar(value=c.llm.reasoning_effort or "xhigh")
         cell(
@@ -205,6 +216,7 @@ class LLMTab:
             self.budget_var.get(), cfg.llm.thinking_budget_tokens, minimum=0
         )
         cfg.llm.reasoning_effort = self.effort_var.get()
+        cfg.llm.adaptive = bool(self.adaptive_var.get())
         cfg.scan.smbeagle_path = self.smbeagle_var.get().strip()
         cfg.scan.preserve_access_time = bool(self.preserve_var.get())
         cfg.blocks.block_tokens = parse_int(

@@ -17,7 +17,13 @@ import httpx
 
 from docia.config import LLMConfig
 from docia.llm.schema import response_format
-from docia.llm.tokenize import ServerTokenCounter, parse_token_count, tokenize_url
+from docia.llm.server import (
+    ServerTokenCounter,
+    parse_preemptions,
+    parse_token_count,
+    server_url,
+    tokenize_url,
+)
 from docia.models import BlockSpec, LLMResult, LLMUsage
 
 logger = logging.getLogger(__name__)
@@ -178,6 +184,20 @@ class LLMClient:
             "Authorization": f"Bearer {self.cfg.resolved_api_key()}",
             "Content-Type": "application/json",
         }
+
+    async def preemptions(self) -> int | None:
+        """Compteur cumulé des préemptions vLLM (`GET /metrics`) ; None si le
+        serveur ne l'expose pas ou ne répond pas — jamais bloquant."""
+        url = server_url(self.cfg, "metrics")
+        if url is None:
+            return None
+        try:
+            response = await self._http.get(url, headers=self._headers(), timeout=10.0)
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        return parse_preemptions(response.text)
 
     def token_counter(self) -> ServerTokenCounter:
         """Compteur synchrone pour le builder (`blocks/policy.py`), avec les mêmes

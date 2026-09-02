@@ -1,11 +1,14 @@
-"""Comptage exact des tokens par le serveur (`POST /tokenize`, vLLM).
+"""Endpoints hors API OpenAI du serveur vLLM : `/tokenize` et `/metrics`.
 
-Deux visages d'un même appel : `LLMClient.count_tokens` (asynchrone, contrôle
-avant envoi) et `ServerTokenCounter` (synchrone, pour le builder qui tourne dans
-le fil de l'extraction et décide s'il découpe un fichier). Le serveur ne sait
-pas toujours compter (open-webui, endpoint absent, réseau coupé) : les deux
-rendent alors None, et l'appelant se rabat sur son estimation — on ne bloque
-jamais une campagne sur un comptage.
+Comptage exact : deux visages d'un même appel, `LLMClient.count_tokens`
+(asynchrone, contrôle avant envoi) et `ServerTokenCounter` (synchrone, pour le
+builder qui tourne dans le fil de l'extraction et décide s'il découpe un
+fichier). Le serveur ne sait pas toujours compter (open-webui, endpoint absent,
+réseau coupé) : les deux rendent alors None, et l'appelant se rabat sur son
+estimation — on ne bloque jamais une campagne sur un comptage.
+
+Préemptions : `vllm:num_preemptions_total` dans `/metrics` (Prometheus) — le
+signal le plus sûr qu'on sature le cache KV du serveur (`llm/pacer.py`).
 """
 
 from __future__ import annotations
@@ -24,14 +27,39 @@ COUNT_TIMEOUT_S = 60.0
 mais le serveur peut être occupé à préremplir pour d'autres."""
 
 
-def tokenize_url(cfg: LLMConfig) -> str | None:
-    """URL de l'endpoint `/tokenize` de vLLM (hors préfixe `/v1`), None si le
-    transport ne l'offre pas."""
+def server_url(cfg: LLMConfig, endpoint: str) -> str | None:
+    """URL d'un endpoint vLLM hors préfixe `/v1` (`tokenize`, `metrics`) ; None
+    si le transport ne l'offre pas (open-webui n'expose pas le serveur)."""
     if cfg.transport != "vllm":
         return None
     base = cfg.base_url.rstrip("/")
     root = base[: -len("/v1")] if base.endswith("/v1") else base
-    return f"{root}/tokenize"
+    return f"{root}/{endpoint}"
+
+
+def tokenize_url(cfg: LLMConfig) -> str | None:
+    return server_url(cfg, "tokenize")
+
+
+PREEMPTIONS_METRIC = "vllm:num_preemptions_total"
+
+
+def parse_preemptions(metrics_text: str) -> int | None:
+    """Somme du compteur `vllm:num_preemptions_total` (une ligne par modèle
+    servi) dans une page `/metrics` ; None si le compteur n'y est pas."""
+    total, found = 0.0, False
+    for line in metrics_text.splitlines():
+        if not line.startswith(PREEMPTIONS_METRIC):
+            continue
+        head, _, value = line.rpartition(" ")
+        if head.startswith(PREEMPTIONS_METRIC + "_"):
+            continue  # `_created` et autres dérivés
+        try:
+            total += float(value)
+        except ValueError:
+            continue
+        found = True
+    return int(total) if found else None
 
 
 def parse_token_count(response: httpx.Response) -> int | None:
